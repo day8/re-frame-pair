@@ -116,21 +116,23 @@ Here's the kinds of conversations you can have with Claude.
 
 ## Requirements
 
-The host project is assumed to already be set up for re-frame-10x development — `re-frame-pair` does not itself reconfigure your build.
+**In the host project** (already assumed to be set up for re-frame-10x development — `re-frame-pair` does not reconfigure your build):
 
 - A [re-frame](https://github.com/day8/re-frame) application
 - [`re-frame-10x`](https://github.com/day8/re-frame-10x) loaded as a dev-time preload, with `re-frame.trace.trace-enabled?` set to `true` via `:closure-defines` (this is 10x's own requirement)
 - [`re-com`](https://github.com/day8/re-com) with debug instrumentation enabled in dev (needed for the DOM ↔ source bridge)
 - [shadow-cljs](https://shadow-cljs.github.io/) as the build tool, with nREPL enabled on the dev build
+
+**On your machine** (the developer side):
+
 - [Claude Code](https://docs.claude.com/en/docs/claude-code)
+- [`babashka`](https://babashka.org) — the skill's shell shims run the shared `ops.clj` dispatcher via `bb`. Install: `brew install borkdude/brew/babashka` on macOS; see the [babashka install guide](https://github.com/babashka/babashka#installation) for Linux / Windows.
 
 ## Install
 
 > Not yet published. The first tagged release (`v0.1.0-alpha.1`+) will appear on npm as `@day8/re-frame-pair`.
 
 `re-frame-pair` adds nothing to the host project beyond what 10x and re-com already require. On first connect, the skill injects its runtime helpers into your app over the REPL — no extra deps, no extra preloads, no extra closure-defines attributable to `re-frame-pair`.
-
-**Also required locally:** [`babashka`](https://babashka.org) — the skill's shell shims run the shared `ops.clj` dispatcher via `bb`. On macOS: `brew install borkdude/brew/babashka`. On Linux/Windows: see the babashka install guide.
 
 ### Install the skill in Claude Code
 
