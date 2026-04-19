@@ -15,7 +15,11 @@ With these capabilities, Claude Code can even iteratively perform experiments by
 
 ## Status
 
-**Pre-alpha — design document, not a runnable skill yet.** This repository currently contains only this README and the full design in [`docs/initial-spec.md`](docs/initial-spec.md). No `SKILL.md`, no shell scripts, no published package. The immediate next step is a narrow spike validating the plumbing assumptions (see §8a of the spec) before phased implementation.
+**Pre-alpha — code is written, but not yet exercised against a running re-frame app.** The repository now contains the SKILL.md, the `scripts/runtime.cljs` injection payload, a babashka-based ops dispatcher (`scripts/ops.clj`) behind thin shell shims, the plugin manifest, the npm package manifest, and a GitHub Actions workflow that publishes to npm on tag.
+
+What's **not** done: the spike (see [`STATUS.md`](STATUS.md) and §8a of the spec). Six concrete unknowns need to be verified against a minimal fixture app before calling this beyond pre-alpha — most importantly the 10x epoch-buffer accessor, the live-watch transport, and re-com's `data-rc-src` format.
+
+Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`RELEASING.md`](RELEASING.md) for the release flow.
 
 ## Who this is for
 
@@ -114,9 +118,11 @@ The host project is assumed to already be set up for re-frame-10x development �
 
 ## Install
 
-> Planned. Not yet published to npm / the Claude plugin registry.
+> Not yet published. The first tagged release (`v0.1.0-alpha.1`+) will appear on npm as `@day8/re-frame-pair`.
 
 `re-frame-pair` adds nothing to the host project beyond what 10x and re-com already require. On first connect, the skill injects its runtime helpers into your app over the REPL — no extra deps, no extra preloads, no extra closure-defines attributable to `re-frame-pair`.
+
+**Also required locally:** [`babashka`](https://babashka.org) — the skill's shell shims run the shared `ops.clj` dispatcher via `bb`. On macOS: `brew install borkdude/brew/babashka`. On Linux/Windows: see the babashka install guide.
 
 ### Install the skill in Claude Code
 
