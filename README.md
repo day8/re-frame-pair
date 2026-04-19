@@ -1,12 +1,12 @@
 # re-frame-pair
 
-`re-frame-pair` is a Claude Code Skill which **allows Claude Code to interact with your running [re-frame](https://github.com/day8/re-frame) application, not just its source code.**
+`re-frame-pair` is a Skill which make Claude Code a better pair programmer by allowing it to **interact with your running [re-frame](https://github.com/day8/re-frame) application**.
 
-A coding agent working with just the **static code** is working with a limited perspective. This skill makes Claude Code more capable by giving it access to:
-  - the internal state of the application 
+A coding agent working with just the **static code** is working with a limited perspective. This skill makes Claude Code more capable by giving it read/write access to:
+  - the **internal state** of the application 
   - the **dynamics of your running application**
 
-It has the ability to:
+It can:
 
 - use the REPL
 - obtain functionality from `re-frame-10x`, including trace execution for every *epoch* (the entire 6-domino cascade that occurs in response to an event)
@@ -21,15 +21,23 @@ What's **not** done: the spike (see [`STATUS.md`](STATUS.md) and §8a of the spe
 
 Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`RELEASING.md`](RELEASING.md) for the release flow.
 
-## Who this is for
+## Which stack?
 
-Developers whose apps already use the full day8 stack — **re-frame + re-frame-10x + re-com + shadow-cljs** — and who pair with Claude Code. The skill leans on specifics of that stack (10x's epoch buffer, re-com's `:src (at)` + `data-rc-src`, shadow-cljs's nREPL and hot-reload). Other re-frame setups are out of scope for v1.
+It works for applications using the following technical stack:
+  - re-frame
+  - re-frame-10x
+  - re-com 
+  - shadow-cljs
+  - Claude Code  (and potentially other Ais)
+  
+## Two modes 
 
-## Two modes of changing the app
+Before this Skill, Claude Code would write edits to source files and shadow-cljs hot-reloads them into the running program. 
 
-Traditionally Claude Code edits source files; shadow-cljs hot-reloads them into the running program. `re-frame-pair` adds a second mode: Claude can also make **ephemeral** changes via the REPL — hot-swap an event handler or a subscription, try it, discard if it didn't work. REPL changes last until the next full page reload; source edits stick.
+`re-frame-pair` adds a second mode: Claude can also make **ephemeral** changes via the REPL — hot-swap an event handler or a subscription, try it, discard if it didn't work. 
 
-The REPL also gives Claude read/write access to `app-db`, the registrar, the subscription cache — the running system, not just the code that built it.
+The difference between the two modes is that REPL changes last until the next full page reload whereas source edits stick.
+
 
 ## Examples
 
