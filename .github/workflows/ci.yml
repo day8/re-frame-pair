@@ -1,0 +1,46 @@
+name: ci
+
+# Runs on every push and PR. Smoke-tests the babashka shims and,
+# once wired up, the runtime.cljs unit test suite.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install babashka
+        uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          bb: "latest"
+
+      - name: ops.clj parses and dispatches
+        run: |
+          # Should emit a structured {:ok? false :reason :unknown-subcommand}
+          # result without needing a live nREPL.
+          bb scripts/ops.clj unknown-subcommand 2>&1 | tee out.txt
+          grep -q ":unknown-subcommand" out.txt
+
+      - name: Shell shims are executable and have valid shebangs
+        run: |
+          for f in scripts/*.sh; do
+            test -x "$f" || { echo "$f not executable"; exit 1; }
+            head -1 "$f" | grep -q '^#!/usr/bin/env bash' || { echo "$f missing bash shebang"; exit 1; }
+          done
+
+      - name: Plugin manifest is valid JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('.claude-plugin/plugin.json','utf8'))"
+
+      - name: Package.json is valid JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"
+
+      - name: Documented scripts all exist
+        run: |
+          for f in $(node -e "console.log(require('./.claude-plugin/plugin.json').scripts.join('\n'))"); do
+            test -f "$f" || { echo "Missing: $f"; exit 1; }
+          done

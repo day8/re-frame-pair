@@ -1,0 +1,86 @@
+name: release
+
+# Publishes @day8/re-frame-pair to npm when a semver tag is pushed.
+#
+# Flow:
+#   1. Developer updates version in package.json + .claude-plugin/plugin.json.
+#   2. Developer commits and tags: git tag v0.1.0-alpha.2 && git push --tags
+#   3. This workflow runs: it verifies the tag matches package.json version,
+#      runs the runtime unit tests (if shadow-cljs is available), and
+#      publishes to npm under @day8/re-frame-pair.
+#
+# Secrets required:
+#   NPM_TOKEN  — npm automation token with publish scope on @day8
+#
+# See RELEASING.md for the full checklist.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          scope: "@day8"
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "Tag $TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "Publishing $PKG"
+
+      - name: Verify plugin manifest version matches
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          PLUGIN="$(node -p "require('./.claude-plugin/plugin.json').version")"
+          if [ "$PKG" != "$PLUGIN" ]; then
+            echo ".claude-plugin/plugin.json version ($PLUGIN) does not match package.json ($PKG)"
+            exit 1
+          fi
+
+      - name: Install babashka
+        uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          bb: "latest"
+
+      - name: Smoke-test babashka scripts
+        run: |
+          bb scripts/ops.clj unknown-subcommand 2>&1 | grep -q ":unknown-subcommand"
+          echo "ops.clj dispatcher responds"
+
+      - name: Run CLJS unit tests
+        # Placeholder: wire up shadow-cljs once the fixture + test build are in place.
+        # For now this step is a no-op — runtime_test.cljs exists but has no build.
+        run: |
+          echo "CLJS unit tests: deferred until tests/fixture is wired up."
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: true

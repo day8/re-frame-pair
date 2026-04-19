@@ -1,0 +1,44 @@
+{
+  "name": "re-frame-pair",
+  "version": "0.1.0-alpha.1",
+  "description": "Pair-program with a live re-frame application. A Claude Code Skill for the day8 stack (re-frame + re-frame-10x + re-com + shadow-cljs).",
+  "author": {
+    "name": "day8",
+    "url": "https://github.com/day8"
+  },
+  "homepage": "https://github.com/day8/re-frame-pair",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/day8/re-frame-pair.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "re-frame",
+    "re-frame-10x",
+    "re-com",
+    "shadow-cljs",
+    "clojurescript",
+    "pair-programming",
+    "day8"
+  ],
+  "skills": [
+    "./SKILL.md"
+  ],
+  "scripts": [
+    "./scripts/discover-app.sh",
+    "./scripts/eval-cljs.sh",
+    "./scripts/inject-runtime.sh",
+    "./scripts/dispatch.sh",
+    "./scripts/trace-window.sh",
+    "./scripts/watch-epochs.sh",
+    "./scripts/tail-build.sh",
+    "./scripts/ops.clj",
+    "./scripts/runtime.cljs"
+  ],
+  "requirements": {
+    "babashka": ">=1.3.0"
+  },
+  "status": "pre-alpha"
+}
