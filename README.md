@@ -1,6 +1,6 @@
 # re-frame-pair
 
-`re-frame-pair` is a Skill which make Claude Code a better pair programmer by allowing it to **interact with your running [re-frame](https://github.com/day8/re-frame) application**.
+`re-frame-pair` is a Skill which makes Claude Code a better pair programmer by allowing it to **interact with your running [re-frame](https://github.com/day8/re-frame) application**.
 
 A coding agent working with just the **static code** is working with a limited perspective. This skill makes Claude Code more capable by giving it read/write access to:
   - the **internal state** of the application 
@@ -32,7 +32,7 @@ It works for applications using the following technical stack:
   
 ## Two modes 
 
-Before this Skill, Claude Code would write edits to source files and shadow-cljs hot-reloads them into the running program. 
+Without this Skill, Claude Code writes edits to source files and shadow-cljs hot-reloads them into the running program.
 
 `re-frame-pair` adds a second mode: Claude can also make **ephemeral** changes via the REPL — hot-swap an event handler or a subscription, try it, discard if it didn't work. 
 
