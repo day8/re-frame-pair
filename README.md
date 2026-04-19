@@ -1,8 +1,8 @@
 # re-frame-pair
 
-`re-frame-pair` is a Skill which makes Claude Code a better pair programmer by allowing it to **interact with your running [re-frame](https://github.com/day8/re-frame) application**.
+A `Skill` which makes `Claude Code` a better pair programmer by allowing it to **interact with your running [re-frame](https://github.com/day8/re-frame) application**.
 
-A coding agent working with just the **static code** is working with a limited perspective. This skill makes Claude Code more capable by giving it read/write access to:
+A coding agent working with just the **static code** is working with a limited perspective. This Skill makes Claude Code more capable by giving it read/write access to:
   - the **internal state** of the application 
   - the **dynamics of your running application**
 
@@ -11,7 +11,7 @@ It can:
 - use the REPL
 - obtain functionality from `re-frame-10x`, including trace execution for every *epoch* (the entire 6-domino cascade that occurs in response to an event)
 
-With these capabilities, Claude Code can even iteratively perform experiments by patching parts of the system, retrying events and seeing the results. Every hypothesis becomes more testable.
+With these capabilities, Claude Code can even iteratively perform experiments by patching parts of the system, undoing state, retrying events and seeing the results. 
 
 ## Status
 
@@ -32,9 +32,9 @@ It works for applications using the following technical stack:
   
 ## Two modes 
 
-Without this Skill, Claude Code writes edits to source files and shadow-cljs hot-reloads them into the running program.
+Without this `Skill`, `Claude Code` writes edits to source files and shadow-cljs hot-reloads them into the running program.
 
-`re-frame-pair` adds a second mode: Claude can also make **ephemeral** changes via the REPL — hot-swap an event handler or a subscription, try it, discard if it didn't work. 
+`re-frame-pair` adds a second mode: Claude can also make **ephemeral** changes to application code via the REPL — hot-swap an event handler or a subscription, try it, discard if it didn't work. 
 
 The difference between the two modes is that REPL changes last until the next full page reload whereas source edits stick.
 
