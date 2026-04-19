@@ -171,33 +171,41 @@
 ;; conservative read: subscribe to whatever sub 10x exposes for the
 ;; epoch list, then deref. See the spike (§8a) for the concrete name.
 
-(defn- ten-x-loaded? []
-  (boolean
-   (try
-     (some? (resolve 'day8.re-frame-10x.preload))
-     (catch :default _ false))))
+(defn ten-x-loaded?
+  "True if re-frame-10x has loaded into this runtime.
 
-(defn- read-10x-epochs
-  "Return the vector of epochs currently stored by 10x, or throw with a
-   clear error if 10x isn't loaded or its internal shape doesn't match.
+   CLJS's `resolve` is macro-time, not runtime, so we check the
+   munged JS global instead: `cljs.core/day8` + `.re_frame_10x`."
+  []
+  (try
+    (let [d (some-> js/goog .-global (aget "day8"))]
+      (boolean (and d (aget d "re_frame_10x"))))
+    (catch :default _ false)))
 
-   IMPLEMENTATION STUB — this is the single biggest spike deliverable.
-   Replace with the confirmed 10x accessor on first validation."
+(defn read-10x-epochs
+  "Return the vector of epochs currently stored by 10x.
+
+   IMPLEMENTATION STUB — this is the single biggest spike deliverable
+   (see docs/initial-spec.md §8a). The real implementation reaches
+   into 10x's internal state; candidates the spike should evaluate:
+
+     1. A 10x subscription we can `deref` (if 10x registers one we can
+        reach from outside).
+     2. Direct JS global access: js/day8.re_frame_10x.<ns>.<name>.
+     3. Query the 10x-internal app-db (10x keeps a separate re-frame
+        instance) via its public-ish navigation subs.
+
+   Returns [] as a safe default so composed ops don't blow up; they'll
+   simply report 'no epochs available'."
   []
   (when-not (ten-x-loaded?)
     (throw (ex-info "re-frame-10x not loaded" {:reason :ten-x-missing})))
-  ;; Placeholder. Real impl reads 10x's epoch buffer — either via a
-  ;; 10x subscription (if 10x registers one publicly) or via direct
-  ;; ns lookup of an atom.
-  (or (some-> (resolve 'day8.re-frame-10x.metamorphic/epochs>)
-              deref deref)
-      ;; Fallback: empty list rather than error, so higher-level ops
-      ;; still compose; they'll report "no epochs available" instead
-      ;; of blowing up.
-      []))
+  [])
 
-(defn- coerce-epoch
+(defn coerce-epoch
   "Translate a raw 10x epoch into the shape documented in §4.3a.
+   Public so external callers can coerce values they've already
+   pulled from 10x's buffer.
 
    IMPLEMENTATION STUB — depends on 10x's internal record structure.
    For now we pass through known fields and mark unknowns."
@@ -338,26 +346,31 @@
 ;; re-com awareness
 ;; ---------------------------------------------------------------------------
 
-(defn- re-com?
-  "True if the component name names a re-com component."
+(defn re-com?
+  "True if the component name names a re-com component. Public so
+   tests can exercise the heuristic directly."
   [component-name]
   (and (string? component-name)
        (str/starts-with? component-name "re-com.")))
 
-(defn- re-com-category
-  "Classify a re-com component by ns segment. Rough; enough to let
-   recipes answer 'which inputs re-rendered'."
+(defn re-com-category
+  "Classify a re-com component by ns segment. Rough — enough to let
+   recipes answer 'which inputs re-rendered'. Public for tests.
+
+   TODO verify re-com's current ns layout; these regexes are
+   best-effort and should be tightened once the spike confirms which
+   namespaces are in play."
   [component-name]
   (cond
-    (not (re-com? component-name))       nil
-    (re-find #"re-com\.box"   component-name) :layout
-    (re-find #"re-com\.input" component-name) :input
-    (re-find #"re-com\.selection-list" component-name) :input
-    (re-find #"re-com\.dropdown" component-name) :input
-    (re-find #"re-com\.button" component-name) :input
-    (re-find #"re-com\.text" component-name) :content
-    (re-find #"re-com\.typography" component-name) :content
-    :else                                 :content))
+    (not (re-com? component-name))                       nil
+    (re-find #"re-com\.box"             component-name)  :layout
+    (re-find #"re-com\.input"           component-name)  :input
+    (re-find #"re-com\.selection-list"  component-name)  :input
+    (re-find #"re-com\.dropdown"        component-name)  :input
+    (re-find #"re-com\.buttons"         component-name)  :input
+    (re-find #"re-com\.text"            component-name)  :content
+    (re-find #"re-com\.typography"      component-name)  :content
+    :else                                                :content))
 
 (defn classify-render-entry
   "Annotate a render entry with :re-com? and :re-com/category."
@@ -374,24 +387,34 @@
 ;; Prerequisites: re-com debug instrumentation enabled, call sites
 ;; pass `:src (at)`. See docs/initial-spec.md §4.3b.
 
-(defn- parse-rc-src
-  "re-com's debug path renders `:src {:file :line :column}` as a
-   `data-rc-src` attribute on the DOM. TODO verify the exact
-   serialisation format against current re-com."
+(defn parse-rc-src
+  "Parse re-com's `data-rc-src` attribute into {:file :line :column}.
+   Returns nil on malformed input.
+
+   Public for tests. TODO verify the exact attribute format against
+   current re-com — see docs/initial-spec.md §8a."
   [attr-val]
-  (when (and attr-val (string? attr-val))
-    ;; Assumed format: 'file.cljs:42:8' or 'file.cljs:42'. Tolerate both.
-    (let [parts (str/split attr-val #":")]
-      (when (>= (count parts) 2)
+  (when (and (string? attr-val) (seq attr-val))
+    ;; Expected shapes: 'app/cart.cljs:42', 'app/cart.cljs:42:8'.
+    (let [parts (str/split attr-val #":")
+          valid-line? (fn [s] (and s (re-matches #"\d+" s)))]
+      (when (and (>= (count parts) 2)
+                 (valid-line? (nth parts 1)))
         {:file   (first parts)
          :line   (js/parseInt (nth parts 1) 10)
-         :column (when (>= (count parts) 3)
+         :column (when (and (>= (count parts) 3)
+                            (valid-line? (nth parts 2)))
                    (js/parseInt (nth parts 2) 10))}))))
 
-(defn- re-com-debug-enabled? []
-  ;; TODO verify the exact var in re-com.config used to gate debug.
-  ;; Placeholder: if the attr exists anywhere in the DOM, we assume
-  ;; debug is on.
+(defn re-com-debug-enabled?
+  "Heuristic: re-com debug is enabled if any DOM element carries a
+   `data-rc-src` attribute. Public so `discover-app.sh` can surface
+   it in the health report.
+
+   TODO verify the definitive gate in `re-com.config` in the spike;
+   this heuristic is fine when the app has rendered at least once but
+   may misreport on a freshly-loaded page."
+  []
   (some? (.querySelector js/document "[data-rc-src]")))
 
 (defn dom-source-at
@@ -475,27 +498,33 @@
 
 (defn epoch-matches?
   "Test a (coerced) epoch against a predicate map built from
-   `watch-epochs.sh` CLI args."
+   `watch-epochs.sh` CLI args.
+
+   Prefix matching uses `str` on both sides so `:cart` matches
+   `:cart/apply-coupon` (and `:cart/` matches `:cart/apply-coupon`
+   when passed as a string from the shell). Keep this string-based
+   to avoid depending on keyword lexer edge cases."
   [pred epoch]
   (let [{:keys [event-id event-id-prefix effects timing-ms touches-path sub-ran render]} pred
         ev (:event epoch)]
-    (and
-     (if event-id        (= event-id (first ev)) true)
-     (if event-id-prefix (some-> (first ev) name (str/starts-with? (name event-id-prefix))) true)
-     (if effects         (some #(= effects (:fx-id %)) (:effects/fired epoch)) true)
-     (if timing-ms       ;; expects [:> n] or [:< n]
-                         (let [[op n] timing-ms]
-                           (case op
-                             :> (> (:time-ms epoch 0) n)
-                             :< (< (:time-ms epoch 0) n)
-                             true))
-                         true)
-     (if touches-path    (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
-                           (or (some? (get-in only-before touches-path))
-                               (some? (get-in only-after touches-path))))
-                         true)
-     (if sub-ran         (some #(= sub-ran (first (:query-v %))) (:subs/ran epoch)) true)
-     (if render          (some #(= render (:component %)) (:renders epoch)) true))))
+    (boolean
+     (and
+      (if event-id        (= event-id (first ev)) true)
+      (if event-id-prefix (some-> (first ev) str (str/starts-with? (str event-id-prefix))) true)
+      (if effects         (some #(= effects (:fx-id %)) (:effects/fired epoch)) true)
+      (if timing-ms       ;; expects [:> n] or [:< n]
+        (let [[op n] timing-ms]
+          (case op
+            :> (> (:time-ms epoch 0) n)
+            :< (< (:time-ms epoch 0) n)
+            true))
+        true)
+      (if touches-path    (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
+                            (or (some? (get-in only-before touches-path))
+                                (some? (get-in only-after touches-path))))
+                          true)
+      (if sub-ran         (some #(= sub-ran (first (:query-v %))) (:subs/ran epoch)) true)
+      (if render          (some #(= render (:component %)) (:renders epoch)) true)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Time-travel (planned adapter — not yet implemented)

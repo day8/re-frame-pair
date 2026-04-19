@@ -11,7 +11,9 @@
   (testing "re-com namespaces are detected by the :re-com? helpers"
     (is (true?  (rt/re-com? "re-com.buttons/button")))
     (is (false? (rt/re-com? "app.views/my-panel")))
-    (is (nil?   (rt/re-com? nil))))
+    ;; The predicate should short-circuit on non-string input without
+    ;; throwing. It returns false (not nil) via `and`'s short-circuit.
+    (is (not    (rt/re-com? nil))))
 
   (testing "category inference is best-effort but reasonable"
     (is (= :input   (rt/re-com-category "re-com.buttons/button")))
@@ -59,9 +61,10 @@
       (is (true?  (rt/epoch-matches? {:event-id :cart/apply-coupon} epoch)))
       (is (false? (rt/epoch-matches? {:event-id :cart/other} epoch))))
 
-    (testing "event-id prefix"
-      (is (true?  (rt/epoch-matches? {:event-id-prefix :cart/} epoch)))
-      (is (false? (rt/epoch-matches? {:event-id-prefix :auth/} epoch))))
+    (testing "event-id prefix (string-based, so `:cart` matches `:cart/*`)"
+      (is (true?  (rt/epoch-matches? {:event-id-prefix :cart} epoch)))
+      (is (true?  (rt/epoch-matches? {:event-id-prefix ":cart/"} epoch)))
+      (is (false? (rt/epoch-matches? {:event-id-prefix :auth} epoch))))
 
     (testing "effects present"
       (is (true?  (rt/epoch-matches? {:effects :dispatch} epoch)))
@@ -80,11 +83,11 @@
       (is (false? (rt/epoch-matches? {:render "app.views/other"} epoch))))
 
     (testing "compound predicates are AND-ed"
-      (is (true?  (rt/epoch-matches? {:event-id-prefix :cart/
+      (is (true?  (rt/epoch-matches? {:event-id-prefix :cart
                                       :sub-ran :cart/total
                                       :render "re-com.buttons/button"}
                                      epoch)))
-      (is (false? (rt/epoch-matches? {:event-id-prefix :cart/
+      (is (false? (rt/epoch-matches? {:event-id-prefix :cart
                                       :sub-ran :auth/user}
                                      epoch))))))
 

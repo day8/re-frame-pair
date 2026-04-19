@@ -23,12 +23,108 @@
 ;;;; guessing.
 
 (ns ops
-  (:require [babashka.nrepl-client :as nrepl]
-            [babashka.process :as proc]
-            [clojure.edn :as edn]
+  (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.pprint :as pp]
-            [clojure.string :as str]))
+            [clojure.string :as str])
+  (:import (java.net Socket)
+           (java.io PushbackInputStream)))
+
+;; ---------------------------------------------------------------------------
+;; Minimal bencode + nREPL socket client
+;; ---------------------------------------------------------------------------
+;;
+;; bb doesn't ship a built-in nREPL client and we don't want a classpath
+;; dep just for this. Bencode is a 40-line protocol and nREPL speaks it
+;; directly over TCP; inline is simpler than bolting on Maven deps.
+
+(defn- bencode ^String [v]
+  (cond
+    (integer? v)   (str "i" v "e")
+    (string? v)    (let [bs (.getBytes ^String v "UTF-8")]
+                     (str (alength bs) ":" v))
+    (keyword? v)   (bencode (name v))
+    (map? v)       (str "d"
+                        (apply str (mapcat (fn [[k v]] [(bencode k) (bencode v)])
+                                           (sort-by (fn [[k _]] (if (keyword? k) (name k) (str k))) v)))
+                        "e")
+    (sequential? v) (str "l" (apply str (map bencode v)) "e")
+    (nil? v)       (bencode "")
+    :else          (bencode (pr-str v))))
+
+(defn- read-char [^PushbackInputStream in]
+  (let [b (.read in)]
+    (when (neg? b) (throw (ex-info "unexpected EOF" {})))
+    (char b)))
+
+(defn- bdecode [^PushbackInputStream in]
+  (let [c (read-char in)]
+    (case c
+      \i (let [sb (StringBuilder.)]
+           (loop [ch (read-char in)]
+             (if (= ch \e)
+               (Long/parseLong (.toString sb))
+               (do (.append sb ch) (recur (read-char in))))))
+      \l (loop [acc []]
+           (let [b (.read in)]
+             (cond (neg? b)          (throw (ex-info "unexpected EOF in list" {}))
+                   (= b (int \e))    acc
+                   :else             (do (.unread in b) (recur (conj acc (bdecode in)))))))
+      \d (loop [acc {}]
+           (let [b (.read in)]
+             (cond (neg? b)          (throw (ex-info "unexpected EOF in dict" {}))
+                   (= b (int \e))    acc
+                   :else             (do (.unread in b)
+                                         (let [k (bdecode in)
+                                               v (bdecode in)]
+                                           (recur (assoc acc k v)))))))
+      ;; digit — byte string of length N
+      (let [sb (StringBuilder.)]
+        (.append sb c)
+        (loop [ch (read-char in)]
+          (if (= ch \:)
+            (let [len (Long/parseLong (.toString sb))
+                  buf (byte-array len)]
+              (loop [read 0]
+                (when (< read len)
+                  (let [n (.read in buf read (- len read))]
+                    (when-not (pos? n) (throw (ex-info "EOF in string body" {})))
+                    (recur (+ read n)))))
+              (String. buf "UTF-8"))
+            (do (.append sb ch) (recur (read-char in)))))))))
+
+(defn- nrepl-eval-raw
+  "Open a socket to nREPL at port, send an op eval of code-str, read
+   responses until :status contains \"done\", close, return responses."
+  [port code-str]
+  (with-open [sock (Socket. "127.0.0.1" (int port))]
+    (let [out (.getOutputStream sock)
+          in  (PushbackInputStream. (.getInputStream sock))
+          id  (str (random-uuid))
+          msg (bencode {"op" "eval" "code" code-str "id" id})]
+      (.write out (.getBytes ^String msg "UTF-8"))
+      (.flush out)
+      (loop [responses []]
+        (let [resp (bdecode in)
+              responses' (conj responses resp)
+              done? (and (= id (get resp "id"))
+                         (some #{"done"} (get resp "status" [])))]
+          (if done?
+            responses'
+            (recur responses')))))))
+
+(defn- combine-responses
+  "Collapse a sequence of nREPL responses into a single result map with
+   :value (last), :out (concatenated), :err, :ex, :status."
+  [responses]
+  (reduce (fn [acc r]
+            (cond-> acc
+              (contains? r "value") (assoc :value (get r "value"))
+              (contains? r "out")   (update :out str (get r "out"))
+              (contains? r "err")   (update :err str (get r "err"))
+              (contains? r "ex")    (assoc :ex (get r "ex"))
+              (contains? r "status") (update :status (fnil into #{}) (get r "status"))))
+          {:out "" :err ""}
+          responses))
 
 ;; ---------------------------------------------------------------------------
 ;; Config / env
@@ -79,14 +175,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- jvm-eval
-  "Evaluate a Clojure (JVM-side) form over nREPL and return the parsed
-   result, or a structured error."
+  "Evaluate a Clojure (JVM-side) form over nREPL and return the combined
+   response map: {:value :out :err :ex :status}."
   [form-str]
   (let [port (or (read-port)
-                 (throw (ex-info "nREPL port not found" {:reason :nrepl-port-not-found})))
-        res  (nrepl/eval-expr {:port port :expr form-str})]
-    ;; babashka.nrepl-client returns {:value ... :err ... :out ... :ex ...}
-    res))
+                 (throw (ex-info "nREPL port not found" {:reason :nrepl-port-not-found})))]
+    (combine-responses (nrepl-eval-raw port form-str))))
 
 (defn- cljs-eval
   "Evaluate a ClojureScript form in the connected browser runtime via
@@ -97,9 +191,19 @@
                         (pr-str form-str))]
     (jvm-eval wrapped)))
 
+(defn- safe-edn [s]
+  (try (edn/read-string s) (catch Exception _ s)))
+
 (defn- cljs-eval-value
-  "Like cljs-eval but returns the parsed :value (edn), or throws with a
-   structured reason if the eval errored."
+  "Like cljs-eval but unwraps to the actual CLJS value.
+
+   shadow-cljs's `cljs-eval` returns a JVM map shaped like
+   `{:results [<printed-cljs-value-as-str>]}`. The nREPL response's
+   :value is the *printed* form of that map, so we:
+     1. edn/read the outer :value (JVM map);
+     2. take the last element of :results (the evaluated CLJS form's
+        printed value as a string);
+     3. edn/read that string to recover the CLJS value."
   [build-id form-str]
   (let [res (cljs-eval build-id form-str)]
     (cond
@@ -107,15 +211,26 @@
       (throw (ex-info "nREPL eval error" {:reason :eval-error
                                           :ex (:ex res)
                                           :err (:err res)}))
+
       (str/blank? (str (:value res)))
       nil
+
       :else
-      (try
-        (edn/read-string (str (:value res)))
-        (catch Exception _
-          ;; shadow-cljs's cljs-eval may return a wrapping map whose
-          ;; :results key holds the actual value as a string.
-          (str (:value res)))))))
+      (let [outer (safe-edn (str (:value res)))]
+        (cond
+          ;; Shadow result shape.
+          (and (map? outer) (vector? (:results outer)))
+          (when-let [last-result (peek (:results outer))]
+            (safe-edn last-result))
+
+          ;; Newer shadow may return {:err "..."} on cljs errors.
+          (and (map? outer) (:err outer))
+          (throw (ex-info "cljs eval error"
+                          {:reason :cljs-eval-error
+                           :err (:err outer)}))
+
+          ;; Fallback — assume we already have the value.
+          :else outer)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: discover
@@ -217,20 +332,39 @@
         sync?     (has-flag? rest-args "--sync")
         trace?    (has-flag? rest-args "--trace")]
     (try
-      (let [form (cond
-                   trace? (format "(re-frame-pair.runtime/dispatch-and-collect %s)" event-str)
-                   sync?  (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str)
-                   :else  (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str))
-            value (cljs-eval-value build-id form)]
-        ;; For --trace, the runtime returns a Promise. babashka.nrepl-client
-        ;; will return the JS-object representation. Mark the result.
-        (emit (cond
-                trace? (merge {:ok? true :mode :trace}
-                              (if (map? value) value {:value value}))
-                sync?  (merge {:ok? true :mode :sync} value)
-                :else  (merge {:ok? true :mode :queued} value))))
+      (cond
+        ;; --trace: sync dispatch; wait two animation frames bash-side
+        ;; so Reagent's render traces land; then fetch the epoch by id.
+        ;; The frame wait is bash-side (sleep) rather than runtime-side
+        ;; (js/Promise) because Promise results don't survive the
+        ;; cljs-eval round-trip cleanly.
+        trace?
+        (let [sync-result (cljs-eval-value
+                            build-id
+                            (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))]
+          (if (and (map? sync-result) (:ok? sync-result) (:epoch-id sync-result))
+            (do
+              (Thread/sleep 32)            ; ~2 animation frames at 60fps
+              (let [epoch (cljs-eval-value
+                            build-id
+                            (format "(re-frame-pair.runtime/epoch-by-id %s)"
+                                    (pr-str (:epoch-id sync-result))))]
+                (emit (merge {:mode :trace} sync-result
+                             (when epoch {:epoch epoch})))))
+            (emit (merge {:mode :trace :epoch nil} sync-result))))
+
+        sync?
+        (emit (merge {:mode :sync}
+                     (cljs-eval-value build-id
+                       (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))))
+
+        :else
+        (emit (merge {:mode :queued}
+                     (cljs-eval-value build-id
+                       (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str)))))
       (catch Exception e
-        (emit {:ok? false :reason :dispatch-failed :message (.getMessage e)})))))
+        (emit {:ok? false :reason :dispatch-failed :message (.getMessage e)
+               :ex-data (ex-data e)})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: trace-recent
@@ -252,20 +386,38 @@
 ;; Subcommand: watch (pull-mode)
 ;; ---------------------------------------------------------------------------
 
-(defn- parse-predicate-args [args]
+(defn- ->kw
+  "Coerce a CLI arg to a keyword. Accepts `:foo`, `foo`, or `foo/bar`."
+  [s]
+  (when s
+    (if (str/starts-with? s ":")
+      (keyword (subs s 1))
+      (keyword s))))
+
+(defn- parse-predicate-args
+  "Build a predicate map from CLI args. The event-id-prefix is kept
+   as a plain string so epoch-matches? can do substring matching on
+   the printed form of the event keyword — avoids keyword lexer edge
+   cases like `:cart/` (trailing slash)."
+  [args]
   (loop [[a & more] args pred {}]
     (cond
       (nil? a) pred
-      (= a "--event-id")        (recur (rest more) (assoc pred :event-id (keyword (first more))))
-      (= a "--event-id-prefix") (recur (rest more) (assoc pred :event-id-prefix (keyword (first more))))
-      (= a "--effects")         (recur (rest more) (assoc pred :effects (keyword (first more))))
+      (= a "--event-id")        (recur (rest more) (assoc pred :event-id (->kw (first more))))
+      (= a "--event-id-prefix") (recur (rest more)
+                                       (let [raw (first more)]
+                                         ;; Normalise: prepend ':' if absent, so the string
+                                         ;; matches the printed form of event keywords.
+                                         (assoc pred :event-id-prefix
+                                                (if (str/starts-with? raw ":") raw (str ":" raw)))))
+      (= a "--effects")         (recur (rest more) (assoc pred :effects (->kw (first more))))
       (= a "--timing-ms")       (recur (rest more) (let [[op-str n-str] (re-seq #"[<>]|\d+" (first more))]
                                                      (assoc pred :timing-ms
-                                                            [(case op-str ">" :> "<" :< :>)
+                                                            [(case op-str ">" :> "<" :<)
                                                              (Integer/parseInt n-str)])))
       (= a "--touches-path")    (recur (rest more) (assoc pred :touches-path
                                                            (edn/read-string (first more))))
-      (= a "--sub-ran")         (recur (rest more) (assoc pred :sub-ran (keyword (first more))))
+      (= a "--sub-ran")         (recur (rest more) (assoc pred :sub-ran (->kw (first more))))
       (= a "--render")          (recur (rest more) (assoc pred :render (first more)))
       :else                     (recur more pred))))
 
@@ -294,8 +446,7 @@
 
       :else
       (try
-        (let [pred-form (pr-str pred)
-              start     (System/currentTimeMillis)
+        (let [start     (System/currentTimeMillis)
               last-id   (atom (cljs-eval-value build-id "(re-frame-pair.runtime/latest-epoch-id)"))
               emitted   (atom 0)
               last-hit  (atom (System/currentTimeMillis))
@@ -308,21 +459,26 @@
                               (and (not stream?) (>= @emitted count-n))      [:done :count]
                               (>= elapsed hard-ms)                           [:done :hard-cap]
                               (and stream? (>= idle idle-ms))                [:done :idle]
-                              :else nil)))]
+                              :else nil)))
+              fetch-form (fn [since-id]
+                           ;; One eval per poll: fetches new epochs, filters
+                           ;; them in-runtime against the predicate map,
+                           ;; returns the already-matching epochs as a vector.
+                           (format
+                            "(let [es (re-frame-pair.runtime/epochs-since %s)] (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) es))"
+                            (pr-str since-id)
+                            (pr-str pred)))]
           (loop []
             (Thread/sleep poll-ms)
-            (let [since-form (format "(mapv re-frame-pair.runtime/coerce-epoch (re-frame-pair.runtime/epochs-since %s))"
-                                     (pr-str @last-id))
-                  new-epochs (try (cljs-eval-value build-id since-form) (catch Exception _ []))
-                  matches    (filterv (fn [e]
-                                        (boolean
-                                         (cljs-eval-value
-                                          build-id
-                                          (format "(re-frame-pair.runtime/epoch-matches? %s %s)"
-                                                  pred-form (pr-str e)))))
-                                      new-epochs)]
-              (when (seq new-epochs)
-                (reset! last-id (:id (last new-epochs))))
+            (let [matches (try (cljs-eval-value build-id (fetch-form @last-id))
+                               (catch Exception _ []))
+                  matches (or matches [])]
+              ;; Advance last-id by asking for the current head so we
+              ;; don't refetch already-seen epochs on the next poll.
+              (when-let [head (try (cljs-eval-value build-id
+                                     "(re-frame-pair.runtime/latest-epoch-id)")
+                                   (catch Exception _ nil))]
+                (reset! last-id head))
               (doseq [m matches]
                 (swap! emitted inc)
                 (reset! last-hit (System/currentTimeMillis))
