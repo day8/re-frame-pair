@@ -28,7 +28,7 @@ It works for applications using the following technical stack:
   - re-frame-10x
   - re-com 
   - shadow-cljs
-  - Claude Code  (and potentially other Ais)
+  - Claude Code (and potentially other AIs)
   
 ## Two modes 
 
