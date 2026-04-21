@@ -151,7 +151,7 @@ Typed failures the skill returns rather than raises:
 
 ### 3.7 Versioning and compatibility
 
-Minimum versions enforced by `discover-app.sh`; exact floors TBD on first release:
+Minimum version *enforcement* is plumbed end-to-end (`runtime.cljs/version-report` + `ops.clj/version-failure`), but **floors are currently `nil` across the board** — enforcement is a no-op until the spike (§8a) confirms where each library exposes its version at runtime. `health` exposes `:versions.enforcement-live?` so callers can tell the difference between "no floor violation" and "not actually checking". Exact floors TBD on first release:
 
 | Dep | Min (placeholder) | Why |
 |---|---|---|
@@ -164,11 +164,16 @@ Versions are read via namespace-var lookup at connect. If any is below floor, th
 
 ### 3.8 Multi-runtime handling
 
-shadow-cljs can have several connected browser runtimes on one build (multiple tabs, iframes, a mobile runtime). v0 behaviour:
+shadow-cljs can have several connected browser runtimes on one build (multiple tabs, iframes, a mobile runtime). "Picks one" is fine for *reads*, but not fine when the op mutates — Claude dispatching `[:user/delete 42]` against a random tab is not what the user meant.
 
-- `discover-app.sh` enumerates connected runtimes via shadow's runtime registry and picks one. The specific heuristic (first registered, most recently active, prompt the user) is implementation-deferred — shadow's defaults don't obviously match any single approach. Documented as "picks one runtime".
-- If more than one is connected, reports the count as a warning; Claude surfaces this to the user so they can confirm which tab it's talking to.
-- `runtime/list` and `runtime/select <id>` ops are planned for Phase 1 (§6) — they are not v0.
+v0 behaviour:
+
+- `discover-app.sh` enumerates connected runtimes via shadow's runtime registry. If exactly one is attached, it's used. If more than one is attached, `discover` reports the count and the runtime ids as a structured warning.
+- **Read-only ops** (§4.1, `trace/*` reads, `dom/describe`, etc.) proceed against the first registered runtime. Safe because they can't change state.
+- **Mutating ops** (`dispatch`, `reg-event` / `reg-sub` / `reg-fx` hot-swap, `app-db/reset`, `dom/fire-click-at-src`) **refuse** with `{:ok? false :reason :ambiguous-runtime :runtimes […]}` when multiple runtimes are attached. Claude reports this to the user and asks them to either close unneeded tabs or wait for `runtime/select`.
+- `runtime/list` and `runtime/select <id>` are planned for Phase 1 (§6); until they land, the user's recourse for mutations on multi-tab builds is to close the extras.
+
+This is a deliberately conservative default. Better to refuse than to mutate the wrong runtime silently.
 
 ---
 
@@ -214,7 +219,14 @@ Because re-com is an assumed dep, render entries are classified by a `:re-com?` 
 
 **Dispatch mode default.** Plain `dispatch` is queued so Claude's dispatches land on the same event queue as the app's — no behavioural surprises. `trace/dispatch-and-collect` (§4.3) always uses `dispatch-sync` internally so before/after `app-db` diffs are deterministic.
 
-**Claude-dispatch tagging.** Event vectors are positional and drop metadata, so tagging happens *out-of-band*. The skill's runtime maintains a set of epoch ids it dispatched during the current session: on each `dispatch` op, after the event is queued (or for `dispatch-sync`, after it runs), the skill reads 10x's newest epoch id and records it. `trace/last-claude-epoch` consults this set; user-originated epochs never enter it. This is v1's pragmatic workaround; companion proposal A6 (dispatch provenance in re-frame itself) is the eventual clean path.
+**Claude-dispatch tagging.** Event vectors are positional and drop metadata, so tagging happens *out-of-band*. The skill's runtime maintains a set of epoch ids it dispatched during the current session — but only for `dispatch-sync`:
+
+- For `dispatch-sync`, the epoch is appended to 10x's buffer *during* the synchronous call. Reading `latest-epoch-id` immediately after the call reliably identifies our epoch.
+- For queued `dispatch`, the epoch appears asynchronously on a later tick. Anything reading the buffer between our enqueue and the handler running could see a user-originated event as "latest" and tag it incorrectly. So v1 does **not** tag queued dispatches — `tagged-dispatch!` returns `{:queued? true :epoch-id nil}` and the event simply doesn't enter the claude-dispatched set.
+
+Consequence: `trace/last-claude-epoch` only sees epochs from `dispatch-sync` calls (and from `trace/dispatch-and-collect`, which uses sync internally). Queued dispatches are invisible to it. Callers who need to follow a queued dispatch should use `trace/last-epoch` (origin-agnostic) and correlate by event vector themselves.
+
+Companion proposal A6 (dispatch provenance in re-frame itself) is the eventual clean path for both sync and queued.
 
 ### 4.2a Raw REPL — `repl/eval`
 
@@ -237,7 +249,7 @@ All trace ops read from re-frame-10x's epoch buffer (see §3.2).
 | Op | Source | Purpose |
 |---|---|---|
 | `trace/last-epoch` | 10x epoch buffer, head | Most recent epoch in the buffer regardless of origin — includes user clicks and Claude dispatches alike |
-| `trace/last-claude-epoch` | 10x epoch buffer, filtered by session tag | Most recent epoch whose dispatch was tagged by this skill session (see §4.2). Use when "what I just did" needs to exclude user activity. |
+| `trace/last-claude-epoch` | 10x epoch buffer, filtered by session tag | Most recent epoch from a `dispatch-sync` (or `trace/dispatch-and-collect`) issued by this skill session. Does **not** include queued dispatches — see §4.2 *Claude-dispatch tagging* for why. |
 | `trace/epoch` | 10x epoch buffer, by id | Same shape, for a named epoch |
 | `trace/dispatch-and-collect` | Capture 10x's newest-epoch-id before dispatch; run `dispatch-sync` (its epoch appears immediately, synchronously); record the new head-id via the §4.2 tagging mechanism — that id is *ours* by construction, regardless of what other activity happens in the same frame; wait one animation frame so renders land; read the epoch by id | Fire event, return the epoch record |
 | `trace/recent` | Tail N ms of 10x's buffer | Snapshot the epochs added in the last N ms (pull — contrast with `watch/*` push ops in §4.4) |
@@ -302,7 +314,7 @@ When both are in place, re-com's debug path renders `:src` metadata onto DOM ele
 
 | Op | Mapped form | Purpose |
 |---|---|---|
-| `dom/source-at` | `(.-dataset (js/document.querySelector sel))` → parse `rcSrc` | Given a CSS selector (or "the element the user last clicked"), return the `{:file :line :column}` that produced it |
+| `dom/source-at` | `(.-dataset (js/document.querySelector sel))` → parse `rcSrc`; or `:last-clicked` resolves via the passive capture listener installed at connect (§3.4) | Given a CSS selector *or* the literal `:last-clicked`, return the `{:file :line :column}` that produced the element. The last-clicked path resolves via a document-level `click` listener installed on first connect. Returns `{:ok? false :reason :no-element}` with a hint if nothing has been clicked yet this session. |
 | `dom/find-by-src` | `js/document.querySelectorAll "[data-rc-src*='file:line']"` | Given a source location, return live DOM elements produced there |
 | `dom/fire-click-at-src` | Resolve via `dom/find-by-src`, synthesise click | Interact with a component by source location rather than by CSS path |
 | `dom/describe` | Read `data-rc-src` + component props off the element | Inspect the live state of a specific rendered element |
@@ -369,11 +381,13 @@ Either way, `scripts/watch-epochs.sh` reads the line stream and forwards to Clau
 
 Source edits are permanent and pass through shadow-cljs's compile + push pipeline before they take effect in the browser. If Claude dispatches between edit and push-landing, it interacts with the old code. These ops close that gap.
 
-**Mechanism.** `tail-build.sh` watches shadow-cljs's server stdout for *"Build complete"*. Server-side match says the compile finished — it does *not* say the browser has fetched and re-evaluated the new module. `hot-reload/wait` confirms the browser has the new code via a **probe form** chosen to be sensitive to the edit. Probe-selection heuristics live in `SKILL.md`:
+**Mechanism.** Despite the name, `tail-build.sh` does **not** watch shadow-cljs's server stdout — the implementation is entirely probe-based over nREPL. After a source edit, the skill polls a short CLJS form (the **probe**) whose return value changes once the browser has fetched and re-evaluated the updated module. No actual log tailing happens. The script's name is historical; its job is *wait-for-reload*, not *tail*.
+
+Probe-selection heuristics live in `SKILL.md`:
 
 - If the edit touched a `reg-*` handler: probe the registrar, compare the new handler's function reference against the one captured before the edit. When the reference changes, reload has landed.
 - If the edit touched non-registered code (views, helpers): probe the affected ns by reading a top-level var whose value depends on the new code (the skill picks something unambiguous from the edit).
-- If no reliable probe is available, `hot-reload/wait` falls back to a fixed post-"Build complete" delay (default 300ms) and returns `{:ok? true :soft? true :t <ms>}` — the caller sees the reload as confirmed, but `:soft? true` marks it as a timer-based assumption rather than a verified landing. Claude surfaces the distinction to the user.
+- If no reliable probe is available, `hot-reload/wait` falls back to a fixed 300ms timer (no probe) and returns `{:ok? true :soft? true :t <ms>}` — the caller sees the reload as confirmed, but `:soft? true` marks it as a timer-based assumption rather than a verified landing. Claude surfaces the distinction to the user.
 
 There is no pre-installed "build sentinel" — re-frame-pair has no preload, so nothing in the app re-runs on reload to update a canonical version var. The probe-based confirmation is the substitute. (Companion proposal: expose shadow's runtime build-id as a public API so a generic sentinel becomes available — see Appendix A roadmap.)
 

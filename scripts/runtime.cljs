@@ -246,17 +246,36 @@
   (some-> (read-10x-epochs) last coerce-epoch))
 
 (defn epochs-since
-  "Epochs appended after the given id. Empty if id is the current head."
+  "Epochs appended *after* the given id. Returns a map:
+
+     {:epochs       [...]       ;; coerced epochs
+      :id-aged-out? true|false} ;; did the requested id still exist?
+
+   Semantics:
+     - `id` nil                -> all epochs in buffer, :id-aged-out? false
+     - `id` matches head       -> [], :id-aged-out? false
+     - `id` matches some epoch -> epochs strictly after it, :id-aged-out? false
+     - `id` not found in buffer (e.g. aged out of the ring) -> [],
+                                  :id-aged-out? true
+
+   Returns a map (not a vector with metadata) because edn-via-nREPL
+   discards metadata on the round-trip; callers at the CLI need the
+   aged-out signal in the value itself."
   [id]
-  (let [epochs (read-10x-epochs)
-        after? (atom (nil? id))]
-    (->> epochs
-         (filter (fn [e]
-                   (if @after?
-                     true
-                     (do (when (= id (:id e)) (reset! after? true))
-                         false))))
-         (mapv coerce-epoch))))
+  (let [epochs (read-10x-epochs)]
+    (cond
+      (nil? id)
+      {:epochs (mapv coerce-epoch epochs)
+       :id-aged-out? false}
+
+      (some #(= id (:id %)) epochs)
+      {:epochs (mapv coerce-epoch (rest (drop-while #(not= id (:id %)) epochs)))
+       :id-aged-out? false}
+
+      :else
+      {:epochs []
+       :id-aged-out? true
+       :requested-id id})))
 
 (defn epochs-in-last-ms
   "Epochs appended in the last N ms (pull)."
@@ -299,17 +318,42 @@
 
 (defn tagged-dispatch-sync!
   "`dispatch-sync` the event and record the resulting epoch's id.
-   Returns {:ok? true :epoch-id <id>}."
+
+   Success requires both (a) a new epoch appeared in 10x's buffer and
+   (b) that epoch has a non-nil id. When the 10x buffer is stubbed (see
+   STATUS.md §8a), `latest-epoch-id` returns nil both before and after
+   dispatch — we report that as a *failure* rather than claiming
+   success with a nil id, so users see the real problem.
+
+   Returns either {:ok? true :epoch-id <id> :event ...} on real success
+   or a structured {:ok? false :reason ...} variant otherwise."
   [event-v]
   (let [before-id (latest-epoch-id)]
     (rf/dispatch-sync event-v)
     (let [after-id (latest-epoch-id)]
-      (if (or (nil? before-id) (not= before-id after-id))
+      (cond
+        ;; Real success: 10x appended a fresh epoch.
+        (and after-id (not= before-id after-id))
         (do (swap! claude-epoch-ids conj after-id)
             {:ok? true :epoch-id after-id :event event-v})
-        ;; No new epoch appeared — 10x may not have received the trace
-        ;; event yet, or trace-enabled? is false. Flag it.
-        {:ok? false :reason :no-new-epoch :event event-v}))))
+
+        ;; Before and after are both nil — the 10x accessor isn't
+        ;; returning epochs. Most likely: read-10x-epochs is still
+        ;; stubbed pending the spike.
+        (and (nil? before-id) (nil? after-id))
+        {:ok? false
+         :reason :no-epoch-appeared
+         :event event-v
+         :hint (str "10x's epoch buffer returned no epochs. The accessor "
+                    "is stubbed pre-spike — see STATUS.md §8a. The dispatch "
+                    "was issued, but no trace is visible to re-frame-pair yet.")}
+
+        ;; Dispatched, but 10x didn't append anything new.
+        :else
+        {:ok? false
+         :reason :no-new-epoch
+         :event event-v
+         :hint "dispatch-sync returned, but 10x's epoch head did not advance."}))))
 
 (defn last-claude-epoch
   "Most recent epoch that the skill dispatched in this session."
@@ -417,18 +461,59 @@
   []
   (some? (.querySelector js/document "[data-rc-src]")))
 
+;; Last-clicked capture — passive listener that records the element
+;; most recently clicked anywhere on the page. Installed once by
+;; `install-last-click-capture!` during injection so ops like
+;; `dom/source-at :last-clicked` have something to resolve.
+
+(defonce ^:private last-clicked (atom nil))
+
+(defn install-last-click-capture!
+  "Install a single capturing click listener on document that records
+   the most recently clicked element. Idempotent — calling twice does
+   not double-register (guard via a marker on window)."
+  []
+  (when-not (aget js/window "__rfp_click_capture__")
+    (aset js/window "__rfp_click_capture__" true)
+    (.addEventListener
+     js/document
+     "click"
+     (fn [e] (reset! last-clicked (.-target e)))
+     #js {:capture true :passive true})))
+
+(defn last-clicked-element
+  "Return the DOM element most recently clicked, or nil if nothing has
+   been clicked yet this session. Driven by `install-last-click-capture!`."
+  []
+  @last-clicked)
+
+(defn- selector-or-last-clicked [selector]
+  "If selector is `:last-clicked` (or the string equivalent), return
+   the last-clicked element. Otherwise resolve via querySelector."
+  (cond
+    (or (= selector :last-clicked) (= selector "last-clicked"))
+    (last-clicked-element)
+
+    (string? selector)
+    (.querySelector js/document selector)
+
+    :else nil))
+
 (defn dom-source-at
-  "Given a CSS selector, return the `:src` {:file :line :column}
-   attached by re-com's debug path. Returns a structured result."
+  "Given a CSS selector (or `:last-clicked` / `\"last-clicked\"`),
+   return the `:src` {:file :line :column} attached by re-com's debug
+   path. Returns a structured result."
   [selector]
-  (if-let [el (.querySelector js/document selector)]
+  (if-let [el (selector-or-last-clicked selector)]
     (if-let [src-attr (.getAttribute el "data-rc-src")]
       {:ok? true :src (parse-rc-src src-attr) :selector selector}
       {:ok? true :src nil :selector selector
        :reason (if (re-com-debug-enabled?)
                  :no-src-at-this-element
                  :re-com-debug-disabled)})
-    {:ok? false :reason :no-element :selector selector}))
+    {:ok? false :reason :no-element :selector selector
+     :hint (when (or (= selector :last-clicked) (= selector "last-clicked"))
+             "Nothing clicked this session; interact with the page first, or pass a CSS selector instead.")}))
 
 (defn dom-find-by-src
   "Find live DOM elements whose `data-rc-src` matches file+line.
@@ -548,18 +633,109 @@
 (defn undo-status       [] (not-yet :undo/status))
 
 ;; ---------------------------------------------------------------------------
+;; Version enforcement
+;; ---------------------------------------------------------------------------
+;;
+;; Spec §3.7 says `discover-app.sh` must refuse to connect when a dep
+;; is below its minimum floor. CLJS libs don't have a uniform
+;; "version" convention in-browser, so this is a best-effort read:
+;; try known var names / JS globals, return :unknown when nothing
+;; matches. Floors are nil (no enforcement) until the spike confirms
+;; where version info actually lives for each lib.
+
+(def version-floors
+  "Floor versions from spec §3.7. `nil` means 'no enforcement yet' —
+   the check is plumbed through but does not reject. Fill these in
+   once the read-version-of path is confirmed against each lib."
+  {:re-frame       nil     ; spec placeholder: "1.4"
+   :re-frame-10x   nil     ; spec placeholder: "1.9"
+   :re-com         nil     ; spec placeholder: "2.20"
+   :shadow-cljs    nil})   ; spec placeholder: "2.28"
+
+(defn- read-version-of
+  "Best-effort version lookup per lib. Returns a string like '1.4.0',
+   or :unknown if we can't find it. No library today exposes a uniform
+   version var in-browser; this tries the plausible spots and gives up
+   cleanly."
+  [dep]
+  (let [try-global (fn [& path]
+                     (try
+                       (let [g (some-> js/goog .-global)]
+                         (reduce (fn [acc k] (when acc (aget acc k)))
+                                 g path))
+                       (catch :default _ nil)))]
+    (or (case dep
+          :re-frame-10x (try-global "day8" "re_frame_10x" "VERSION")
+          :re-com       (try-global "re_com" "VERSION")
+          :re-frame     nil     ; no known version var in-browser
+          :shadow-cljs  (try-global "shadow" "cljs" "devtools" "client" "env" "client_info")
+          nil)
+        :unknown)))
+
+(defn- version-below?
+  "Compare observed to floor as dotted-number strings. Returns true if
+   observed is strictly below floor. Returns false if either is
+   :unknown or nil (can't enforce what we can't read)."
+  [observed floor]
+  (and (string? observed) (string? floor)
+       (let [->ints #(mapv (fn [s] (try (Integer/parseInt s) (catch :default _ 0)))
+                           (re-seq #"\d+" %))]
+         (neg? (compare (->ints observed) (->ints floor))))))
+
+(defn version-report
+  "Per-dep version read. Returned shape:
+     {:by-dep            {:re-frame {:observed '1.4.0' :floor '1.4' :ok? true :enforced? true} ...}
+      :all-ok?           true
+      :enforcement-live? false     ;; true iff any dep has BOTH a
+                                   ;;   non-nil floor AND a readable
+                                   ;;   :observed version — otherwise
+                                   ;;   the plumbing is in place but
+                                   ;;   enforcement is effectively a
+                                   ;;   no-op today
+      :note              '...'}
+
+   The code path always executes, but callers should not mistake
+   `:all-ok? true` for 'versions have been checked'. When
+   `:enforcement-live?` is false, `:all-ok?` is vacuously true."
+  []
+  (let [report (reduce
+                (fn [m [dep floor]]
+                  (let [observed (read-version-of dep)
+                        bad?     (version-below? observed floor)]
+                    (assoc m dep {:observed observed
+                                  :floor    floor
+                                  :ok?      (not bad?)
+                                  :enforced? (and (string? observed)
+                                                  (string? floor))})))
+                {}
+                version-floors)
+        live?  (boolean (some :enforced? (vals report)))]
+    {:by-dep            report
+     :all-ok?           (every? :ok? (vals report))
+     :enforcement-live? live?
+     :note              (if live?
+                          "Floors set for at least one dep; enforcement active."
+                          "Floors are nil across the board — enforcement plumbed but effectively a no-op. See spec §8a spike item 'versions'.")}))
+
+;; ---------------------------------------------------------------------------
 ;; Health check
 ;; ---------------------------------------------------------------------------
 
 (defn health
   "One-call summary of the runtime's view of the world. Used by
-   `discover-app.sh` to confirm the environment is healthy."
+   `discover-app.sh` to confirm the environment is healthy.
+
+   Side effect: installs the last-clicked capture listener if it
+   isn't already installed. Idempotent."
   []
+  (install-last-click-capture!)
   {:ok?                 true
    :session-id          session-id
    :ten-x-loaded?       (ten-x-loaded?)
    :trace-enabled?      re-frame.trace/trace-enabled?
    :re-com-debug?       (re-com-debug-enabled?)
+   :last-click-capture? true
    :app-db-initialised? (map? @db/app-db)
+   :versions            (version-report)
    :epoch-count         (epoch-count)
    :claude-epoch-count  (count @claude-epoch-ids)})

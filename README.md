@@ -21,14 +21,16 @@ What's **not** done: the spike (see [`STATUS.md`](STATUS.md) and §8a of the spe
 
 Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`RELEASING.md`](RELEASING.md) for the release flow.
 
-## Which stack?
+## Which technical stack?
 
-It works for applications using the following technical stack:
-  - re-frame
-  - re-frame-10x
-  - re-com 
-  - shadow-cljs
-  - Claude Code (and potentially other AIs)
+Designed for web apps built from the following stack — in pre-alpha, it has not yet been exercised end-to-end against a running app of any shape (see [`STATUS.md`](STATUS.md) for what's verified vs. pending the spike):
+
+- A [re-frame](https://github.com/day8/re-frame) application
+- [`re-frame-10x`](https://github.com/day8/re-frame-10x) loaded as a dev-time preload, with `re-frame.trace.trace-enabled?` set to `true` via `:closure-defines` (this is 10x's own requirement)
+- [`re-com`](https://github.com/day8/re-com) — and for the DOM ↔ source bridge specifically, **re-com's debug instrumentation** must be enabled in dev *and* call sites must pass `:src (at)`. Without both, the `dom/*` ops degrade gracefully (return `nil`) and Claude will say so.
+- [shadow-cljs](https://shadow-cljs.github.io/) as the build tool, with nREPL enabled on the dev build
+
+You don't need to make any changes to your code/project to use it, but you will need [`babashka`](https://babashka.org) installed because the skill's shell shims use it. See the [babashka install guide](https://github.com/babashka/babashka#installation).
   
 ## Two modes 
 
@@ -106,7 +108,7 @@ Here's the kinds of conversations you can have with Claude.
 
 > **You**: When I first enter the Dashboard panel, the global reset button doesn't work. Fix it, then return to the previous state and fire the same event again, iterating until it works.
 >
-> **Claude**: I stepped re-frame-10x's state back to the initial epoch, then patched the panel-level subscription that was wrong. Re-ran the event and now it works. Want me to put the working patch into the source code?
+> **Claude**: I stepped re-frame-10x's state back to the pre-click epoch (noting: any HTTP effects or navigation that fired earlier are *not* reversed — undo only rewinds `app-db`). The panel-level subscription was wrong; I patched it. Re-ran the event, `app-db` now updates as expected. Want me to put the patch into the source code?
 
 ### Commit a change via source edit
 
@@ -114,19 +116,6 @@ Here's the kinds of conversations you can have with Claude.
 >
 > **Claude**: That change has been made to the source code.
 
-## Requirements
-
-**In the host project** (already assumed to be set up for re-frame-10x development — `re-frame-pair` does not reconfigure your build):
-
-- A [re-frame](https://github.com/day8/re-frame) application
-- [`re-frame-10x`](https://github.com/day8/re-frame-10x) loaded as a dev-time preload, with `re-frame.trace.trace-enabled?` set to `true` via `:closure-defines` (this is 10x's own requirement)
-- [`re-com`](https://github.com/day8/re-com) with debug instrumentation enabled in dev (needed for the DOM ↔ source bridge)
-- [shadow-cljs](https://shadow-cljs.github.io/) as the build tool, with nREPL enabled on the dev build
-
-**On your machine** (the developer side):
-
-- [Claude Code](https://docs.claude.com/en/docs/claude-code)
-- [`babashka`](https://babashka.org) — the skill's shell shims run the shared `ops.clj` dispatcher via `bb`. Install: `brew install borkdude/brew/babashka` on macOS; see the [babashka install guide](https://github.com/babashka/babashka#installation) for Linux / Windows.
 
 ## Install
 
@@ -178,7 +167,7 @@ On first use in a session:
 
 1. The skill locates your shadow-cljs nREPL port.
 2. It sends a handful of ClojureScript forms over nREPL to create a `re-frame-pair.runtime` namespace in your app, populated with helpers and readers for re-frame-10x's epoch buffer.
-3. Live-watch ops (`watch/*`) stream matching epochs back to the shell by holding a long-running eval open and polling 10x's buffer at animation-frame cadence. Hot-reload detection tails the shadow-cljs server output and confirms via a probe form.
+3. Live-watch ops (`watch/*`) stream matching epochs back to the shell by holding a long-running eval open and polling 10x's buffer at animation-frame cadence. Hot-reload confirmation is probe-based: after an edit, the skill polls a short CLJS form that changes when the new code has landed in the browser (see [`docs/initial-spec.md`](docs/initial-spec.md) §4.5). The script is named `tail-build.sh` for historical reasons — it does not actually tail the shadow-cljs server log.
 
 On full page refresh, the skill detects that its session sentinel is gone and re-injects automatically.
 

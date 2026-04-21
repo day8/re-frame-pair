@@ -247,21 +247,59 @@
               keyword)
       default-build-id))
 
+(defn- runtime-already-injected?
+  "Fast-path check: if the session sentinel var exists and resolves to
+   a non-nil string, the runtime is already injected in this browser
+   runtime and we can skip re-shipping scripts/runtime.cljs.
+
+   Returns a boolean. Swallows evaluation errors (treating them as
+   'not injected') because the eval *will* throw with an undefined-ns
+   error until the first inject.
+
+   Spec §3.4 — the sentinel is why re-injection only fires on full
+   page refresh, not every connect."
+  [build-id]
+  (try
+    (let [v (cljs-eval-value build-id "re-frame-pair.runtime/session-id")]
+      (and (string? v) (seq v)))
+    (catch Exception _ false)))
+
 (defn- inject-runtime!
-  "Read scripts/runtime.cljs and cljs-eval it in the connected runtime.
+  "Ensure scripts/runtime.cljs is loaded in the connected runtime.
+
+   Fast path: if the session sentinel already exists, skip the source
+   ship and just call health. Slow path (first connect, or after a
+   full page refresh): slurp and cljs-eval the whole file, then call
+   health to confirm.
+
    Returns the health map from `re-frame-pair.runtime/health`."
   [build-id]
-  (let [source (slurp (runtime-cljs-path))]
-    ;; Ship as a single (do ...) block so all forms execute atomically.
-    (cljs-eval build-id source)
-    ;; Then call health to confirm.
-    (cljs-eval-value build-id "(re-frame-pair.runtime/health)")))
+  (when-not (runtime-already-injected? build-id)
+    (let [source (slurp (runtime-cljs-path))]
+      ;; Ship as a single block so all forms execute atomically.
+      (cljs-eval build-id source)))
+  (cljs-eval-value build-id "(re-frame-pair.runtime/health)"))
+
+(defn- version-failure
+  "If the health report's version block names a below-floor dep,
+   return the first offender as a structured error map. Otherwise nil."
+  [health]
+  (let [by-dep (get-in health [:versions :by-dep])]
+    (some (fn [[dep {:keys [observed floor ok? enforced?]}]]
+            (when (and enforced? (not ok?))
+              {:ok? false
+               :reason :version-too-old
+               :dep dep
+               :observed observed
+               :required floor}))
+          by-dep)))
 
 (defn- discover [args]
   (ensure-port!)
   (let [build-id (build-id-from-args args)]
     (try
-      (let [health (inject-runtime! build-id)]
+      (let [health      (inject-runtime! build-id)
+            version-err (version-failure health)]
         (cond
           (not (:ok? health))
           (emit health)
@@ -273,6 +311,9 @@
           (not (:trace-enabled? health))
           (emit {:ok? false :reason :trace-enabled-false
                  :hint "Set re-frame.trace.trace-enabled? to true via :closure-defines."})
+
+          (some? version-err)
+          (emit version-err)
 
           (not (:re-com-debug? health))
           (emit (merge health
@@ -308,11 +349,25 @@
 ;; Subcommand: inject
 ;; ---------------------------------------------------------------------------
 
+(defn- inject-runtime-force!
+  "Like inject-runtime! but *always* re-ships scripts/runtime.cljs
+   regardless of whether the session sentinel already exists. Used by
+   the standalone `scripts/inject-runtime.sh` so skill developers
+   editing runtime.cljs can re-push their changes into a live browser
+   without a full page refresh."
+  [build-id]
+  (let [source (slurp (runtime-cljs-path))]
+    (cljs-eval build-id source))
+  (cljs-eval-value build-id "(re-frame-pair.runtime/health)"))
+
 (defn- inject-op [args]
   (ensure-port!)
   (let [build-id (build-id-from-args args)]
     (try
-      (emit (assoc (inject-runtime! build-id) :build-id build-id))
+      (emit (assoc (inject-runtime-force! build-id)
+                   :build-id build-id
+                   :forced? true
+                   :note "Source re-shipped regardless of sentinel. Use this after editing scripts/runtime.cljs."))
       (catch Exception e
         (emit {:ok? false :reason :inject-failed :message (.getMessage e)})))))
 
@@ -411,14 +466,38 @@
                                          (assoc pred :event-id-prefix
                                                 (if (str/starts-with? raw ":") raw (str ":" raw)))))
       (= a "--effects")         (recur (rest more) (assoc pred :effects (->kw (first more))))
-      (= a "--timing-ms")       (recur (rest more) (let [[op-str n-str] (re-seq #"[<>]|\d+" (first more))]
-                                                     (assoc pred :timing-ms
-                                                            [(case op-str ">" :> "<" :<)
-                                                             (Integer/parseInt n-str)])))
+      (= a "--timing-ms")
+      (let [raw (first more)
+            [op-str n-str] (re-seq #"[<>]|\d+" (or raw ""))
+            op (case op-str ">" :> "<" :< nil)]
+        (if (and op n-str)
+          (recur (rest more)
+                 (assoc pred :timing-ms [op (Integer/parseInt n-str)]))
+          (do
+            (emit {:ok? false :reason :bad-timing-ms
+                   :arg raw
+                   :hint "Expected e.g. '>100' or '<5'. Operators >= / <= / = are not supported."})
+            (System/exit 1))))
       (= a "--touches-path")    (recur (rest more) (assoc pred :touches-path
                                                            (edn/read-string (first more))))
       (= a "--sub-ran")         (recur (rest more) (assoc pred :sub-ran (->kw (first more))))
       (= a "--render")          (recur (rest more) (assoc pred :render (first more)))
+
+      ;; --custom is reserved in the spec as an arbitrary CLJS predicate,
+      ;; but v1 does not implement it (would require shipping user forms
+      ;; into the runtime). Fail loudly rather than silently dropping —
+      ;; users seeing "no matches" with a --custom flag should know why.
+      (= a "--custom")
+      (do
+        (emit {:ok? false
+               :reason :not-yet-supported
+               :flag :--custom
+               :hint (str "Arbitrary CLJS predicate filters are reserved "
+                          "but not yet implemented. Use --event-id-prefix, "
+                          "--effects, --timing-ms, --touches-path, --sub-ran, "
+                          "or --render instead.")})
+        (System/exit 1))
+
       :else                     (recur more pred))))
 
 (defn- flag-value
@@ -461,24 +540,31 @@
                               (and stream? (>= idle idle-ms))                [:done :idle]
                               :else nil)))
               fetch-form (fn [since-id]
-                           ;; One eval per poll: fetches new epochs, filters
-                           ;; them in-runtime against the predicate map,
-                           ;; returns the already-matching epochs as a vector.
+                           ;; One eval per poll: fetch new-epochs-since map,
+                           ;; filter matches in-runtime, return both pieces
+                           ;; so the CLI can see aged-out without a second
+                           ;; round-trip.
                            (format
-                            "(let [es (re-frame-pair.runtime/epochs-since %s)] (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) es))"
+                            "(let [r (re-frame-pair.runtime/epochs-since %s)
+                                   matches (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) (:epochs r))]
+                               {:matches matches
+                                :id-aged-out? (:id-aged-out? r)
+                                :head-id (re-frame-pair.runtime/latest-epoch-id)})"
                             (pr-str since-id)
-                            (pr-str pred)))]
+                            (pr-str pred)))
+              aged-warned? (atom false)]
           (loop []
             (Thread/sleep poll-ms)
-            (let [matches (try (cljs-eval-value build-id (fetch-form @last-id))
-                               (catch Exception _ []))
-                  matches (or matches [])]
-              ;; Advance last-id by asking for the current head so we
-              ;; don't refetch already-seen epochs on the next poll.
-              (when-let [head (try (cljs-eval-value build-id
-                                     "(re-frame-pair.runtime/latest-epoch-id)")
-                                   (catch Exception _ nil))]
-                (reset! last-id head))
+            (let [result    (try (cljs-eval-value build-id (fetch-form @last-id))
+                                 (catch Exception _ nil))
+                  matches   (or (:matches result) [])
+                  head-id   (:head-id result)
+                  aged-out? (:id-aged-out? result)]
+              (when head-id (reset! last-id head-id))
+              (when (and aged-out? (not @aged-warned?))
+                (reset! aged-warned? true)
+                (emit {:ok? true :warning :id-aged-out
+                       :note "The id we were tracking fell off 10x's ring buffer between polls — some matching epochs may have been missed."}))
               (doseq [m matches]
                 (swap! emitted inc)
                 (reset! last-hit (System/currentTimeMillis))

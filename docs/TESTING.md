@@ -69,6 +69,16 @@ Candidate prompts:
 
 Release gates on all four passing.
 
+### Known coverage gap — probe-based reload
+
+`hot-reload/wait`'s probe-based confirmation (§4.5) is *safety-critical* — Claude uses it to gate dispatches after a source edit, and a false positive means Claude interacts with stale code. Yet the only way to genuinely exercise it requires a real browser + real shadow-cljs + real edit + real compile pipeline — i.e. the E2E surface, which runs nightly and on `main`, not per-push.
+
+Mitigation until we can run E2E per-push:
+
+- **Unit-test the probe-selection heuristics** in `scripts/runtime.cljs` (which probe to pick for a `reg-*` edit vs. a view edit vs. no-good-probe-available). Cheap; catches drift in the selection logic without needing a browser.
+- **Soft-confirmation signalling**: when no probe is available, `hot-reload/wait` returns `:soft? true`; Claude is instructed in SKILL.md to surface this to the user rather than trust it as a hard landing confirmation.
+- **Never force release on a broken probe path** — the release workflow currently does not gate on probe-reload E2E because that fixture isn't wired. Cut the first `v0.1.0-beta.1` only after an E2E run covering this path has passed.
+
 ## What's explicitly **not** tested yet
 
 - Connection against a real shadow-cljs build with nREPL enabled
