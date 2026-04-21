@@ -19,7 +19,7 @@ With these capabilities, Claude Code can even iteratively perform experiments by
 
 What's **not** done: the spike (see [`STATUS.md`](STATUS.md) and §8a of the spec). Six concrete unknowns need to be verified against a minimal fixture app before calling this beyond pre-alpha — most importantly the 10x epoch-buffer accessor, the live-watch transport, and re-com's `data-rc-src` format.
 
-Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`RELEASING.md`](RELEASING.md) for the release flow.
+Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for running from a clone without waiting for an npm release; [`RELEASING.md`](RELEASING.md) for the release flow.
 
 ## Which technical stack?
 
@@ -120,6 +120,8 @@ Here's the kinds of conversations you can have with Claude.
 ## Install
 
 > Not yet published. The first tagged release (`v0.1.0-alpha.1`+) will appear on npm as `@day8/re-frame-pair`.
+
+To run it *before* then — straight from a clone, with edits live — see [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md). Symlink the repo into `~/.claude/skills/re-frame-pair/`, install babashka, done.
 
 `re-frame-pair` adds nothing to the host project beyond what 10x and re-com already require. On first connect, the skill injects its runtime helpers into your app over the REPL — no extra deps, no extra preloads, no extra closure-defines attributable to `re-frame-pair`.
 
