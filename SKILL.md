@@ -209,15 +209,23 @@ Use `dom/fire-click-at-src`. Report the resulting epoch. Tell the user if `:src 
 
 ### Experiment loop
 
-The canonical procedure for "iterate on a handler":
+**Why this works:** the same starting `app-db`, the same event, only the code changes — so any difference in the resulting epoch is attributable to *your edit*, nothing else. That makes it a controlled experiment rather than a fix-and-pray. Reach for this loop whenever you're unsure whether a change has the intended effect.
 
-1. `trace/dispatch-and-collect [:foo ...]` → observe baseline.
-2. `undo/status` to see what side effects since the epoch of interest can't be rewound; warn user.
+> **Executability note:** as of this release, the `undo/*` ops below are planned adapters over 10x internals and currently return `{:not-yet-implemented true}` (see `STATUS.md` — §6 Time-travel). Until the 10x undo adapter lands, you can still follow steps 1 → 4 → 5 → 6 (patch and re-dispatch without a true rewind) and reason about the diff, but you can't restore `app-db` to an exact pre-event state. Tell the user this limitation before starting.
+
+Canonical procedure:
+
+1. `trace/dispatch-and-collect [:foo ...]` → observe baseline. Capture the epoch id.
+2. `undo/status` to see what side effects since the epoch of interest can't be rewound (`:http-xhrio`, navigation, landed `:dispatch-later`); warn user.
 3. `undo/step-back` or `undo/to-epoch <id>` → rewind `app-db`.
-4. Modify the handler. If at the REPL, use `reg-event-db`/etc. in a `repl/eval`. If editing source, apply `Edit` then `tail-build.sh`.
-5. `trace/dispatch-and-collect [:foo ...]` → observe the new behaviour.
-6. Compare. Repeat until satisfied.
-7. If the change was REPL-only and the user wants to keep it, *commit via source edit* — REPL changes are lost on full page reload.
+4. **Modify the part of the system you're iterating on.**
+   - *Handlers / subs / fx:* `(rf/reg-event-db :foo ...)` / `(rf/reg-sub :bar ...)` / `(rf/reg-fx :baz ...)` via `repl/eval`. Registrar picks up the new definition immediately.
+   - *Views / helpers (plain `defn`s):* redefine the var via `repl/eval` — e.g. `(defn my-view [] ...)` in the appropriate namespace. Subsequent Reagent re-renders pick up the new fn.
+   - *Permanent change:* `Edit` the source file, then `scripts/tail-build.sh --probe '...'` to wait for the reload to land.
+5. **Verify the patch took before re-dispatching.** `registrar/describe :event :foo` (for a handler) should now return a different form/hash than what you captured at step 1. If the patch didn't land, re-dispatching will silently test the old code.
+6. `trace/dispatch-and-collect [:foo ...]` → observe the new behaviour.
+7. Compare the two epochs. Repeat until satisfied.
+8. If the change was REPL-only and the user wants to keep it, *commit via source edit* — REPL changes are lost on full page reload.
 
 ### "Narrate the next N events"
 
