@@ -285,6 +285,43 @@
          (filter #(>= (or (:t %) 0) cutoff))
          (mapv coerce-epoch))))
 
+(defn find-where
+  "Walk 10x's epoch buffer in reverse chronological order and return
+   the first epoch matching the predicate (a 1-arg fn taking a coerced
+   epoch map), or nil if no match.
+
+   Primary forensic op — 'find the epoch where X happened'. Examples:
+
+     ;; find the epoch where :auth-state flipped to :expired
+     (find-where
+       (fn [e] (= :expired (get-in (:only-after (:app-db/diff e))
+                                   [:auth-state]))))
+
+     ;; find the epoch that fired a 500-status xhrio
+     (find-where
+       (fn [e] (some (fn [fx] (and (= :http-xhrio (:fx-id fx))
+                                    (= 500 (get-in (:value fx) [:status]))))
+                     (:effects/fired e))))
+
+   Most recent match wins — usually what you want for 'how did I get
+   into this state?' post-mortems."
+  [pred]
+  (->> (read-10x-epochs)
+       (map coerce-epoch)
+       reverse
+       (filter pred)
+       first))
+
+(defn find-all-where
+  "Like find-where but returns every matching epoch, newest first. Use
+   when you want the full trajectory of a path — 'every epoch where
+   :cart changed' — not just the most recent transition."
+  [pred]
+  (->> (read-10x-epochs)
+       (map coerce-epoch)
+       reverse
+       (filterv pred)))
+
 ;; ---------------------------------------------------------------------------
 ;; Claude-dispatch tagging
 ;; ---------------------------------------------------------------------------

@@ -95,16 +95,26 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/epoch-by-id "<id>")'` | Named epoch |
 | `trace/dispatch-and-collect` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + wait a frame + return the epoch by id |
 | `trace/recent` | `scripts/trace-window.sh <ms>` | Epochs added in last N ms (pull) |
+| `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
+| `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
 
 ### DOM ↔ source bridge (re-com `:src`)
 
-Prerequisites: re-com debug instrumentation enabled, call sites pass `:src (at)`. If either is missing, ops return `{:src nil :reason ...}` and you should tell the user why.
+**Why this family matters — read first.** When a re-com component is called with `:src (at)`, re-com's debug path attaches a `data-rc-src` attribute to the rendered DOM element. The attribute's value is the **namespace (file path) and line number** of the call site that produced it — e.g. `"app/cart/view.cljs:84"` or `"app/cart/view.cljs:84:8"`. This gives you a direct, two-way bridge between a live DOM element and the exact line of source code that rendered it. You can go DOM → source (*"what file produced this button?"*) and source → DOM (*"which live elements did line 84 render?"*), and trigger interactions against a source location rather than fiddling with CSS selectors. **This is re-frame-pair's crown-jewel code↔runtime link — no other tooling (browser devtools, Chrome DevTools MCP, etc.) provides it.** Reach for it aggressively whenever the conversation is about a visible UI element.
+
+**Prerequisites** — both must hold for a specific element's `:src` to resolve:
+- re-com's debug instrumentation enabled in the dev build (a config flag in `re-com.config`)
+- the component's call site passed `:src (at)`
+
+**Degradation is per-element, not app-wide.** An app with `:src (at)` on most components but not all works fine — the bridge resolves where annotations are present and returns `{:src nil :reason :no-src-at-this-element}` for the few that aren't. When re-com debug is *entirely* off, every element returns `{:src nil :reason :re-com-debug-disabled}`. Tell the user which case they're hitting when it happens.
+
+**Parsing the raw attribute.** You normally don't need to — the structured ops (`dom/source-at`, `dom/describe`) and epoch render entries return `:src` as a pre-parsed map `{:file ... :line ... :column ...}`. If you ever read `data-rc-src` directly via `repl/eval` (e.g. `(.getAttribute el "data-rc-src")`), split the value on `":"` — the first segment is the file path, the second is the line number, and an optional third is the column. Example: `"app/cart/view.cljs:84:8"` → `{:file "app/cart/view.cljs" :line 84 :column 8}`. The `"file:line"` form (no column) is also valid. Caveat: the exact format is a §8a spike item; if the real re-com output differs, update `runtime.cljs/parse-rc-src` and this note together.
 
 | Op | Invocation | Returns |
 |---|---|---|
-| `dom/source-at` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-source-at "#save-button")'` | `{:file :line :column}` for a selector |
-| `dom/find-by-src` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-find-by-src "view.cljs" 84)'` | Live DOM elements for a source line |
-| `dom/fire-click-at-src` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-fire-click "view.cljs" 84)'` | Synthesises a click on that element |
+| `dom/source-at` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-source-at "#save-button")'` or `'(... :last-clicked)'` | `{:file :line :column}` for a CSS selector, or for the most recently clicked element |
+| `dom/find-by-src` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-find-by-src "view.cljs" 84)'` | Live DOM elements rendered by that source line |
+| `dom/fire-click-at-src` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-fire-click "view.cljs" 84)'` | Synthesise a click on the element rendered by that line — lets you exercise a specific call site by its source location, not a CSS path |
 | `dom/describe` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-describe "#save-button")'` | Attrs + `data-rc-src` + attached listeners |
 
 ### Live watch (push-mode)
@@ -187,6 +197,26 @@ Run `trace/dispatch-and-collect` (or read a recent epoch), then narrate the six 
 
 Keep it short. One compact paragraph per domino.
 
+### "Post-mortem — how did we get here?"
+
+**When the user is stuck in a broken state and can't describe how they got there.** Every event since page load is in 10x's buffer (subject to retention — see caveat below). You don't need the user to remember the sequence; you can walk it back.
+
+Procedure:
+
+1. Ask the user what's wrong in *observable* terms ("the save button is grey", "the dashboard is empty"). Resolve any UI references to source via `dom/source-at` if possible.
+2. Identify the **app-db key(s) or sub(s)** that govern the observation. If the user can't, trace the recent render for the offending component and walk its sub inputs.
+3. Use `trace/find-where` to pinpoint the epoch where the governing key last changed to its current (bad) value. Example:
+   ```
+   scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where
+                           (fn [e] (= :expired (get-in (:only-after (:app-db/diff e))
+                                                       [:auth-state]))))'
+   ```
+4. Report that epoch as the culprit: its event vector, the diff, and (crucially) the `:effects/fired` cascade. Often the root-cause dispatch is a child of another event — follow `:epoch-id` links upstream via `trace/epoch <id>`.
+5. If no single epoch is responsible — the state drifted over many events — use `find-all-where` to get the trajectory. Narrate the 3–5 most relevant transitions rather than all of them.
+6. Propose a fix. Usually one of: a handler that shouldn't have fired, a handler that did fire but was wrong, or a missing guard.
+
+**Retention caveat.** 10x's epoch buffer is a ring (bounded size). Events that happened "a long time ago" may have aged out — `epochs-since` will return `:id-aged-out? true` and `find-where` will silently not find the transition. If you suspect retention is the limit, say so to the user explicitly: *"I can see the last N events but the change you're describing happened before that."* Then propose reproducing the path from a known state.
+
 ### "What effects fired?"
 
 Walk `:effects/fired` from the epoch as a tree. Follow `:epoch-id` links into child epochs for `:dispatch*` effects. Flag pending effects (`:dispatch-later` not yet fired, `:http-xhrio` still awaiting response) as "queued, not landed."
@@ -197,11 +227,22 @@ Given a component name or `:src`, find the latest epoch whose `:renders` include
 
 ### "Where in the code does this come from?"
 
-Call `dom/source-at` on the element (or on "the element I last clicked"). Return `{:file :line :column}`.
+Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :line :column}`. If `:src` is nil, report which prerequisite is missing (re-com debug off, or this specific call site wasn't passed `:src (at)`).
+
+### "Understand this component" / "What is this thing?"
+
+When the user points at a UI element (CSS selector, *"the thing I last clicked"*, or a description), chain:
+
+1. `dom/source-at` — resolve to `{:file :line :column}`.
+2. `Read` the source file at that line, with ~30 lines of context.
+3. Narrate: what the component is, what props it takes, which event(s) its interactions dispatch, and (if you can see them nearby) which subscriptions it reads.
+4. If `data-rc-src` isn't resolvable, fall back to `dom/describe` to report tag/class/listeners, and ask the user to point at the source instead.
+
+This is one of the most grounding moves you can make — it turns *"that button"* into *"`re-com/button` at `app/cart/view.cljs:84`, dispatching `[:cart/checkout]`"* in one step.
 
 ### "Fire the button at file:line"
 
-Use `dom/fire-click-at-src`. Report the resulting epoch. Tell the user if `:src (at)` is missing on that call site.
+Use `dom/fire-click-at-src`. Report the resulting epoch. Useful when you want to exercise a specific call site by its source location rather than picking a CSS path — distinctive to re-frame-pair. Tell the user if `:src (at)` is missing on that call site.
 
 ### "Dead code scan"
 
@@ -266,5 +307,5 @@ Common cases:
 - **Experiment, don't speculate.** When an answer isn't obvious, probe at the REPL against live data.
 - **Validate before proposing.** When a hot-swap or suggestion is on the table, compose the form and run it against current state first.
 - **Narrow detail as you go.** Summaries first; drill into a specific epoch, diff, or sub when the user asks.
-- **Cite `:src`.** Whenever you talk about a component that re-rendered, say which file:line when `:src` is available.
+- **Always resolve UI references to `:src` first.** When the user mentions a button, view, panel, or "the thing I clicked", run `dom/source-at` (or read the `:src` field from the relevant epoch's `:renders`) *before* speculating about behaviour. Reporting `re-com/button at app/cart/view.cljs:84` grounds the conversation in a file the user can open; reporting *"probably the Save button somewhere in the profile view"* doesn't. This applies to every render entry in an epoch too — when narrating what re-rendered, cite file:line wherever `:src` is populated.
 - **Surface undo limits.** Before any time-travel experiment, call `undo/status` and tell the user which side effects the undo cannot reverse.

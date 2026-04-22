@@ -97,11 +97,11 @@ Here's the kinds of conversations you can have with Claude.
 >
 > **Claude**: *[at the REPL]* `(->> @re-frame.db/app-db :shopping-cart :items (filter #(<= (:qty %) 0)))` — returns `()`. None right now, but the invariant isn't enforced by the `:cart/add-item` handler. Want me to propose a guard?
 
-### Experiment toward an understanding
+### Post-mortem — how did I get into this state?
 
-> **You**: I notice that sometime in the last few events the "Done" button got disabled. Can you figure out when that happened?  
+> **You**: I notice that sometime in the last few events the "Done" button got disabled. I don't remember which action did it. Can you figure out when that happened?
 >
-> **Claude**: the recent event `[:cart/apply-coupon "EXPIRED"]` turned `:session-state` to `:unauthenticated`. Looks like that's a mistake — want me to fix it?
+> **Claude**: *[walks back through the last ~20 epochs in re-frame-10x's buffer, looking for the transition]* The event `[:cart/apply-coupon "EXPIRED"]` four epochs ago turned `:session-state` from `:authenticated` to `:unauthenticated` — that's what greyed the button. Looks like a bug in the coupon handler, not an intended side-effect. Want me to fix it?
 
 
 ### Iterate against the same starting state
