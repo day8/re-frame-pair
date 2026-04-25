@@ -509,9 +509,17 @@
         :renders           (when render-src (renders-from-traces render-src all-traces))}))))
 
 (defn latest-epoch-id
-  "Id of 10x's newest match, or nil if the buffer is empty."
+  "Id of 10x's newest match, or nil if the buffer is empty / 10x is
+   not loaded.
+
+   Cheap path: 10x already keeps an ordered `:match-ids` vec at
+   `[:epochs :match-ids]` in its app-db; the head of it IS what we
+   want. Avoids `read-10x-epochs`'s full per-match map-rebuild —
+   significant for `watch-epochs.sh`, which polls this at ~100ms cadence
+   and used to construct a fresh 25-entry coerced-match vec every tick."
   []
-  (-> (read-10x-epochs) last match-id))
+  (when-let [a (ten-x-app-db-ratom)]
+    (last (get-in @a [:epochs :match-ids]))))
 
 (defn epoch-count
   "Total matches in 10x's ring buffer."
