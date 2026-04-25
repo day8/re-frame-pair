@@ -1,0 +1,33 @@
+;; Shadow-cljs build for the re-frame-pair spike fixture.
+;;
+;; The :app build is set up exactly the way 10x asks for in its
+;; README:
+;;   - re-frame.trace.trace-enabled? = true (closure-define)
+;;   - goog.DEBUG = true              (default under :optimizations :none)
+;;   - re-com.config.debug? gates on goog.DEBUG, so :src (at) is live
+;;   - day8.re-frame-10x.preload preloaded
+;;
+;; nREPL is on a fixed port (8777) — discover-app.sh will read it
+;; from .shadow-cljs/nrepl.port.
+
+{:deps   true
+ :nrepl  {:port 8777}
+
+ :dev-http
+ {8280 "public"}
+
+ :builds
+ {:app
+  {:target           :browser
+   :output-dir       "public/js/compiled"
+   :asset-path       "/js/compiled"
+   :modules          {:app {:init-fn app.core/init}}
+   :compiler-options
+   ;; re-com.config/debug? is `^boolean js/goog.DEBUG`, not a
+   ;; goog-define — setting goog.DEBUG true also lights up re-com's
+   ;; debug surfaces (including :src (at)).
+   {:closure-defines {re-frame.trace.trace-enabled?        true
+                      day8.re-frame.tracing.trace-enabled? true
+                      goog.DEBUG                           true}}
+   :devtools
+   {:preloads [day8.re-frame-10x.preload]}}}}
