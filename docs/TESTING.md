@@ -4,21 +4,18 @@ Four surfaces need coverage at different fidelities. See `docs/initial-spec.md` 
 
 ## 1. Runtime unit tests (`tests/runtime/`)
 
-**Status: scaffold written, untested against a running CLJS toolchain.**
+**Status: wired to shadow-cljs `:node-test` build. CI runs them per push.**
 
-`runtime_test.cljs` covers pure fns in `scripts/runtime.cljs` — the re-com classifier, `:src` parser, predicate matcher, session-sentinel shape, time-travel stubs. These can run via `shadow-cljs compile test` + `node out/test.js` without a browser or live re-frame app.
+`runtime_test.cljs` covers pure fns in `scripts/re_frame_pair/runtime.cljs` — the re-com classifier (broadened to current re-com layout), the `:src` parser (file:line shape per `re-com.debug.cljs`), the predicate matcher, the cache-key extractor (`extract-query-vs`), the session-sentinel shape, the `coerce-epoch` translation against a synthetic 10x match record, and the `undo-*` ten-x-missing failure paths. They run via shadow-cljs's `:node-test` target — no browser, no live re-frame app.
 
-**To run (once set up):**
+**To run:**
 
 ```bash
-shadow-cljs compile test
-node out/test.js
+npm install
+npm test       # shadow-cljs compile runtime-test && node out/runtime-test.js
 ```
 
-Failing points to flag on first run:
-
-- `re-com-category` uses heuristic regexes over component names. If re-com's current namespace scheme differs, update the regexes.
-- `parse-rc-src` assumes a `"file:line"` or `"file:line:column"` format for `data-rc-src`. Real re-com attribute format needs verification.
+CI runs the same target on every push (see `.github/workflows/ci.yml`'s `runtime-test` job).
 
 ## 2. Bash-shim integration (`tests/shim/`)
 

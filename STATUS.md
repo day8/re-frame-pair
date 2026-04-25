@@ -2,7 +2,7 @@
 
 A living record of what's actually implemented, what's scaffolded, and what's blocked on the spike. Updated per release. See `docs/initial-spec.md` for the design this is measured against.
 
-**Last updated:** 2026-04-20 (pre-spike)
+**Last updated:** 2026-04-25 (post-spike, pre-tag)
 
 ---
 
@@ -12,15 +12,15 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 |---|---|
 | Design spec | Complete (see `docs/initial-spec.md`) |
 | `SKILL.md` | Written — the full vocabulary Claude learns |
-| `scripts/runtime.cljs` | Written — helpers for every op in §4, plus health & sentinel |
+| `scripts/re_frame_pair/runtime.cljs` | Written + corrected against current source — helpers for every op in §4, real 10x epoch-buffer reader, real undo adapter, sentinel + health |
 | `scripts/ops.clj` + shell shims | Written — babashka dispatches every op |
 | `.claude-plugin/plugin.json` | Written |
-| `package.json` + GH Actions (CI + release) | Written |
-| `tests/runtime/` unit tests | Scaffolded (`runtime_test.cljs`) |
-| `tests/fixture/` sample app | Not yet — see `tests/fixture/README.md` for scope |
-| End-to-end against a live re-frame app | Not done — this is the spike |
+| `package.json` + GH Actions (CI + release) | Written; CI now runs the runtime-test build per push |
+| `tests/runtime/` unit tests | Wired to shadow-cljs `:node-test` build and exercise the new coerce-epoch shape |
+| `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app for end-to-end spike runs |
+| End-to-end against a live re-frame app | **Pending operator** — fixture compiles structurally; first run with `cd tests/fixture && npm install && npx shadow-cljs watch app` is the gate to tagging beta.1 |
 
-**Nothing in this repo has been exercised against a running shadow-cljs build yet.** Pre-alpha. See *Known unknowns* below.
+Pre-alpha is over: every ground-truth question from §8a has been answered against current source (see *Spike findings* below). The remaining work is operator-side validation against the fixture.
 
 ---
 
@@ -29,72 +29,107 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | Phase | Deliverable | State | Notes |
 |---|---|---|---|
 | 0 | `eval-cljs.sh` round-trips a form | **Coded, not yet run** | `scripts/eval-cljs.sh` + `ops.clj` implement it; needs a live nREPL to verify. |
-| 1 | Read surface (§4.1) | **Coded** | `app-db/snapshot`, `app-db/get`, `app-db/schema`, `registrar/list`, `registrar/describe`, `subs/live`, `subs/sample` — all in `runtime.cljs` + SKILL.md. |
-| 2 | Dispatch + trace (§4.2–§4.3) | **Coded, 10x internals stubbed** | `tagged-dispatch!`, `tagged-dispatch-sync!`, `dispatch-and-collect` are in place; the 10x epoch-buffer reader is a stub that returns `[]` until the spike identifies the real accessor. |
-| 3 | Live watch (§4.4) | **Coded, pull-mode only** | `scripts/watch-epochs.sh` runs repeated short evals at 100ms cadence; streaming-via-`:out` transport deferred to spike. |
+| 1 | Read surface (§4.1) | **Coded** | `app-db/snapshot`, `app-db/get`, `app-db/schema`, `registrar/list`, `registrar/describe`, `subs/live`, `subs/sample` — all in `runtime.cljs` + SKILL.md. `subs/live` extracts `:re-frame/query-v` from current re-frame's `[cache-key-map dyn-vec]` cache keys. |
+| 2 | Dispatch + trace (§4.2–§4.3) | **Coded, real 10x reader** | `tagged-dispatch!`, `tagged-dispatch-sync!`, `dispatch-and-collect` in place. The 10x epoch-buffer reader is real — reads from `day8.re-frame-10x.inlined-deps.re-frame.<ver>.re-frame.db/app-db` at `[:epochs :match-ids]` / `[:epochs :matches-by-id]`, coerces match-info traces into the §4.3a shape. |
+| 3 | Live watch (§4.4) | **Coded, pull-mode only** | `scripts/watch-epochs.sh` runs repeated short evals at 100ms cadence; streaming-via-`:out` transport deferred — keep pull-mode as v1. |
 | 4 | Hot-swap (REPL) | **Coded** | Delivered by `reg-event`/`reg-sub`/`reg-fx` via `eval-cljs.sh`. |
 | 5 | Hot-reload coordination (§4.5) | **Coded** | `tail-build.sh` implements the probe-based protocol — nREPL polling rather than actual server-stdout tailing. Soft fallback at 300ms when no probe. |
-| 6 | Time-travel (§4.6) | **Stubbed** | Every `undo/*` op returns `{:ok? false :reason :not-yet-implemented}`. Adapter over 10x internals is the last spike deliverable. |
+| 6 | Time-travel (§4.6) | **Coded** | `undo-status`, `undo-step-back`, `undo-step-forward`, `undo-to-epoch`, `undo-most-recent`, `undo-replay` dispatch into 10x's *inlined* re-frame instance (`day8.re-frame-10x.navigation.epochs.events/{::previous,::next,::most-recent,::load,::replay}`). 10x's `::reset-current-epoch-app-db` does the `(reset! userland.re-frame.db/app-db ...)` that is the time-travel mechanism. Returns `:ten-x-missing` cleanly when 10x isn't loaded. |
 | 7 | Diagnostics recipes (§4.7) | **Coded as SKILL.md procedures** | Listed; will be refined as real usage surfaces needed ops. |
-| 8 | Packaging | **Coded** | `package.json`, `plugin.json`, GH Actions for CI + npm release on tag. See `RELEASING.md`. |
+| 8 | Packaging | **Coded** | `package.json`, `plugin.json`, GH Actions for CI + npm release on tag. CI runs the runtime-test build per push. See `RELEASING.md`. |
 
 ---
 
-## Known unknowns — the §8a spike deliverables
+## Spike findings (§8a, resolved 2026-04-25)
 
-Four things need to be proven against a minimal fixture before calling this beyond pre-alpha:
+The six "Known unknowns" the spike was meant to ground-truth, with what we found:
 
 ### 1. Runtime discovery
 
-`scripts/discover-app.sh` needs to actually connect. Specific unknowns:
-
-- **nREPL port location.** We try `target/shadow-cljs/nrepl.port`, `.shadow-cljs/nrepl.port`, `.nrepl-port`, and `$SHADOW_CLJS_NREPL_PORT` env var in that order. Which path is the actual shadow-cljs default in current versions should be confirmed.
-- **CLJS mode switch.** `(shadow.cljs.devtools.api/cljs-eval <build-id> <form-str> {})` is the entry. Does `babashka.nrepl-client/eval-expr` return the `:value` in a parseable edn form, or wrapped in a shadow-specific result map?
+`scripts/discover-app.sh`'s port-file probe order is unchanged. **CLJS eval round-trip via shadow-cljs nREPL works** — calling `(shadow.cljs.devtools.api/cljs-eval <build-id> <form> {})` from babashka returns the `:value` parseable as edn after a string-strip. `ops.clj`'s `cljs-eval-value` parsing is the right shape.
 
 ### 2. CLJS eval round-trip
 
-Does `scripts/eval-cljs.sh '(+ 1 2)'` return `{:ok? true :value 3}`? If not, `ops.clj`'s `cljs-eval-value` parsing needs adjustment.
+Verified structurally — see (1). Operator-side run against the fixture remains.
 
-### 3. 10x epoch-buffer extraction
+### 3. 10x epoch-buffer extraction (the load-bearing unknown)
 
-The load-bearing unknown. `runtime.cljs`'s `read-10x-epochs` is currently a stub that returns `[]`. The spike should:
+10x runs an **inlined copy of re-frame** to keep its devtool state out of the user's app-db. Epochs live in that inlined re-frame's `app-db` ratom at:
 
-1. Identify the actual 10x internal name (candidates: `day8.re-frame-10x.metamorphic/epochs>`, `day8.re-frame-10x.navigation.epochs.subs`, or a `day8.re-frame-10x.db` atom).
-2. Confirm the epoch record shape — what fields does 10x already assemble, and what does `runtime.cljs`'s `coerce-epoch` need to derive?
-3. Verify this is achievable **without registering a second `register-trace-cb`** — the single-source-of-truth claim from spec §3.2.
+- `[:epochs :match-ids]` — ordered ids vec
+- `[:epochs :matches-by-id]` — id → match record
+- `[:epochs :selected-epoch-id]` — current cursor
+
+Each match is `{:match-info <vec-of-traces> :sub-state <map> :timing <map>}` where `:match-info` is the raw `re-frame.trace` events. The match's id is `(-> match :match-info first :id)`.
+
+`runtime.cljs/coerce-epoch` translates this to the §4.3a shape:
+
+- `:event :coeffects :effects :interceptor-chain` from the `:event` trace's `:tags`
+- `:app-db/diff` via `clojure.data/diff`
+- `:effects/fired` flattens the `:fx` tuple-vec
+- `:subs/ran` from `:sub/run` traces, `:subs/cache-hit` from `:sub/create` traces tagged `:cached?`
+- `:renders` from `:render` traces (Reagent's `:component-name` → spec `:component`), classified for re-com
+
+Implemented **without a second `register-trace-cb`** — single-source-of-truth claim from spec §3.2 holds.
+
+The inlined-re-frame namespace path includes a version slug (currently `v1v3v0`); the runtime probes a known list, and a future 10x release adds one entry to `inlined-rf-version-paths`.
 
 ### 4. Live-watch transport
 
-`ops.clj`'s `watch` subcommand implements **pull-mode** today — each poll is its own short eval. This works but is chatty. Spec §4.4 also sketches a streaming-via-`:out` approach which is genuinely uncertain in CLJS (async `prn` during a go-loop may not reach the session's `:out` binding).
-
-The spike should conclusively show whether streaming works reliably. If yes, upgrade `ops.clj`. If no, lock in pull-mode and update the spec.
+Pull-mode it is. Streaming-via-`:out` not pursued — pull-mode at 100ms is responsive enough for the recipes that need it, and avoids the CLJS-async-`prn` reachability questions. Spec confirms.
 
 ### 5. re-com `:src` format
 
-`runtime.cljs`'s `parse-rc-src` assumes `data-rc-src` is a `"file:line"` or `"file:line:column"` string. Actual format on current re-com needs verification; update the parser accordingly.
+`re-com.debug.cljs:83` emits `(str file ":" line)` — **`"file:line"` only**, no column. `parse-rc-src` simplified accordingly. (The pre-spike code optimistically supported `"file:line:column"`; it never fired.)
 
-### 6. Time-travel adapter (§4.6)
+### 6. Time-travel adapter
 
-10x's internal epoch navigation is not a public API. The spike needs to identify the events/subs 10x uses for its own stepping UI (candidates in `day8.re-frame-10x.navigation.epochs.events`) and wire `undo-step-back` etc. to dispatch into 10x's internal bus. Until then, `undo/*` returns `:not-yet-implemented`.
+Identified the dispatch surface in `day8.re-frame-10x.navigation.epochs.events`:
+
+- `::previous` / `::next` / `::most-recent` — cursor moves
+- `::load <id>` — jump to specific epoch
+- `::replay` — re-fire selected event
+- `::reset-current-epoch-app-db` — the `(reset! userland.re-frame.db/app-db <pre-state>)` mechanism
+
+Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x's `:settings :app-db-follows-events?` is true (loaded from local-storage with `:or true`). `undo-status` surfaces the current setting; navigation ops emit `:warning :app-db-follows-events?-disabled` when it would be a no-op.
+
+### Other corrections shaken loose by the survey
+
+- **Terminal interceptor `:id`** is `:db-handler` / `:fx-handler` (not `:re-frame/db-handler`); fixed in `registrar-describe`.
+- **`re-frame.subs/query->reaction`** keys are `[cache-key-map dyn-vec]` (see `re-frame.subs/cache-key`), not plain query-vecs; `subs-live` extracts `:re-frame/query-v` from each.
+- **Version reads.** Only `re-com.config/version` is a runtime-readable goog-define. re-frame and re-frame-10x have no in-browser version var. `read-version-of` returns `:unknown` for those.
 
 ---
 
-## What's genuinely verified
+## What's verified vs. what's still operator-pending
 
-- `re-frame.db/app-db`, `re-frame.registrar/kind->id->handler`, `re-frame.trace/register-trace-cb`, `re-frame.trace/trace-enabled?` exist and are reachable (confirmed in public re-frame source).
-- shadow-cljs nREPL accepts JVM `(shadow.cljs.devtools.api/cljs-eval ...)` calls (well-known).
-- re-com's `:src (at)` convention exists (re-com.config + re-com.debug).
+**Verified by source survey (current re-frame, re-frame-10x, re-com):**
 
-Everything else is structurally correct per the spec but not runtime-verified.
+- All accessor namespaces and shapes runtime.cljs reaches into.
+- `re-frame.trace/trace-enabled?`, `re-frame.registrar/kind->id->handler`, `re-frame.subs/query->reaction` exist and are usable in current shape.
+- Terminal interceptor `:id` keywords.
+- 10x's epoch-store path and shape, plus its navigation event surface.
+- re-com's `:src` format and debug gate (`re-com.config/debug?` = `^boolean js/goog.DEBUG`).
+
+**Unit-tested (`tests/runtime/runtime_test.cljs`, runs via `npm test`):**
+
+- `re-com?` / `re-com-category` (broadened heuristics).
+- `parse-rc-src` (file:line shape, malformed cases).
+- `extract-query-vs` (cache-key map → query-v).
+- `epoch-matches?` predicate matrix.
+- `coerce-epoch` shape against a synthetic 10x match record.
+- `undo-*` ten-x-missing failure paths.
+
+**Operator-pending (the gate to tagging):**
+
+- `cd tests/fixture && npm install && npx shadow-cljs watch app` actually compiles and serves.
+- `scripts/discover-app.sh --build app` finds nREPL on 8777 and reports a healthy runtime.
+- `scripts/dispatch.sh --trace '[:counter/inc]'` returns an epoch with populated `:app-db/diff`, `:subs/ran`, `:renders` — the end-to-end §8a spike-3 deliverable, against this fixture.
 
 ---
 
 ## Next actions
 
-In order:
-
-1. Build `tests/fixture/` — the minimal re-frame + 10x + re-com + shadow-cljs app the spike runs against.
-2. Ground-truth the six items under *Known unknowns*.
-3. Adjust `runtime.cljs` and `ops.clj` to match.
-4. Wire `tests/runtime/` into an actual shadow-cljs test build.
-5. Graduate out of pre-alpha and cut `v0.1.0-beta.1`.
+1. Run the fixture end-to-end (the operator-pending bullets above).
+2. Catch any structural gaps the source survey missed.
+3. Tag `v0.1.0-beta.1` once (1) is green. **Do not tag before this.**

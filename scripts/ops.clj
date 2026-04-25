@@ -150,7 +150,11 @@
             port-file-candidates)))
 
 (defn- runtime-cljs-path []
-  (.getPath (io/file (.getParent (io/file *file*)) "runtime.cljs")))
+  ;; Lives at scripts/re_frame_pair/runtime.cljs — canonical
+  ;; ns-to-path layout for the `re-frame-pair.runtime` namespace, so
+  ;; shadow-cljs can compile it for the runtime-test build alongside
+  ;; the inject path.
+  (.getPath (io/file (.getParent (io/file *file*)) "re_frame_pair" "runtime.cljs")))
 
 ;; ---------------------------------------------------------------------------
 ;; Output helpers
@@ -264,20 +268,34 @@
       (and (string? v) (seq v)))
     (catch Exception _ false)))
 
-(defn- inject-runtime!
-  "Ensure scripts/runtime.cljs is loaded in the connected runtime.
+(defn- ensure-injected!
+  "Idempotently ensure scripts/runtime.cljs is loaded in the connected
+   browser runtime. Returns true if it had to (re-)ship the source,
+   false if the runtime was already present.
 
-   Fast path: if the session sentinel already exists, skip the source
-   ship and just call health. Slow path (first connect, or after a
-   full page refresh): slurp and cljs-eval the whole file, then call
-   health to confirm.
+   Fast path: a single nREPL round-trip that reads the session sentinel.
+   Slow path (first connect, or after a full page refresh): slurp and
+   cljs-eval the whole file as one block.
 
-   Returns the health map from `re-frame-pair.runtime/health`."
+   Every op that calls into re-frame-pair.runtime/* should call this
+   first so a browser refresh doesn't silently break dispatch / eval /
+   watch — the namespace would otherwise be undefined until the operator
+   manually re-ran discover. Callers should surface a `:reinjected? true`
+   flag on the response when this returns true (don't auto-recover
+   silently)."
   [build-id]
-  (when-not (runtime-already-injected? build-id)
-    (let [source (slurp (runtime-cljs-path))]
+  (if (runtime-already-injected? build-id)
+    false
+    (do
       ;; Ship as a single block so all forms execute atomically.
-      (cljs-eval build-id source)))
+      (cljs-eval build-id (slurp (runtime-cljs-path)))
+      true)))
+
+(defn- inject-runtime!
+  "Ensure scripts/runtime.cljs is loaded and return the health map.
+   Used by `discover` for its full health report."
+  [build-id]
+  (ensure-injected! build-id)
   (cljs-eval-value build-id "(re-frame-pair.runtime/health)"))
 
 (defn- version-failure
@@ -335,15 +353,18 @@
 (defn- eval-op [args]
   (ensure-port!)
   (when (empty? args) (die :missing-form :hint "usage: eval '<form>' [--build :app]"))
-  (let [form     (first args)
-        build-id (build-id-from-args (rest args))]
+  (let [form        (first args)
+        build-id    (build-id-from-args (rest args))
+        reinjected? (ensure-injected! build-id)]
     (try
-      (emit {:ok? true :value (cljs-eval-value build-id form)})
+      (emit (cond-> {:ok? true :value (cljs-eval-value build-id form)}
+              reinjected? (assoc :reinjected? true)))
       (catch Exception e
-        (emit {:ok? false
-               :reason (or (:reason (ex-data e)) :eval-error)
-               :message (.getMessage e)
-               :data (dissoc (ex-data e) :reason)})))))
+        (emit (cond-> {:ok? false
+                       :reason (or (:reason (ex-data e)) :eval-error)
+                       :message (.getMessage e)
+                       :data (dissoc (ex-data e) :reason)}
+                reinjected? (assoc :reinjected? true)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: inject
@@ -378,48 +399,69 @@
 (defn- has-flag? [args flag]
   (boolean (some #(= % flag) args)))
 
+(defn- partition-dispatch-args
+  "Split dispatch.sh args into [event-str other-args]. The event-str is
+   the first arg starting with `[` (the edn event-vec); everything else
+   is treated as a flag. Order-independent so
+
+     dispatch.sh '[:ev]' --trace
+     dispatch.sh --trace '[:ev]'
+     dispatch.sh --trace '[:ev]' --build=app
+
+   all parse identically."
+  [args]
+  (let [{events true others false} (group-by #(str/starts-with? % "[") args)]
+    [(first events) (concat others (rest events))]))
+
+;; The bash-side wait between tagged-dispatch-sync! and collect-after-dispatch.
+;; Mirror runtime.cljs's `trace-debounce-settle-ms`: trace's ~50ms callback
+;; debounce + 1 render frame for `:render` traces to land. 80ms is a
+;; comfortable upper bound.
+(def ^:private trace-collect-wait-ms 80)
+
 (defn- dispatch-op [args]
   (ensure-port!)
-  (when (empty? args) (die :missing-event :hint "usage: dispatch '[:ev/id args...]' [--sync] [--trace]"))
-  (let [event-str (first args)
-        rest-args (rest args)
-        build-id  (build-id-from-args rest-args)
-        sync?     (has-flag? rest-args "--sync")
-        trace?    (has-flag? rest-args "--trace")]
-    (try
-      (cond
-        ;; --trace: sync dispatch; wait two animation frames bash-side
-        ;; so Reagent's render traces land; then fetch the epoch by id.
-        ;; The frame wait is bash-side (sleep) rather than runtime-side
-        ;; (js/Promise) because Promise results don't survive the
-        ;; cljs-eval round-trip cleanly.
-        trace?
-        (let [sync-result (cljs-eval-value
-                            build-id
-                            (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))]
-          (if (and (map? sync-result) (:ok? sync-result) (:epoch-id sync-result))
-            (do
-              (Thread/sleep 32)            ; ~2 animation frames at 60fps
-              (let [epoch (cljs-eval-value
-                            build-id
-                            (format "(re-frame-pair.runtime/epoch-by-id %s)"
-                                    (pr-str (:epoch-id sync-result))))]
-                (emit (merge {:mode :trace} sync-result
-                             (when epoch {:epoch epoch})))))
-            (emit (merge {:mode :trace :epoch nil} sync-result))))
+  (let [[event-str rest-args] (partition-dispatch-args args)]
+    (when-not event-str
+      (die :missing-event :hint "usage: dispatch '[:ev/id args...]' [--sync] [--trace] [--build=<id>]"))
+    (let [build-id    (build-id-from-args rest-args)
+          sync?       (has-flag? rest-args "--sync")
+          trace?      (has-flag? rest-args "--trace")
+          reinjected? (ensure-injected! build-id)
+          tag-reinj   (fn [m] (cond-> m reinjected? (assoc :reinjected? true)))]
+      (try
+        (cond
+          ;; --trace: sync dispatch, capture before-id, wait past
+          ;; trace-debounce, then collect+tag the new epoch in a second
+          ;; eval. We do the wait bash-side because dispatch-and-collect
+          ;; (the Promise version) doesn't round-trip cleanly through
+          ;; cljs-eval.
+          trace?
+          (let [sync-result (cljs-eval-value
+                              build-id
+                              (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))]
+            (if (and (map? sync-result) (:ok? sync-result))
+              (do
+                (Thread/sleep trace-collect-wait-ms)
+                (let [collected (cljs-eval-value
+                                  build-id
+                                  (format "(re-frame-pair.runtime/collect-after-dispatch %s)"
+                                          (pr-str (:before-id sync-result))))]
+                  (emit (tag-reinj (merge {:mode :trace} sync-result collected)))))
+              (emit (tag-reinj (merge {:mode :trace :epoch nil} sync-result)))))
 
-        sync?
-        (emit (merge {:mode :sync}
-                     (cljs-eval-value build-id
-                       (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))))
+          sync?
+          (emit (tag-reinj (merge {:mode :sync}
+                                  (cljs-eval-value build-id
+                                    (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str)))))
 
-        :else
-        (emit (merge {:mode :queued}
-                     (cljs-eval-value build-id
-                       (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str)))))
-      (catch Exception e
-        (emit {:ok? false :reason :dispatch-failed :message (.getMessage e)
-               :ex-data (ex-data e)})))))
+          :else
+          (emit (tag-reinj (merge {:mode :queued}
+                                  (cljs-eval-value build-id
+                                    (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str))))))
+        (catch Exception e
+          (emit (tag-reinj {:ok? false :reason :dispatch-failed :message (.getMessage e)
+                            :ex-data (ex-data e)})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: trace-recent
@@ -428,14 +470,17 @@
 (defn- trace-recent-op [args]
   (ensure-port!)
   (when (empty? args) (die :missing-window :hint "usage: trace-recent <ms>"))
-  (let [ms       (Integer/parseInt (first args))
-        build-id (build-id-from-args (rest args))]
+  (let [ms          (Integer/parseInt (first args))
+        build-id    (build-id-from-args (rest args))
+        reinjected? (ensure-injected! build-id)]
     (try
       (let [epochs (cljs-eval-value build-id
                                     (format "(re-frame-pair.runtime/epochs-in-last-ms %d)" ms))]
-        (emit {:ok? true :window-ms ms :count (count epochs) :epochs epochs}))
+        (emit (cond-> {:ok? true :window-ms ms :count (count epochs) :epochs epochs}
+                reinjected? (assoc :reinjected? true))))
       (catch Exception e
-        (emit {:ok? false :reason :trace-failed :message (.getMessage e)})))))
+        (emit (cond-> {:ok? false :reason :trace-failed :message (.getMessage e)}
+                reinjected? (assoc :reinjected? true)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: watch (pull-mode)
@@ -509,15 +554,16 @@
 
 (defn- watch-op [args]
   (ensure-port!)
-  (let [build-id   (build-id-from-args args)
-        stream?    (has-flag? args "--stream")
-        stop?      (has-flag? args "--stop")
-        window-ms  (Long/parseLong (flag-value args "--window-ms" "30000"))
-        count-n    (Long/parseLong (flag-value args "--count" "5"))
-        pred       (parse-predicate-args args)
-        idle-ms    (Long/parseLong (flag-value args "--idle-ms" "30000"))
-        hard-ms    (Long/parseLong (flag-value args "--hard-ms" "300000"))
-        poll-ms    (Long/parseLong (flag-value args "--poll-ms" "100"))]
+  (let [build-id    (build-id-from-args args)
+        stream?     (has-flag? args "--stream")
+        stop?       (has-flag? args "--stop")
+        window-ms   (Long/parseLong (flag-value args "--window-ms" "30000"))
+        count-n     (Long/parseLong (flag-value args "--count" "5"))
+        pred        (parse-predicate-args args)
+        idle-ms     (Long/parseLong (flag-value args "--idle-ms" "30000"))
+        hard-ms     (Long/parseLong (flag-value args "--hard-ms" "300000"))
+        poll-ms     (Long/parseLong (flag-value args "--poll-ms" "100"))
+        reinjected? (when-not stop? (ensure-injected! build-id))]
     (cond
       stop?
       (emit {:ok? true :stopped? true
@@ -570,10 +616,12 @@
                 (reset! last-hit (System/currentTimeMillis))
                 (emit {:ok? true :epoch m}))
               (if-let [[_ why] (done?)]
-                (emit {:ok? true :finished? true :reason why :emitted @emitted})
+                (emit (cond-> {:ok? true :finished? true :reason why :emitted @emitted}
+                        reinjected? (assoc :reinjected? true)))
                 (recur)))))
         (catch Exception e
-          (emit {:ok? false :reason :watch-failed :message (.getMessage e)}))))))
+          (emit (cond-> {:ok? false :reason :watch-failed :message (.getMessage e)}
+                  reinjected? (assoc :reinjected? true))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: tail-build (hot-reload/wait)
@@ -581,17 +629,19 @@
 
 (defn- tail-build-op [args]
   (ensure-port!)
-  (let [build-id (build-id-from-args args)
-        wait-ms  (Long/parseLong (flag-value args "--wait-ms" "5000"))
-        probe    (flag-value args "--probe" nil)
-        poll-ms  100]
+  (let [build-id    (build-id-from-args args)
+        wait-ms     (Long/parseLong (flag-value args "--wait-ms" "5000"))
+        probe       (flag-value args "--probe" nil)
+        poll-ms     100
+        reinjected? (ensure-injected! build-id)]
     (cond
       (nil? probe)
       ;; Soft / timer-based fallback: no probe = wait a fixed delay
       ;; and report :soft? true per spec §4.5.
       (do (Thread/sleep 300)
-          (emit {:ok? true :t (System/currentTimeMillis) :soft? true
-                 :note "No probe supplied; waited a 300ms fixed delay."}))
+          (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? true
+                         :note "No probe supplied; waited a 300ms fixed delay."}
+                  reinjected? (assoc :reinjected? true))))
 
       :else
       (let [before (try (cljs-eval-value build-id probe) (catch Exception _ ::error))
@@ -602,11 +652,13 @@
                 now     (try (cljs-eval-value build-id probe) (catch Exception _ ::error))]
             (cond
               (and (not= now ::error) (not= now before))
-              (emit {:ok? true :t (System/currentTimeMillis) :soft? false})
+              (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? false}
+                      reinjected? (assoc :reinjected? true)))
 
               (>= elapsed wait-ms)
-              (emit {:ok? false :reason :timed-out :timed-out? true
-                     :note "Probe did not change within --wait-ms. Likely a compile error; check your dev build output."})
+              (emit (cond-> {:ok? false :reason :timed-out :timed-out? true
+                             :note "Probe did not change within --wait-ms. Likely a compile error; check your dev build output."}
+                      reinjected? (assoc :reinjected? true)))
 
               :else
               (recur))))))))

@@ -1,0 +1,24 @@
+;; shadow-cljs config for the runtime-test build (rfp-8sg).
+;;
+;; Runs as a node-test target so CI doesn't need a browser. The tests
+;; live in tests/runtime/runtime_test.cljs and exercise the pure helpers
+;; in scripts/re_frame_pair/runtime.cljs. trace-enabled? + goog.DEBUG
+;; are set true so anything that branches on them takes the live path.
+;;
+;; Run locally:
+;;   npm install
+;;   npx shadow-cljs compile runtime-test && node out/runtime-test.js
+;;
+;; The fixture (tests/fixture/) is a separate build with its own
+;; shadow-cljs.edn — it's a browser app, this is a node test runner.
+
+{:deps  true
+
+ :builds
+ {:runtime-test
+  {:target           :node-test
+   :output-to        "out/runtime-test.js"
+   :ns-regexp        "-test$"
+   :compiler-options
+   {:closure-defines {re-frame.trace.trace-enabled? true
+                      goog.DEBUG                    true}}}}}

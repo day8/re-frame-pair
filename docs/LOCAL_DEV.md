@@ -115,9 +115,13 @@ Your shadow-cljs build doesn't have re-frame-10x as a dev-time preload. Add it p
 
 The build wasn't compiled with `re-frame.trace.trace-enabled?` set to `true` via `:closure-defines`. 10x's install guide covers this.
 
-### Dispatch / trace ops say `:reason :no-epoch-appeared`
+### Dispatch / trace ops say `:reason :no-epoch-appeared` or `:reason :no-new-epoch`
 
-10x's epoch-buffer accessor is stubbed in `runtime.cljs` pending the spike (see [`STATUS.md`](../STATUS.md) §8a). Until the spike confirms where to read 10x's epoch buffer, trace ops return no data. This is expected for pre-alpha — the read/dispatch code paths all work, you just can't see the epochs yet.
+`re-frame.trace` debounces callback delivery (~50ms) — 10x's `::receive-new-traces` only runs once the buffer flushes. `tagged-dispatch-sync!` returns `:before-id` and defers id resolution; `dispatch-and-collect` waits trace-debounce + 1 frame (80ms total) before sampling the head. If you're seeing `:no-new-epoch` consistently, check that `re-frame.trace.trace-enabled?` is true and that `day8.re-frame-10x.preload` is in your `:preloads`.
+
+### Dispatch / trace ops say `:reason :ten-x-missing`
+
+`runtime.cljs` reads epochs from 10x's *inlined* re-frame app-db at `day8.re-frame-10x.inlined-deps.re-frame.<ver>.re-frame.db/app-db`. The version slug (`v1v3v0` today) is probed against a known list. If 10x ships a new inlined version, add the slug to `inlined-rf-version-paths` in `runtime.cljs`. The same applies to the `undo/*` ops — they dispatch into 10x's inlined re-frame instance, so 10x must be loaded.
 
 ### DOM ops return `{:reason :re-com-debug-disabled}` or `{:src nil}`
 

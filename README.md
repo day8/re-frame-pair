@@ -15,15 +15,15 @@ With these capabilities, Claude Code can even iteratively perform experiments by
 
 ## Status
 
-**Pre-alpha — code is written, but not yet exercised against a running re-frame app.** The repository now contains the SKILL.md, the `scripts/runtime.cljs` injection payload, a babashka-based ops dispatcher (`scripts/ops.clj`) behind thin shell shims, the plugin manifest, the npm package manifest, and a GitHub Actions workflow that publishes to npm on tag.
+**Beta-1 candidate** — every load-bearing question from the §8a spike has been ground-truthed against current source (see [`STATUS.md`](STATUS.md)). The 10x epoch-buffer accessor, the time-travel adapter, the re-com `:src` parser, the registrar shape, and the subscription cache shape are all wired against the real internals; unit tests exercise the coerce-epoch translation and re-com classification. A minimal end-to-end fixture (`tests/fixture/`) is built and ready to run.
 
-What's **not** done: the spike (see [`STATUS.md`](STATUS.md) and §8a of the spec). Six concrete unknowns need to be verified against a minimal fixture app before calling this beyond pre-alpha — most importantly the 10x epoch-buffer accessor, the live-watch transport, and re-com's `data-rc-src` format.
+What's **not** yet done: the operator-side dry run. The fixture compiles structurally but hasn't been served from a live shadow-cljs watch in this environment (no JDK at hand). First user with the JDK + npm should `cd tests/fixture && npm install && npx shadow-cljs watch app` and put `discover-app.sh` / `dispatch.sh --trace` through their paces. Tagging beta.1 is gated on that.
 
 Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for running from a clone without waiting for an npm release; [`RELEASING.md`](RELEASING.md) for the release flow.
 
 ## Which technical stack?
 
-Designed for web apps built from the following stack — in pre-alpha, it has not yet been exercised end-to-end against a running app of any shape (see [`STATUS.md`](STATUS.md) for what's verified vs. pending the spike):
+Designed for web apps built from the following stack — see [`STATUS.md`](STATUS.md) for what's source-verified vs. operator-pending:
 
 - A [re-frame](https://github.com/day8/re-frame) application
 - [`re-frame-10x`](https://github.com/day8/re-frame-10x) loaded as a dev-time preload, with `re-frame.trace.trace-enabled?` set to `true` via `:closure-defines` (this is 10x's own requirement)
