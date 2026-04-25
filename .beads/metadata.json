@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "rfp",
+  "project_id": "gc-local-15e6d5a304a58e465d13dc4928b3ea2c"
+}
