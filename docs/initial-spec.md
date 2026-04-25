@@ -371,7 +371,8 @@ Either way, `scripts/watch-epochs.sh` reads the line stream and forwards to Clau
 - `--timing-ms '>100'` / `'<5'` etc.
 - `--touches-path [:a :b]` (epoch's `:app-db/diff` touched this path)
 - `--sub-ran <query-id>` / `--render <component-name>`
-- `--custom <clj-form>` (arbitrary predicate — same escape-hatch philosophy as `repl/eval`)
+
+(An arbitrary `--custom <clj-form>` predicate is on the v0.2 backlog; v0.1 ships only the discrete keys above.)
 
 **Notification content.** Each streamed epoch arrives as a one-line edn map with the epoch id and key fields. Claude can fetch the full epoch via `trace/epoch <id>` when it wants detail — the stream is a pointer, not a dump, so context stays bounded.
 

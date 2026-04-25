@@ -126,7 +126,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `watch/stream` | `scripts/watch-epochs.sh --stream --event-id-prefix :cart/` | Streams until disconnect, idle-timeout, or `watch/stop` |
 | `watch/stop` | `scripts/watch-epochs.sh --stop` | Terminates any active watch for this session |
 
-Predicates (any combination): `--event-id`, `--event-id-prefix`, `--effects`, `--timing-ms '>100'`, `--touches-path`, `--sub-ran`, `--render`, `--custom` (arbitrary CLJS predicate form).
+Predicates (any combination): `--event-id`, `--event-id-prefix`, `--effects`, `--timing-ms '>100'`, `--touches-path`, `--sub-ran`, `--render`.
 
 v1 transport is **pull-mode** — repeated short evals at ~100ms cadence. See `docs/initial-spec.md` §4.4 for why streaming-via-`:out` is deferred.
 

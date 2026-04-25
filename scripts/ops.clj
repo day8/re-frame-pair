@@ -528,20 +528,19 @@
       (= a "--sub-ran")         (recur (rest more) (assoc pred :sub-ran (->kw (first more))))
       (= a "--render")          (recur (rest more) (assoc pred :render (first more)))
 
-      ;; --custom is reserved in the spec as an arbitrary CLJS predicate,
-      ;; but v1 does not implement it (would require shipping user forms
-      ;; into the runtime). Fail loudly rather than silently dropping —
-      ;; users seeing "no matches" with a --custom flag should know why.
+      ;; --custom was reserved as an arbitrary CLJS predicate in earlier
+      ;; spec drafts; v0.1 ships only the discrete keys above. `die`
+      ;; emits the structured rejection AND exits 1 — the previous
+      ;; (do (emit ...) (System/exit 1)) sequence broke the shell
+      ;; contract because emit + exit-after-emit isn't idempotent
+      ;; through pipes.
       (= a "--custom")
-      (do
-        (emit {:ok? false
-               :reason :not-yet-supported
-               :flag :--custom
-               :hint (str "Arbitrary CLJS predicate filters are reserved "
-                          "but not yet implemented. Use --event-id-prefix, "
-                          "--effects, --timing-ms, --touches-path, --sub-ran, "
-                          "or --render instead.")})
-        (System/exit 1))
+      (die :flag-not-supported
+           :flag "--custom"
+           :hint (str "Arbitrary CLJS predicate filters are deferred "
+                      "to v0.2. v0.1 supports --event-id-prefix, "
+                      "--effects, --timing-ms, --touches-path, "
+                      "--sub-ran, --render."))
 
       :else                     (recur more pred))))
 
