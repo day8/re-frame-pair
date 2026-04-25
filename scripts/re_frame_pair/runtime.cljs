@@ -612,13 +612,23 @@
 
 (defn collect-after-dispatch
   "Companion to `tagged-dispatch-sync!`: after a bash-side wait past
-   the trace-debounce, sample the new head id, tag it as
-   Claude-originated, and return the coerced epoch.
+   the trace-debounce, find the FIRST new epoch (the one we slung,
+   not whatever happens to be at head), tag it as Claude-originated,
+   and return its coerced form. Any further epochs that landed after
+   it (e.g. via `:fx [:dispatch ...]` chaining) are returned as
+   `:chained-epoch-ids` for context.
 
    This is the synchronous equivalent of `dispatch-and-collect`'s
    post-await branch — split out so the bb shim can drive the wait
    itself (the JS Promise from `dispatch-and-collect` doesn't survive
    the cljs-eval round-trip back to babashka).
+
+   Why first-after, not head: a `reg-event-fx` that returns
+   `:fx [[:dispatch [:other-ev ...]]]` queues a follow-up event. Once
+   the trace-debounce flushes, both the user event and the chained
+   one(s) are in 10x's buffer. Sampling `latest-epoch-id` then would
+   return the chained event's id — wrong: we want the event we slung.
+   Walk the buffer for the first match-id > before-id instead.
 
    Caller pattern (in ops.clj's --trace path):
      1. cljs-eval `(tagged-dispatch-sync! ev)` → grab :before-id
@@ -626,19 +636,28 @@
      3. cljs-eval `(collect-after-dispatch <before-id>)` → epoch + tag
 
    Returns:
-     {:ok? true :epoch-id <id> :epoch <coerced>}    — new epoch landed
+     {:ok? true :epoch-id <id> :epoch <coerced> :chained-epoch-ids [...]}
      {:ok? false :reason :no-new-epoch :before-id ... :after-id ...}"
   [before-id]
-  (let [after-id (latest-epoch-id)]
-    (if (and after-id (not= before-id after-id))
-      (do (swap! claude-epoch-ids conj after-id)
-          {:ok?      true
-           :epoch-id after-id
-           :epoch    (epoch-by-id after-id)})
+  (let [matches  (read-10x-epochs)
+        ;; First match strictly after before-id. If before-id is nil
+        ;; (buffer was empty when we slung), the first match is ours.
+        new-tail (if (nil? before-id)
+                   matches
+                   (drop-while #(<= (match-id %) before-id) matches))
+        ours-match (first new-tail)
+        ours-id    (some-> ours-match match-id)
+        chain-ids  (mapv match-id (rest new-tail))]
+    (if ours-id
+      (do (swap! claude-epoch-ids conj ours-id)
+          (cond-> {:ok?      true
+                   :epoch-id ours-id
+                   :epoch    (coerce-epoch ours-match)}
+            (seq chain-ids) (assoc :chained-epoch-ids chain-ids)))
       {:ok?       false
        :reason    :no-new-epoch
        :before-id before-id
-       :after-id  after-id
+       :after-id  (some-> matches last match-id)
        :hint      "10x did not append a new match within the wait window. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."})))
 
 ;; ---------------------------------------------------------------------------
