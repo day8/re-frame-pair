@@ -566,17 +566,20 @@
                                                 (if (str/starts-with? raw ":") raw (str ":" raw)))))
       (= a "--effects")         (recur (rest more) (assoc pred :effects (->kw (first more))))
       (= a "--timing-ms")
+      ;; Anchored regex: exactly `<` or `>`, then digits, end. The
+      ;; previous `re-seq #"[<>]|\d+"` silently accepted garbage like
+      ;; `><100` or `100>5` because re-seq returned multiple matches
+      ;; and we only inspected the first two.
       (let [raw (first more)
-            [op-str n-str] (re-seq #"[<>]|\d+" (or raw ""))
-            op (case op-str ">" :> "<" :< nil)]
+            m   (when raw (re-matches #"^([<>])(\d+)$" raw))
+            [_ op-str n-str] m
+            op  (case op-str ">" :> "<" :< nil)]
         (if (and op n-str)
           (recur (rest more)
                  (assoc pred :timing-ms [op (Integer/parseInt n-str)]))
-          (do
-            (emit {:ok? false :reason :bad-timing-ms
-                   :arg raw
-                   :hint "Expected e.g. '>100' or '<5'. Operators >= / <= / = are not supported."})
-            (System/exit 1))))
+          (die :bad-timing-ms
+               :arg raw
+               :hint "Expected e.g. '>100' or '<5'. Operators >= / <= / = and any other shape are not supported.")))
       (= a "--touches-path")    (recur (rest more) (assoc pred :touches-path
                                                            (edn/read-string (first more))))
       (= a "--sub-ran")         (recur (rest more) (assoc pred :sub-ran (->kw (first more))))
