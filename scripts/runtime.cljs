@@ -161,93 +161,218 @@
 ;; re-frame-10x epoch buffer adapter
 ;; ---------------------------------------------------------------------------
 ;;
-;; 10x's internals are not a public API. The functions below encapsulate
-;; access to the epoch buffer in ONE place so the rest of the runtime —
-;; and the skill — doesn't have to know.
+;; 10x runs its own *inlined* copy of re-frame to keep its devtool state
+;; out of the user's app-db. The inlined ns is munged
+;; `day8.re-frame-10x.inlined-deps.re-frame.<inlined-version>.re-frame.*` —
+;; the version slug (`v1v3v0` today) bumps when 10x updates its bundled
+;; re-frame. We probe a list of known slugs so a future bump only needs
+;; one new candidate added here.
 ;;
-;; TODO verify against current 10x source: the exact namespace and
-;; shape of the epoch store. Candidates observed in 10x's source tree:
+;; The epoch buffer lives in that inlined re-frame's app-db at:
+;;   [:epochs :match-ids]         — ordered ids vec (chronological)
+;;   [:epochs :matches-by-id]     — id -> match record
+;;   [:epochs :selected-epoch-id] — current cursor (for time-travel)
+;; Each match: {:match-info <vec-of-traces> :sub-state <map> :timing <map>}.
 ;;
-;;   - day8.re-frame-10x.navigation.epochs.events
-;;   - day8.re-frame-10x.navigation.epochs.subs
-;;   - day8.re-frame-10x.db
-;;
-;; 10x keeps its own re-frame-like state; the epoch list and current
-;; cursor are derivable via 10x's own subscriptions. For v1 we use a
-;; conservative read: subscribe to whatever sub 10x exposes for the
-;; epoch list, then deref. See the spike (§8a) for the concrete name.
+;; `:match-info` is a vector of raw `re-frame.trace` events: one with
+;; `:op-type :event` carrying tags {:event :app-db-before :app-db-after
+;; :effects :coeffects :interceptors}, plus child traces for sub
+;; runs (`:sub/run`), sub creates (`:sub/create`), renders (`:render`),
+;; etc. The match-id is the `:id` of the first trace in match-info.
+;; (See day8.re-frame-10x.tools.metamorphic for the parser that builds
+;; these matches.)
+
+;; Forward-declared — defined in the re-com awareness section below.
+;; Used by `renders-for` to annotate render entries with re-com hints.
+(declare classify-render-entry)
+
+(def ^:private inlined-rf-version-paths
+  "Known 10x-inlined re-frame version path segments. Newest first.
+   Each is the directory name under
+   `day8/re-frame-10x/inlined-deps/re-frame/<slug>/re-frame/`.
+   Add new entries when a 10x release bumps its bundled re-frame."
+  ["v1v3v0"])
+
+(defn- aget-path
+  "Walk a JS object via a vector of property names. Returns nil if any
+   step throws or yields nil."
+  [obj path]
+  (reduce (fn [acc k]
+            (when acc
+              (try (aget acc k) (catch :default _ nil))))
+          obj path))
+
+(defn- ten-x-inlined-rf
+  "The JS object for 10x's inlined `re-frame` package, probing version
+   slugs. Returns nil if 10x isn't loaded under any known slug."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (some (fn [ver]
+            (aget-path g ["day8" "re_frame_10x" "inlined_deps"
+                          "re_frame" ver "re_frame"]))
+          inlined-rf-version-paths)))
+
+(defn- ten-x-app-db-ratom
+  "The Reagent ratom holding 10x's internal app-db. Nil if 10x missing."
+  []
+  (some-> (ten-x-inlined-rf) (aget-path ["db" "app_db"])))
+
+(defn- ten-x-rf-core
+  "10x's inlined re-frame.core JS namespace object. Holds .dispatch,
+   .dispatch_sync, .subscribe — used by the undo adapter to drive
+   10x's own event bus."
+  []
+  (some-> (ten-x-inlined-rf) (aget-path ["core"])))
 
 (defn ten-x-loaded?
-  "True if re-frame-10x has loaded into this runtime.
-
-   CLJS's `resolve` is macro-time, not runtime, so we check the
-   munged JS global instead: `cljs.core/day8` + `.re_frame_10x`."
+  "True if re-frame-10x has loaded into this runtime AND we can reach
+   its inlined re-frame app-db. The latter is the actual gating
+   condition — without it, every `read-10x-epochs` call would fail."
   []
-  (try
-    (let [d (some-> js/goog .-global (aget "day8"))]
-      (boolean (and d (aget d "re_frame_10x"))))
-    (catch :default _ false)))
+  (boolean (ten-x-app-db-ratom)))
 
 (defn read-10x-epochs
-  "Return the vector of epochs currently stored by 10x.
+  "Raw matches from 10x's epoch buffer in chronological order.
+   Throws ex-info with :reason :ten-x-missing if 10x is not loaded
+   (or its inlined-deps version path isn't recognised).
 
-   IMPLEMENTATION STUB — this is the single biggest spike deliverable
-   (see docs/initial-spec.md §8a). The real implementation reaches
-   into 10x's internal state; candidates the spike should evaluate:
-
-     1. A 10x subscription we can `deref` (if 10x registers one we can
-        reach from outside).
-     2. Direct JS global access: js/day8.re_frame_10x.<ns>.<name>.
-     3. Query the 10x-internal app-db (10x keeps a separate re-frame
-        instance) via its public-ish navigation subs.
-
-   Returns [] as a safe default so composed ops don't blow up; they'll
-   simply report 'no epochs available'."
+   Each element is a 10x match record:
+     {:match-info <vec-of-raw-traces> :sub-state <map> :timing <map>}
+   Pass through `coerce-epoch` to translate to the §4.3a shape."
   []
-  (when-not (ten-x-loaded?)
-    (throw (ex-info "re-frame-10x not loaded" {:reason :ten-x-missing})))
-  [])
+  (let [a (ten-x-app-db-ratom)]
+    (when-not a
+      (throw (ex-info "re-frame-10x epoch buffer unreachable"
+                      {:reason :ten-x-missing
+                       :tried-version-paths inlined-rf-version-paths
+                       :hint "10x is not loaded, or its inlined re-frame version slug has changed; add it to inlined-rf-version-paths."})))
+    (let [db    @a
+          ids   (get-in db [:epochs :match-ids] [])
+          by-id (get-in db [:epochs :matches-by-id] {})]
+      (mapv #(get by-id %) ids))))
+
+(defn- match-id
+  "10x's id for a match — the id of the first trace in :match-info."
+  [match]
+  (-> match :match-info first :id))
+
+(defn- find-trace [match op-type]
+  (some #(when (= op-type (:op-type %)) %) (:match-info match)))
+
+(defn- traces-of [match op-type]
+  (filterv #(= op-type (:op-type %)) (:match-info match)))
+
+(defn- diff-app-db
+  "clojure.data/diff of the event trace's :app-db-before / :app-db-after.
+   Returns the §4.3a :app-db/diff shape."
+  [event-trace]
+  (let [tags (:tags event-trace)
+        b    (:app-db-before tags)
+        a    (:app-db-after  tags)
+        [only-before only-after _both] (data/diff b a)]
+    {:before      b
+     :after       a
+     :only-before only-before
+     :only-after  only-after}))
+
+(defn- flatten-fx
+  "Translate an :effects map into the §4.3a :effects/fired vector. Each
+   non-`:fx` key contributes one entry; `:fx` (a vector of [id val]
+   tuples — see re-frame.fx) is flattened into individual entries so
+   the caller sees one entry per fx-handler invocation."
+  [effects]
+  (when (map? effects)
+    (->> effects
+         (mapcat (fn [[k v]]
+                   (cond
+                     (and (= :fx k) (sequential? v))
+                     (->> v
+                          (remove nil?)
+                          (map (fn [[id val]] {:fx-id id :value val})))
+
+                     :else
+                     [{:fx-id k :value v}])))
+         vec)))
+
+(defn- sub-runs
+  "§4.3a :subs/ran from the match's :sub/run traces. Each carries its
+   query-v and the time-ms (trace duration)."
+  [match]
+  (->> (traces-of match :sub/run)
+       (mapv (fn [t]
+               (let [tags (:tags t)]
+                 (cond-> {:query-v (:query-v tags)
+                          :time-ms (:duration t)}
+                   (contains? tags :reaction)
+                   (assoc :reaction (:reaction tags))))))))
+
+(defn- sub-cache-hits
+  "§4.3a :subs/cache-hit — derived from `:sub/create` traces tagged
+   `{:cached? true}`. (See re-frame.query.alpha.cljc.)"
+  [match]
+  (->> (traces-of match :sub/create)
+       (filter #(get-in % [:tags :cached?]))
+       (mapv (fn [t] {:query-v (get-in t [:tags :query-v])}))))
+
+(defn- renders-for
+  "§4.3a :renders. Reagent's `:render` traces tag `:component-name`;
+   we expose it as `:component` to match the spec. Each entry is run
+   through `classify-render-entry` so re-com renders pick up
+   `:re-com?` and `:re-com/category`."
+  [match]
+  (->> (traces-of match :render)
+       (mapv (fn [t]
+               (let [tags (:tags t)
+                     comp (or (:component-name tags) (:operation t))]
+                 {:component comp
+                  :time-ms   (:duration t)
+                  :reaction  (:reaction tags)})))
+       (mapv classify-render-entry)))
 
 (defn coerce-epoch
-  "Translate a raw 10x epoch into the shape documented in §4.3a.
-   Public so external callers can coerce values they've already
-   pulled from 10x's buffer.
+  "Translate a raw 10x match into the §4.3a epoch record. Returns nil
+   when raw is nil. Public so callers that already pulled matches from
+   10x's buffer can reshape them.
 
-   IMPLEMENTATION STUB — depends on 10x's internal record structure.
-   For now we pass through known fields and mark unknowns."
+   Note: `:renders[].src` is not populated here — re-com's `:src` is
+   not threaded into the render trace today. The `dom/*` ops do that
+   join via the live DOM (§4.3b)."
   [raw]
   (when raw
-    {:id               (:id raw)
-     :t                (:t raw)
-     :event            (:event raw)
-     :coeffects        (:coeffects raw)
-     :effects          (:effects raw)
-     :effects/fired    (:effects/fired raw)   ;; TODO derive from :effects if 10x doesn't flatten
-     :interceptor-chain (:interceptor-chain raw)
-     :app-db/diff      (:app-db/diff raw)
-     :subs/ran         (:subs/ran raw)
-     :subs/cache-hit   (:subs/cache-hit raw)
-     :renders          (:renders raw)}))
+    (let [event-trace (find-trace raw :event)
+          tags        (:tags event-trace)]
+      {:id                (match-id raw)
+       :t                 (:start event-trace)
+       :time-ms           (:duration event-trace)
+       :event             (:event tags)
+       :coeffects         (:coeffects tags)
+       :effects           (:effects tags)
+       :effects/fired     (flatten-fx (:effects tags))
+       :interceptor-chain (:interceptors tags)
+       :app-db/diff       (diff-app-db event-trace)
+       :subs/ran          (sub-runs raw)
+       :subs/cache-hit    (sub-cache-hits raw)
+       :renders           (renders-for raw)})))
 
 (defn latest-epoch-id
-  "Return the id of 10x's newest epoch, or nil if the buffer is empty."
+  "Id of 10x's newest match, or nil if the buffer is empty."
   []
-  (some-> (read-10x-epochs) last :id))
+  (-> (read-10x-epochs) last match-id))
 
 (defn epoch-count
-  "Total epochs currently in 10x's ring buffer."
+  "Total matches in 10x's ring buffer."
   []
   (count (read-10x-epochs)))
 
 (defn epoch-by-id
-  "Return the epoch with matching id, or nil."
+  "Return the coerced epoch with matching id, or nil."
   [id]
   (->> (read-10x-epochs)
-       (some #(when (= id (:id %)) %))
+       (some #(when (= id (match-id %)) %))
        coerce-epoch))
 
 (defn last-epoch
-  "Most recently appended epoch (any origin)."
+  "Most recently appended epoch, coerced. Nil if buffer is empty."
   []
   (some-> (read-10x-epochs) last coerce-epoch))
 
@@ -274,8 +399,8 @@
       {:epochs (mapv coerce-epoch epochs)
        :id-aged-out? false}
 
-      (some #(= id (:id %)) epochs)
-      {:epochs (mapv coerce-epoch (rest (drop-while #(not= id (:id %)) epochs)))
+      (some #(= id (match-id %)) epochs)
+      {:epochs (mapv coerce-epoch (rest (drop-while #(not= id (match-id %)) epochs)))
        :id-aged-out? false}
 
       :else
@@ -284,11 +409,13 @@
        :requested-id id})))
 
 (defn epochs-in-last-ms
-  "Epochs appended in the last N ms (pull)."
+  "Epochs appended in the last N ms (pull). Compares against the event
+   trace's `:start` timestamp (interop/now millis at trace entry)."
   [ms]
   (let [cutoff (- (js/Date.now) ms)]
     (->> (read-10x-epochs)
-         (filter #(>= (or (:t %) 0) cutoff))
+         (filter (fn [m] (let [t (:start (find-trace m :event))]
+                           (and t (>= t cutoff)))))
          (mapv coerce-epoch))))
 
 (defn find-where
@@ -360,43 +487,30 @@
    :epoch-id nil})
 
 (defn tagged-dispatch-sync!
-  "`dispatch-sync` the event and record the resulting epoch's id.
+  "`dispatch-sync` the event and capture the pre-dispatch head id so
+   the caller can resolve the resulting epoch after the trace debounce
+   completes.
 
-   Success requires both (a) a new epoch appeared in 10x's buffer and
-   (b) that epoch has a non-nil id. When the 10x buffer is stubbed (see
-   STATUS.md §8a), `latest-epoch-id` returns nil both before and after
-   dispatch — we report that as a *failure* rather than claiming
-   success with a nil id, so users see the real problem.
+   Why no synchronous epoch resolution: `re-frame.trace`'s callback
+   delivery to 10x runs through a ~50ms debounce. The trace events for
+   this dispatch are emitted synchronously, but 10x's `::receive-new-traces`
+   event (which appends to `:epochs :matches-by-id`) doesn't fire until
+   the debounce flushes. Reading `latest-epoch-id` immediately after
+   `dispatch-sync` may or may not show the new epoch.
 
-   Returns either {:ok? true :epoch-id <id> :event ...} on real success
-   or a structured {:ok? false :reason ...} variant otherwise."
+   Use `dispatch-and-collect` for the full async round-trip — it waits
+   long enough for the debounce + an animation frame, then resolves the
+   epoch and tags it. For raw fire-and-forget callers, the return value
+   includes `:before-id` so they can poll `latest-epoch-id` themselves."
   [event-v]
   (let [before-id (latest-epoch-id)]
     (rf/dispatch-sync event-v)
-    (let [after-id (latest-epoch-id)]
-      (cond
-        ;; Real success: 10x appended a fresh epoch.
-        (and after-id (not= before-id after-id))
-        (do (swap! claude-epoch-ids conj after-id)
-            {:ok? true :epoch-id after-id :event event-v})
-
-        ;; Before and after are both nil — the 10x accessor isn't
-        ;; returning epochs. Most likely: read-10x-epochs is still
-        ;; stubbed pending the spike.
-        (and (nil? before-id) (nil? after-id))
-        {:ok? false
-         :reason :no-epoch-appeared
-         :event event-v
-         :hint (str "10x's epoch buffer returned no epochs. The accessor "
-                    "is stubbed pre-spike — see STATUS.md §8a. The dispatch "
-                    "was issued, but no trace is visible to re-frame-pair yet.")}
-
-        ;; Dispatched, but 10x didn't append anything new.
-        :else
-        {:ok? false
-         :reason :no-new-epoch
-         :event event-v
-         :hint "dispatch-sync returned, but 10x's epoch head did not advance."}))))
+    {:ok?       true
+     :event     event-v
+     :before-id before-id
+     ;; Resolved by dispatch-and-collect after frame/debounce wait.
+     :epoch-id  nil
+     :note      "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or poll latest-epoch-id."}))
 
 (defn last-claude-epoch
   "Most recent epoch that the skill dispatched in this session."
@@ -407,27 +521,44 @@
          (some (fn [raw] (when (contains? ours (:id raw)) raw)))
          coerce-epoch)))
 
-(defn dispatch-and-collect
-  "Dispatch synchronously, wait one animation frame so renders land,
-   then return the epoch produced. Used by `trace/dispatch-and-collect`.
+(def ^:private trace-debounce-settle-ms
+  "How long we wait after dispatch-sync before reading 10x's epoch
+   buffer. re-frame.trace debounces callback delivery (~50ms); 10x's
+   `::receive-new-traces` then runs an event to populate
+   `:epochs :matches-by-id`. Plus one render frame for `:render` traces
+   to flush. 80ms is comfortably past both."
+  80)
 
-   Returns a core-async-like result via a JS Promise — the shim awaits."
+(defn dispatch-and-collect
+  "dispatch-sync the event, wait for the trace debounce + a render
+   frame so renders land in 10x's match-info, then resolve the epoch
+   produced (and tag it as a Claude-originated epoch).
+
+   Returns a JS Promise — the shim awaits. The promise's value is
+   either {:ok? true :epoch-id ... :epoch ...} or a structured
+   {:ok? false :reason ... :event ...} when the epoch never landed."
   [event-v]
   (js/Promise.
    (fn [resolve _reject]
-     (let [result (tagged-dispatch-sync! event-v)]
-       (if (:ok? result)
-         (js/requestAnimationFrame
-          (fn []
-            ;; One more frame so Reagent's render-triggered traces
-            ;; have certainly landed in 10x's epoch.
-            (js/requestAnimationFrame
-             (fn []
-               (resolve (clj->js
-                         {:ok?       true
-                          :epoch-id  (:epoch-id result)
-                          :epoch     (epoch-by-id (:epoch-id result))}))))))
-         (resolve (clj->js result)))))))
+     (let [{:keys [before-id]} (tagged-dispatch-sync! event-v)
+           settle (fn settle []
+                    (js/requestAnimationFrame
+                     (fn []
+                       (let [after-id (latest-epoch-id)]
+                         (if (and after-id (not= before-id after-id))
+                           (do (swap! claude-epoch-ids conj after-id)
+                               (resolve (clj->js
+                                         {:ok?      true
+                                          :epoch-id after-id
+                                          :epoch    (epoch-by-id after-id)})))
+                           (resolve (clj->js
+                                     {:ok?    false
+                                      :reason :no-new-epoch
+                                      :event  event-v
+                                      :before-id before-id
+                                      :after-id  after-id
+                                      :hint   "10x did not append a new match within the debounce + 1 frame. The dispatch fired, but no trace landed — possible causes: trace-enabled? false, handler threw before tracing finished, or browser tab is throttled."}))))))) ]
+       (js/setTimeout settle trace-debounce-settle-ms)))))
 
 ;; ---------------------------------------------------------------------------
 ;; re-com awareness
