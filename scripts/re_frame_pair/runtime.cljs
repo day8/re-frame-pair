@@ -969,14 +969,28 @@
      :hint (when (or (= selector :last-clicked) (= selector "last-clicked"))
              "Nothing clicked this session; interact with the page first, or pass a CSS selector instead.")}))
 
+(defn- src-pattern-matches?
+  "True if the element's `data-rc-src` attribute contains
+   `file:line`. Used by `dom-find-by-src` and `dom-fire-click`. We
+   pull every `[data-rc-src]` and compare strings rather than
+   building a CSS selector with the file embedded — single quotes,
+   spaces, brackets etc. in real-world paths break the
+   string-interpolated selector and there's no portable escape that
+   covers every case (`CSS.escape` exists but isn't always available
+   in older webviews and doesn't escape `'` itself for attribute
+   selectors)."
+  [el pattern]
+  (when-let [v (.getAttribute el "data-rc-src")]
+    (str/includes? v pattern)))
+
 (defn dom-find-by-src
   "Find live DOM elements whose `data-rc-src` matches file+line.
    Returns a list of {:selector :src :tag} summaries."
   [file line]
   (let [pattern (str file ":" line)
-        nodes   (.querySelectorAll js/document
-                                    (str "[data-rc-src*='" pattern "']"))]
+        nodes   (.querySelectorAll js/document "[data-rc-src]")]
     (->> (array-seq nodes)
+         (filter #(src-pattern-matches? % pattern))
          (mapv (fn [node]
                  {:tag   (.toLowerCase (.-tagName node))
                   :id    (not-empty (.-id node))
@@ -987,9 +1001,9 @@
   "Synthesise a click on the element matching file+line. Picks the
    first match if multiple. Returns the epoch produced (if any)."
   [file line]
-  (let [pattern  (str file ":" line)
-        selector (str "[data-rc-src*='" pattern "']")
-        el       (.querySelector js/document selector)]
+  (let [pattern (str file ":" line)
+        nodes   (array-seq (.querySelectorAll js/document "[data-rc-src]"))
+        el      (first (filter #(src-pattern-matches? % pattern) nodes))]
     (if el
       (let [before (latest-epoch-id)
             ev     (js/Event. "click" #js {:bubbles true :cancelable true})]
