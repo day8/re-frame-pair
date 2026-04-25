@@ -216,11 +216,13 @@
 ;; Used by `renders-for` to annotate render entries with re-com hints.
 (declare classify-render-entry)
 
-(def ^:private inlined-rf-version-paths
-  "Known 10x-inlined re-frame version path segments. Newest first.
-   Each is the directory name under
-   `day8/re-frame-10x/inlined-deps/re-frame/<slug>/re-frame/`.
-   Add new entries when a 10x release bumps its bundled re-frame."
+(def ^:private inlined-rf-known-version-paths
+  "Best-known 10x-inlined re-frame version slugs. Tried first so the
+   common case is one aget-path lookup. If none match, we fall back
+   to enumerating whatever child keys live under
+   `day8.re_frame_10x.inlined_deps.re_frame` at runtime — see
+   `ten-x-inlined-rf`. Update this list opportunistically; the
+   fallback handles fresh 10x releases on its own."
   ["v1v3v0"])
 
 (defn- aget-path
@@ -232,15 +234,38 @@
               (try (aget acc k) (catch :default _ nil))))
           obj path))
 
+(defn- ^js js-keys-array
+  "Object.keys via interop. Returns a JS array; callers convert to seq.
+   Wrapped in try/catch because aget'd JS values may be primitives."
+  [o]
+  (try
+    (when o (js/Object.keys o))
+    (catch :default _ nil)))
+
 (defn- ten-x-inlined-rf
-  "The JS object for 10x's inlined `re-frame` package, probing version
-   slugs. Returns nil if 10x isn't loaded under any known slug."
+  "The JS object for 10x's inlined `re-frame` package.
+
+   Strategy: try the known-version slugs first (cheap, deterministic),
+   then fall back to enumerating every child key under
+   `day8.re_frame_10x.inlined_deps.re_frame` and picking the first
+   that has a `re_frame.db.app_db` underneath. The fallback means a
+   fresh 10x release with a new slug works without any code change —
+   `read-10x-epochs` no longer throws `:ten-x-missing` just because
+   we shipped before the slug got added to the known list."
   []
   (when-let [g (some-> js/goog .-global)]
-    (some (fn [ver]
-            (aget-path g ["day8" "re_frame_10x" "inlined_deps"
-                          "re_frame" ver "re_frame"]))
-          inlined-rf-version-paths)))
+    (let [base (aget-path g ["day8" "re_frame_10x" "inlined_deps" "re_frame"])
+          via-known (some (fn [ver] (aget-path base [ver "re_frame"]))
+                          inlined-rf-known-version-paths)]
+      (or via-known
+          ;; Fallback: enumerate any child key and look for one that
+          ;; carries the expected `re_frame.db.app_db` shape.
+          (when base
+            (some (fn [k]
+                    (let [candidate (aget-path base [k "re_frame"])]
+                      (when (aget-path candidate ["db" "app_db"])
+                        candidate)))
+                  (array-seq (or (js-keys-array base) #js []))))))))
 
 (defn- ten-x-app-db-ratom
   "The Reagent ratom holding 10x's internal app-db. Nil if 10x missing."
@@ -287,8 +312,14 @@
     (when-not a
       (throw (ex-info "re-frame-10x epoch buffer unreachable"
                       {:reason :ten-x-missing
-                       :tried-version-paths inlined-rf-version-paths
-                       :hint "10x is not loaded, or its inlined re-frame version slug has changed; add it to inlined-rf-version-paths."})))
+                       :tried-known-paths inlined-rf-known-version-paths
+                       :hint (str "10x is not loaded, or its inlined "
+                                  "re-frame namespace doesn't carry the "
+                                  "expected `re_frame.db.app_db` ratom. "
+                                  "ten-x-inlined-rf already tries every "
+                                  "child key under inlined_deps.re_frame "
+                                  "as a fallback — if you're hitting this, "
+                                  "10x itself probably isn't preloaded.")})))
     (let [db    @a
           ids   (get-in db [:epochs :match-ids] [])
           by-id (get-in db [:epochs :matches-by-id] {})]
