@@ -1058,10 +1058,17 @@
             :< (< (:time-ms epoch 0) n)
             true))
         true)
-      (if touches-path    (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
-                            (or (some? (get-in only-before touches-path))
-                                (some? (get-in only-after touches-path))))
-                          true)
+      (if touches-path
+        (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
+          (if (empty? touches-path)
+            ;; Empty path = "the root touched at all" — any non-empty
+            ;; diff matches. Without this special-case, `(get-in nil
+            ;; [])` returns nil and the predicate always fails for the
+            ;; root path, which is surprising.
+            (or (seq only-before) (seq only-after))
+            (or (some? (get-in only-before touches-path))
+                (some? (get-in only-after touches-path)))))
+        true)
       (if sub-ran         (some #(= sub-ran (first (:query-v %))) (:subs/ran epoch)) true)
       (if render          (some #(= render (:component %)) (:renders epoch)) true)))))
 
