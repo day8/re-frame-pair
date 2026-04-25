@@ -52,13 +52,32 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
+### Unit tests (no fixture needed)
 ```bash
-# Example:
-# npm install
-# npm test
+npm test   # compiles tests/runtime/ and runs via node
 ```
+
+### Integration testing against the live fixture
+When the operator has `cd tests/fixture && npx shadow-cljs watch app` running and a browser tab open at http://localhost:8280, agents can drive the spike scripts directly without operator-in-the-loop. They're shell-callable, return EDN, and auto-reinject after browser refreshes (commit b3a12e8).
+
+Run from `tests/fixture/`:
+
+- `../../scripts/discover-app.sh` — health report
+- `../../scripts/eval-cljs.sh '<form>'` — eval CLJS in browser
+- `../../scripts/dispatch.sh --trace '[:ev args]'` — fire event, return epoch
+- `../../scripts/watch-epochs.sh --count N` — live-watch
+- `../../scripts/trace-window.sh <ms>` — epochs in last N ms
+- `../../scripts/inject-runtime.sh` — force re-ship runtime
+- `../../scripts/tail-build.sh --probe '<form>'` — wait for hot-reload to land
+
+To dispatch events without operator clicks: `eval-cljs.sh '(re-frame.core/dispatch-sync [:counter/inc])'`.
+
+A `:reinjected? true` flag on a response means the runtime was re-shipped because the sentinel was missing (operator probably refreshed). Informational, not an error.
+
+**Agents must NOT:**
+- `pkill` the operator's running `shadow-cljs watch app` (use `npx shadow-cljs compile app` from a fresh shell if you need a one-shot build check)
+- Refresh or open the browser (auto-reinject handles refreshes)
+- Wait for the operator to click UI elements — dispatch the event yourself via `eval-cljs.sh '(re-frame.core/dispatch-sync [:event/id args])'`
 
 ## Architecture Overview
 
