@@ -15,11 +15,31 @@
     ;; throwing. It returns false (not nil) via `and`'s short-circuit.
     (is (not    (rt/re-com? nil))))
 
-  (testing "category inference is best-effort but reasonable"
-    (is (= :input   (rt/re-com-category "re-com.buttons/button")))
-    (is (= :layout  (rt/re-com-category "re-com.box/v-box")))
-    (is (= :content (rt/re-com-category "re-com.text/label")))
-    (is (nil?       (rt/re-com-category "app.views/my-component")))))
+  (testing "category inference covers current re-com namespaces"
+    (is (= :input    (rt/re-com-category "re-com.buttons/button")))
+    (is (= :input    (rt/re-com-category "re-com.checkbox/checkbox")))
+    (is (= :input    (rt/re-com-category "re-com.radio-button/radio-button")))
+    (is (= :input    (rt/re-com-category "re-com.input-text/input-text")))
+    (is (= :input    (rt/re-com-category "re-com.input-time/input-time")))
+    (is (= :input    (rt/re-com-category "re-com.dropdown/dropdown")))
+    (is (= :input    (rt/re-com-category "re-com.selection-list/selection-list")))
+    (is (= :input    (rt/re-com-category "re-com.multi-select/multi-select")))
+    (is (= :input    (rt/re-com-category "re-com.tree-select/tree-select")))
+    (is (= :input    (rt/re-com-category "re-com.typeahead/typeahead")))
+    (is (= :input    (rt/re-com-category "re-com.datepicker/datepicker")))
+    (is (= :input    (rt/re-com-category "re-com.slider/slider")))
+    (is (= :input    (rt/re-com-category "re-com.tabs/horizontal-tabs")))
+    (is (= :layout   (rt/re-com-category "re-com.box/v-box")))
+    (is (= :layout   (rt/re-com-category "re-com.box/h-box")))
+    (is (= :layout   (rt/re-com-category "re-com.gap/gap")))
+    (is (= :layout   (rt/re-com-category "re-com.scroller/scroller")))
+    (is (= :layout   (rt/re-com-category "re-com.splits/h-split")))
+    (is (= :table    (rt/re-com-category "re-com.simple-v-table/simple-v-table")))
+    (is (= :table    (rt/re-com-category "re-com.v-table/v-table")))
+    (is (= :table    (rt/re-com-category "re-com.nested-grid/nested-grid")))
+    (is (= :content  (rt/re-com-category "re-com.text/label")))
+    (is (= :content  (rt/re-com-category "re-com.typography/title")))
+    (is (nil?        (rt/re-com-category "app.views/my-component")))))
 
 (deftest render-entry-classification
   (testing "re-com renders get :re-com? and a :re-com/category"
@@ -35,18 +55,21 @@
       (is (nil? (:re-com/category classified))))))
 
 (deftest rc-src-parsing
-  (testing "single-line attribute"
-    (is (= {:file "app/cart.cljs" :line 42 :column nil}
+  (testing "file:line shape — what re-com.debug emits"
+    (is (= {:file "app/cart.cljs" :line 42}
            (rt/parse-rc-src "app/cart.cljs:42"))))
 
-  (testing "file:line:column attribute"
-    (is (= {:file "app/cart.cljs" :line 42 :column 8}
-           (rt/parse-rc-src "app/cart.cljs:42:8"))))
+  (testing "deeper paths are preserved"
+    (is (= {:file "src/main/app/views.cljs" :line 17}
+           (rt/parse-rc-src "src/main/app/views.cljs:17"))))
 
   (testing "malformed attribute"
     (is (nil? (rt/parse-rc-src nil)))
     (is (nil? (rt/parse-rc-src "")))
-    (is (nil? (rt/parse-rc-src "not-a-file")))))
+    (is (nil? (rt/parse-rc-src "not-a-file")))
+    (is (nil? (rt/parse-rc-src ":42")))
+    (is (nil? (rt/parse-rc-src "app.cljs:")))
+    (is (nil? (rt/parse-rc-src "app.cljs:not-a-number")))))
 
 (deftest predicate-matching
   (let [epoch {:id      "e1"
@@ -91,6 +114,31 @@
                                       :sub-ran :auth/user}
                                      epoch))))))
 
+(deftest subs-live-cache-key-extraction
+  (testing "extracts :re-frame/query-v from each cache-key map"
+    (let [k1 [{:re-frame/query-v   [:cart/total]
+               :re-frame/q         :cart/total
+               :re-frame/lifecycle :reactive}
+              []]
+          k2 [{:re-frame/query-v   [:user/profile 42]
+               :re-frame/q         :user/profile
+               :re-frame/lifecycle :reactive}
+              []]]
+      (is (= [[:cart/total] [:user/profile 42]]
+             (rt/extract-query-vs [k1 k2])))))
+
+  (testing "skips keys without :re-frame/query-v"
+    (is (= []
+           (rt/extract-query-vs [[{} []]
+                                 [{:something :else} []]]))))
+
+  (testing "result is sorted by string-coercion of query-v"
+    (let [k1 [{:re-frame/query-v [:zzz/x]} []]
+          k2 [{:re-frame/query-v [:aaa/x]} []]
+          k3 [{:re-frame/query-v [:mmm/x]} []]]
+      (is (= [[:aaa/x] [:mmm/x] [:zzz/x]]
+             (rt/extract-query-vs [k1 k2 k3]))))))
+
 (deftest session-sentinel
   (testing "session-id is a UUID string"
     (is (string? rt/session-id))
@@ -98,9 +146,107 @@
     (is (re-matches #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
                     rt/session-id))))
 
-(deftest time-travel-stubs
-  (testing "each undo op is a uniform :not-yet-implemented stub until the spike"
-    (is (= :not-yet-implemented (:reason (rt/undo-step-back))))
-    (is (= :not-yet-implemented (:reason (rt/undo-step-forward))))
-    (is (= :not-yet-implemented (:reason (rt/undo-to-epoch "x"))))
-    (is (= :not-yet-implemented (:reason (rt/undo-status))))))
+;; -----------------------------------------------------------------------------
+;; coerce-epoch — translates a 10x match record into the §4.3a shape.
+;; The test input mirrors what 10x's `tools.metamorphic/parse-traces`
+;; assembles: a `:match-info` vector of raw re-frame.trace events.
+;; -----------------------------------------------------------------------------
+
+(def ^:private synthetic-match
+  {:match-info
+   [{:id 100 :op-type :event
+     :start 1700000000000
+     :duration 12.5
+     :tags {:event         [:cart/apply-coupon "SPRING25"]
+            :app-db-before {:cart {:items []} :user/profile {:id 1}}
+            :app-db-after  {:cart {:items [] :coupon "SPRING25"} :user/profile {:id 1}}
+            :coeffects     {:db {:cart {:items []}}}
+            :effects       {:db {:cart {:items [] :coupon "SPRING25"}}
+                            :fx [[:dispatch [:analytics/track :coupon-applied]]
+                                 [:http-xhrio {:method :post :uri "/coupon"}]]}
+            :interceptors  [{:id :coeffects} {:id :db-handler}]}}
+    {:id 101 :op-type :sub/run
+     :duration 0.8
+     :tags {:query-v  [:cart/total]
+            :reaction "rxn-1"}}
+    {:id 102 :op-type :sub/create
+     :tags {:query-v [:cart/items]
+            :cached? true}}
+    {:id 103 :op-type :render
+     :duration 1.4
+     :tags {:component-name "re-com.buttons/button"
+            :reaction       "rxn-2"}}
+    {:id 104 :op-type :render
+     :duration 0.6
+     :tags {:component-name "app.views/cart-panel"
+            :reaction       "rxn-3"}}]
+   :sub-state {}
+   :timing    {:re-frame/event-time 12.5}})
+
+(deftest coerce-epoch-shape
+  (let [e (rt/coerce-epoch synthetic-match)]
+    (testing "id is the first trace's id"
+      (is (= 100 (:id e))))
+    (testing "timestamp from event trace's :start"
+      (is (= 1700000000000 (:t e))))
+    (testing "timing from event trace's :duration"
+      (is (= 12.5 (:time-ms e))))
+    (testing "event vector lifted from event-trace tags"
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e))))
+    (testing "coeffects + effects pulled through"
+      (is (= {:db {:cart {:items []}}} (:coeffects e)))
+      (is (map? (:effects e))))
+    (testing "interceptor chain"
+      (is (= [{:id :coeffects} {:id :db-handler}] (:interceptor-chain e))))
+    (testing "app-db/diff has clojure.data/diff results"
+      (is (some? (:app-db/diff e)))
+      (is (= {:cart {:coupon "SPRING25"}} (get-in e [:app-db/diff :only-after])))
+      (is (nil? (get-in e [:app-db/diff :only-before]))))
+    (testing "subs/ran captured from :sub/run traces"
+      (is (= 1 (count (:subs/ran e))))
+      (is (= [:cart/total] (-> e :subs/ran first :query-v)))
+      (is (= 0.8 (-> e :subs/ran first :time-ms))))
+    (testing "subs/cache-hit captured from :sub/create with :cached?"
+      (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
+    (testing "renders translate :component-name -> :component and classify re-com"
+      (is (= 2 (count (:renders e))))
+      (let [[btn panel] (:renders e)]
+        (is (= "re-com.buttons/button" (:component btn)))
+        (is (true? (:re-com? btn)))
+        (is (= :input (:re-com/category btn)))
+        (is (= "app.views/cart-panel" (:component panel)))
+        (is (nil? (:re-com? panel)))))
+    (testing "effects/fired flattens the :fx vector and keeps top-level effects"
+      (let [fired (:effects/fired e)
+            fx-ids (set (map :fx-id fired))]
+        (is (contains? fx-ids :db))
+        (is (contains? fx-ids :dispatch))
+        (is (contains? fx-ids :http-xhrio))))))
+
+(deftest coerce-epoch-handles-nil
+  (testing "nil input -> nil"
+    (is (nil? (rt/coerce-epoch nil)))))
+
+;; -----------------------------------------------------------------------------
+;; Time-travel ops — sentinel checks. Without a connected browser
+;; runtime there is no 10x to dispatch into, so we expect the
+;; ten-x-missing failure. Real time-travel is exercised by
+;; tests/fixture (see tests/fixture/README.md).
+;; -----------------------------------------------------------------------------
+
+(deftest undo-without-ten-x
+  (testing "navigation ops fail cleanly when 10x is not loaded"
+    (is (= :ten-x-missing (:reason (rt/undo-step-back))))
+    (is (= :ten-x-missing (:reason (rt/undo-step-forward))))
+    (is (= :ten-x-missing (:reason (rt/undo-most-recent))))
+    (is (= :ten-x-missing (:reason (rt/undo-replay)))))
+
+  (testing "undo-status reports ten-x-missing"
+    (is (= :ten-x-missing (:reason (rt/undo-status)))))
+
+  (testing "undo-to-epoch refuses unknown ids without 10x"
+    (let [r (rt/undo-to-epoch 999)]
+      ;; 10x missing comes through as either :ten-x-missing (state read failed)
+      ;; or :unknown-epoch-id (state read returned nil so no match found).
+      ;; Either is correct — the dispatch never attempts.
+      (is (false? (:ok? r))))))

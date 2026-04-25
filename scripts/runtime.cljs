@@ -139,13 +139,21 @@
 ;; (See `re-frame.subs/cache-key`.) Extract `:re-frame/query-v` from
 ;; the first element of each cache-key to recover the query vector.
 
-(defn subs-live
-  "Query vectors currently held in re-frame's subscription cache."
-  []
-  (->> (some-> subs/query->reaction deref keys)
+(defn extract-query-vs
+  "Pull `:re-frame/query-v` out of each cache key. `cache-keys` is a
+   sequence of `[cache-key-map dyn-vec]` pairs produced by
+   `re-frame.subs/cache-key`. Public so tests can exercise the
+   extraction without a live re-frame."
+  [cache-keys]
+  (->> cache-keys
        (keep (fn [k] (get-in k [0 :re-frame/query-v])))
        (sort-by str)
        vec))
+
+(defn subs-live
+  "Query vectors currently held in re-frame's subscription cache."
+  []
+  (extract-query-vs (some-> subs/query->reaction deref keys)))
 
 (defn subs-sample
   "Subscribe to query-v and deref once. See docs/initial-spec.md §4.1
