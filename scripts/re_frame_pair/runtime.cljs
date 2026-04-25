@@ -99,32 +99,54 @@
   (mapv :id chain))
 
 (defn registrar-describe
-  "Return handler metadata for kind+id.
-   - For :event — returns kind (reg-event-db vs reg-event-fx vs reg-event-ctx,
-     inferred from the terminal interceptor's :id) and :interceptor-ids.
-   - For :sub / :fx / :cofx — the handler is a plain function; no
-     interceptor chain.
-   - Source form is not retained by the registrar today, so
-     :source is always :not-retained until re-frame A7 lands."
-  [kind id]
-  (let [entry (get-in @registrar/kind->id->handler [kind id])]
-    (cond
-      (nil? entry)
-      {:ok? false :reason :not-registered :kind kind :id id}
+  "Inspect re-frame's registrar.
 
-      (= kind :event)
-      (let [terminal-id (-> entry last :id)]
-        {:ok?             true
-         :kind            (case terminal-id
-                            :db-handler  :reg-event-db
-                            :fx-handler  :reg-event-fx
-                            :ctx-handler :reg-event-ctx
-                            :unknown)
-         :interceptor-ids (interceptor-chain-ids entry)
-         :source          :not-retained})
+   Three arities:
 
-      :else
-      {:ok? true :kind kind :source :not-retained})))
+   `(registrar-describe)` — return every registered id grouped by kind:
+       {:ok? true :by-kind {:event [...] :sub [...] :fx [...] :cofx [...]}}
+     Useful as a one-shot survey. Equivalent to
+     `(into {} (for [k kinds] [k (registrar-list k)]))`.
+
+   `(registrar-describe kind)` — list ids under one kind. Same shape
+     as `registrar-list` but wrapped in {:ok? true :kind ... :ids ...}
+     for a uniform return shape.
+
+   `(registrar-describe kind id)` — full handler metadata.
+     - For :event — returns kind (reg-event-db / -fx / -ctx, inferred
+       from the terminal interceptor's :id) and :interceptor-ids.
+     - For :sub / :fx / :cofx — the handler is a plain function; no
+       interceptor chain.
+     - Source form is not retained by the registrar today, so :source
+       is always :not-retained until re-frame A7 lands."
+  ([]
+   {:ok? true
+    :by-kind (into {}
+                   (for [[kind id->handler] @registrar/kind->id->handler]
+                     [kind (-> id->handler keys sort vec)]))})
+  ([kind]
+   {:ok? true
+    :kind kind
+    :ids (registrar-list kind)})
+  ([kind id]
+   (let [entry (get-in @registrar/kind->id->handler [kind id])]
+     (cond
+       (nil? entry)
+       {:ok? false :reason :not-registered :kind kind :id id}
+
+       (= kind :event)
+       (let [terminal-id (-> entry last :id)]
+         {:ok?             true
+          :kind            (case terminal-id
+                             :db-handler  :reg-event-db
+                             :fx-handler  :reg-event-fx
+                             :ctx-handler :reg-event-ctx
+                             :unknown)
+          :interceptor-ids (interceptor-chain-ids entry)
+          :source          :not-retained})
+
+       :else
+       {:ok? true :kind kind :source :not-retained}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subscriptions
