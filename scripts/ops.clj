@@ -701,12 +701,24 @@
                   reinjected? (assoc :reinjected? true))))
 
       :else
-      (let [before (try (cljs-eval-value build-id probe) (catch Exception _ ::error))
-            start  (System/currentTimeMillis)]
+      ;; Track the first error the probe ever produced so a "timeout"
+      ;; that's actually a broken probe (compile error in the probe
+      ;; form itself, undefined ns, etc.) reports the cause instead
+      ;; of just "did not change". Without this, the operator chases
+      ;; build output for a problem that's in the probe expression.
+      (let [first-err   (atom nil)
+            try-probe!  (fn []
+                          (try (cljs-eval-value build-id probe)
+                               (catch Exception e
+                                 (when-not @first-err
+                                   (reset! first-err (.getMessage e)))
+                                 ::error)))
+            before      (try-probe!)
+            start       (System/currentTimeMillis)]
         (loop []
           (Thread/sleep poll-ms)
           (let [elapsed (- (System/currentTimeMillis) start)
-                now     (try (cljs-eval-value build-id probe) (catch Exception _ ::error))]
+                now     (try-probe!)]
             (cond
               (and (not= now ::error) (not= now before))
               (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? false}
@@ -714,7 +726,8 @@
 
               (>= elapsed wait-ms)
               (emit (cond-> {:ok? false :reason :timed-out :timed-out? true
-                             :note "Probe did not change within --wait-ms. Likely a compile error; check your dev build output."}
+                             :note "Probe did not change within --wait-ms. Likely a compile error in your dev build, OR a broken probe expression — see :probe-error if present."}
+                      @first-err  (assoc :probe-error @first-err)
                       reinjected? (assoc :reinjected? true)))
 
               :else
