@@ -17,5 +17,10 @@
          ;; cares about the public re-frame surface that runtime.cljs
          ;; requires (re-frame.core, re-frame.db, re-frame.registrar,
          ;; re-frame.subs, re-frame.trace), which is stable.
-         re-frame/re-frame {:mvn/version "1.4.5"}
-         reagent/reagent   {:mvn/version "1.2.0"}}}
+         re-frame/re-frame    {:mvn/version "1.4.5"}
+         reagent/reagent      {:mvn/version "1.2.0"}
+         ;; shadow-cljs.edn here uses ':deps true', which delegates
+         ;; classpath construction to this file — so shadow-cljs must
+         ;; be on the dep list explicitly. Matches tests/fixture/deps.edn
+         ;; and package.json devDependencies.
+         thheller/shadow-cljs {:mvn/version "3.2.0"}}}
