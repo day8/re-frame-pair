@@ -82,9 +82,8 @@
 ;; Registrar introspection
 ;; ---------------------------------------------------------------------------
 
-;; TODO verify against current re-frame: the registrar is accessible
-;; as `re-frame.registrar/kind->id->handler`. Confirmed in recent
-;; versions; if it moves, update here.
+;; The registrar is `re-frame.registrar/kind->id->handler`, an atom
+;; of `{kind {id handler}}`. Verified against current re-frame source.
 
 (defn registrar-list
   "Enumerate registered ids under a kind (:event / :sub / :fx / :cofx)."
@@ -101,8 +100,8 @@
 
 (defn registrar-describe
   "Return handler metadata for kind+id.
-   - For :event — returns kind (reg-event-db vs reg-event-fx, inferred
-     from the terminal interceptor's :id) and :interceptor-ids.
+   - For :event — returns kind (reg-event-db vs reg-event-fx vs reg-event-ctx,
+     inferred from the terminal interceptor's :id) and :interceptor-ids.
    - For :sub / :fx / :cofx — the handler is a plain function; no
      interceptor chain.
    - Source form is not retained by the registrar today, so
@@ -117,8 +116,9 @@
       (let [terminal-id (-> entry last :id)]
         {:ok?             true
          :kind            (case terminal-id
-                            :re-frame/db-handler :reg-event-db
-                            :re-frame/fx-handler :reg-event-fx
+                            :db-handler  :reg-event-db
+                            :fx-handler  :reg-event-fx
+                            :ctx-handler :reg-event-ctx
                             :unknown)
          :interceptor-ids (interceptor-chain-ids entry)
          :source          :not-retained})
@@ -130,14 +130,20 @@
 ;; Subscriptions
 ;; ---------------------------------------------------------------------------
 
-;; TODO verify: the cache name is `re-frame.subs/query->reaction` in
-;; current re-frame. The shape is {query-v reaction}. If renamed, fix
-;; here in one place.
+;; `re-frame.subs/query->reaction` is the subscription cache atom.
+;; Its keys are *not* plain query-vecs — they are `[cache-key-map dyn-vec]`
+;; pairs, where `cache-key-map` is
+;;   {:re-frame/query-v <query-v>
+;;    :re-frame/q       <query-id>
+;;    :re-frame/lifecycle :reactive}
+;; (See `re-frame.subs/cache-key`.) Extract `:re-frame/query-v` from
+;; the first element of each cache-key to recover the query vector.
 
 (defn subs-live
   "Query vectors currently held in re-frame's subscription cache."
   []
   (->> (some-> subs/query->reaction deref keys)
+       (keep (fn [k] (get-in k [0 :re-frame/query-v])))
        (sort-by str)
        vec))
 
@@ -438,20 +444,41 @@
   "Classify a re-com component by ns segment. Rough — enough to let
    recipes answer 'which inputs re-rendered'. Public for tests.
 
-   TODO verify re-com's current ns layout; these regexes are
-   best-effort and should be tightened once the spike confirms which
-   namespaces are in play."
+   Categories follow the re-com source layout (current as of 2026-04):
+   layout boxes, inputs (buttons, dropdowns, selection lists, etc.),
+   tables, and content (text/typography/throbbers/popovers/etc.)."
   [component-name]
   (cond
-    (not (re-com? component-name))                       nil
-    (re-find #"re-com\.box"             component-name)  :layout
-    (re-find #"re-com\.input"           component-name)  :input
-    (re-find #"re-com\.selection-list"  component-name)  :input
-    (re-find #"re-com\.dropdown"        component-name)  :input
-    (re-find #"re-com\.buttons"         component-name)  :input
-    (re-find #"re-com\.text"            component-name)  :content
-    (re-find #"re-com\.typography"      component-name)  :content
-    :else                                                :content))
+    (not (re-com? component-name))                            nil
+    (re-find #"re-com\.box"                  component-name)  :layout
+    (re-find #"re-com\.gap"                  component-name)  :layout
+    (re-find #"re-com\.scroller"             component-name)  :layout
+    (re-find #"re-com\.splits"               component-name)  :layout
+    (re-find #"re-com\.modal-panel"          component-name)  :layout
+    (re-find #"re-com\.buttons"              component-name)  :input
+    (re-find #"re-com\.checkbox"             component-name)  :input
+    (re-find #"re-com\.radio-button"         component-name)  :input
+    (re-find #"re-com\.input-text"           component-name)  :input
+    (re-find #"re-com\.input-time"           component-name)  :input
+    (re-find #"re-com\.dropdown"             component-name)  :input
+    (re-find #"re-com\.single-dropdown"      component-name)  :input
+    (re-find #"re-com\.tag-dropdown"         component-name)  :input
+    (re-find #"re-com\.selection-list"       component-name)  :input
+    (re-find #"re-com\.multi-select"         component-name)  :input
+    (re-find #"re-com\.tree-select"          component-name)  :input
+    (re-find #"re-com\.typeahead"            component-name)  :input
+    (re-find #"re-com\.datepicker"           component-name)  :input
+    (re-find #"re-com\.daterange"            component-name)  :input
+    (re-find #"re-com\.slider"               component-name)  :input
+    (re-find #"re-com\.tabs"                 component-name)  :input
+    (re-find #"re-com\.bar-tabs"             component-name)  :input
+    (re-find #"re-com\.pill-tabs"            component-name)  :input
+    (re-find #"re-com\.horizontal-tabs"      component-name)  :input
+    (re-find #"re-com\.simple-v-table"       component-name)  :table
+    (re-find #"re-com\.v-table"              component-name)  :table
+    (re-find #"re-com\.nested-grid"          component-name)  :table
+    (re-find #"re-com\.table-filter"         component-name)  :table
+    :else                                                     :content))
 
 (defn classify-render-entry
   "Annotate a render entry with :re-com? and :re-com/category."
@@ -469,23 +496,22 @@
 ;; pass `:src (at)`. See docs/initial-spec.md §4.3b.
 
 (defn parse-rc-src
-  "Parse re-com's `data-rc-src` attribute into {:file :line :column}.
+  "Parse re-com's `data-rc-src` attribute into {:file :line}.
    Returns nil on malformed input.
 
-   Public for tests. TODO verify the exact attribute format against
-   current re-com — see docs/initial-spec.md §8a."
+   re-com emits the attribute as a single 'file:line' string from
+   `re-com.debug` (see `(str file \":\" line)` at debug.cljs:83). No
+   column component, despite Clojure's `(at)` macro carrying one — re-com
+   discards it before serialising. Public for tests."
   [attr-val]
   (when (and (string? attr-val) (seq attr-val))
-    ;; Expected shapes: 'app/cart.cljs:42', 'app/cart.cljs:42:8'.
-    (let [parts (str/split attr-val #":")
-          valid-line? (fn [s] (and s (re-matches #"\d+" s)))]
-      (when (and (>= (count parts) 2)
-                 (valid-line? (nth parts 1)))
-        {:file   (first parts)
-         :line   (js/parseInt (nth parts 1) 10)
-         :column (when (and (>= (count parts) 3)
-                            (valid-line? (nth parts 2)))
-                   (js/parseInt (nth parts 2) 10))}))))
+    (let [idx (str/last-index-of attr-val ":")]
+      (when (and idx (pos? idx))
+        (let [file-part (subs attr-val 0 idx)
+              line-part (subs attr-val (inc idx))]
+          (when (re-matches #"\d+" line-part)
+            {:file file-part
+             :line (js/parseInt line-part 10)}))))))
 
 (defn re-com-debug-enabled?
   "Heuristic: re-com debug is enabled if any DOM element carries a
@@ -682,18 +708,21 @@
 
 (def version-floors
   "Floor versions from spec §3.7. `nil` means 'no enforcement yet' —
-   the check is plumbed through but does not reject. Fill these in
-   once the read-version-of path is confirmed against each lib."
-  {:re-frame       nil     ; spec placeholder: "1.4"
-   :re-frame-10x   nil     ; spec placeholder: "1.9"
-   :re-com         nil     ; spec placeholder: "2.20"
-   :shadow-cljs    nil})   ; spec placeholder: "2.28"
+   the check is plumbed through but does not reject. Only re-com
+   currently exposes a runtime-readable version (via `re-com.config/version`,
+   a `goog-define`); re-frame, re-frame-10x, and shadow-cljs do not.
+   Floors stay nil for those until the libs add a public version var."
+  {:re-frame       nil     ; no in-browser version var; spec placeholder "1.4"
+   :re-frame-10x   nil     ; no in-browser version var; spec placeholder "1.9"
+   :re-com         nil     ; readable via re-com.config/version; spec placeholder "2.20"
+   :shadow-cljs    nil})   ; not a CLJS lib at runtime; spec placeholder "2.28"
 
 (defn- read-version-of
-  "Best-effort version lookup per lib. Returns a string like '1.4.0',
-   or :unknown if we can't find it. No library today exposes a uniform
-   version var in-browser; this tries the plausible spots and gives up
-   cleanly."
+  "Best-effort version lookup per lib. Returns a string like '2.20.0',
+   or :unknown if we can't find it. Only re-com currently exposes a
+   readable runtime version (`re-com.config/version`, a `goog-define`
+   with empty default — populated only when the host build sets it via
+   shadow-cljs `:closure-defines`)."
   [dep]
   (let [try-global (fn [& path]
                      (try
@@ -702,10 +731,11 @@
                                  g path))
                        (catch :default _ nil)))]
     (or (case dep
-          :re-frame-10x (try-global "day8" "re_frame_10x" "VERSION")
-          :re-com       (try-global "re_com" "VERSION")
-          :re-frame     nil     ; no known version var in-browser
-          :shadow-cljs  (try-global "shadow" "cljs" "devtools" "client" "env" "client_info")
+          :re-com       (let [v (try-global "re_com" "config" "version")]
+                          (when (and (string? v) (seq v)) v))
+          :re-frame     nil      ; no public version var in-browser
+          :re-frame-10x nil      ; no public version var in-browser
+          :shadow-cljs  nil      ; not a CLJS runtime lib
           nil)
         :unknown)))
 
@@ -715,7 +745,9 @@
    :unknown or nil (can't enforce what we can't read)."
   [observed floor]
   (and (string? observed) (string? floor)
-       (let [->ints #(mapv (fn [s] (try (Integer/parseInt s) (catch :default _ 0)))
+       (let [->ints #(mapv (fn [s]
+                             (let [n (js/parseInt s 10)]
+                               (if (js/Number.isNaN n) 0 n)))
                            (re-seq #"\d+" %))]
          (neg? (compare (->ints observed) (->ints floor))))))
 
