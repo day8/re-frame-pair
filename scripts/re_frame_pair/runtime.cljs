@@ -551,16 +551,34 @@
    Use `dispatch-and-collect` for the full async round-trip — it waits
    long enough for the debounce + an animation frame, then resolves the
    epoch and tags it. For raw fire-and-forget callers, the return value
-   includes `:before-id` so they can poll `latest-epoch-id` themselves."
+   includes `:before-id` so they can poll `latest-epoch-id` themselves.
+
+   Handler errors: re-frame's default error handler logs to console and
+   re-throws the original exception, so a throwing handler would normally
+   propagate out of `dispatch-sync` and back through `cljs-eval` as an
+   nREPL `:err` — which then breaks the bb shim's edn parsing. We catch
+   here and return a structured `:reason :handler-threw` instead, so the
+   experiment-loop recipe (and dispatch.sh's --trace path) sees a clean
+   failure shape."
   [event-v]
   (let [before-id (latest-epoch-id)]
-    (rf/dispatch-sync event-v)
-    {:ok?       true
-     :event     event-v
-     :before-id before-id
-     ;; Resolved by dispatch-and-collect after frame/debounce wait.
-     :epoch-id  nil
-     :note      "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or poll latest-epoch-id."}))
+    (try
+      (rf/dispatch-sync event-v)
+      {:ok?       true
+       :event     event-v
+       :before-id before-id
+       ;; Resolved by dispatch-and-collect after frame/debounce wait.
+       :epoch-id  nil
+       :note      "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or poll latest-epoch-id."}
+      (catch :default e
+        ;; Stringify ex-data — it can carry JS object refs (interceptor
+        ;; records, ratoms) that don't edn-roundtrip back to the bb shim.
+        {:ok?        false
+         :reason     :handler-threw
+         :event      event-v
+         :before-id  before-id
+         :error      (or (ex-message e) (str e))
+         :error-data (when-let [d (ex-data e)] (pr-str d))}))))
 
 (defn last-claude-epoch
   "Most recent epoch that the skill dispatched in this session."
