@@ -152,6 +152,11 @@
 ;; assembles: a `:match-info` vector of raw re-frame.trace events.
 ;; -----------------------------------------------------------------------------
 
+;; A user-event match — :match-info closes at :sync, no render data
+;; in its own match. Renders/sub-runs are sourced from the FOLLOWING
+;; render-burst match (synthetic-render-burst below), per re-frame +
+;; 10x's actual partitioning behavior.
+
 (def ^:private synthetic-match
   {:match-info
    [{:id 100 :op-type :event
@@ -165,26 +170,39 @@
                             :fx [[:dispatch [:analytics/track :coupon-applied]]
                                  [:http-xhrio {:method :post :uri "/coupon"}]]}
             :interceptors  [{:id :coeffects} {:id :db-handler}]}}
-    {:id 101 :op-type :sub/run
-     :duration 0.8
-     :tags {:query-v  [:cart/total]
-            :reaction "rxn-1"}}
-    {:id 102 :op-type :sub/create
-     :tags {:query-v [:cart/items]
-            :cached? true}}
-    {:id 103 :op-type :render
-     :duration 1.4
-     :tags {:component-name "re-com.buttons/button"
-            :reaction       "rxn-2"}}
-    {:id 104 :op-type :render
-     :duration 0.6
-     :tags {:component-name "app.views/cart-panel"
-            :reaction       "rxn-3"}}]
-   :sub-state {}
-   :timing    {:re-frame/event-time 12.5}})
+    {:id 110 :op-type :sync}]
+   ;; User-event matches don't carry sub-state with :run? entries; that
+   ;; data lives in the next render-burst match.
+   :sub-state {:reaction-state {}}
+   :timing {:re-frame/event-time 12.5}})
+
+(def ^:private synthetic-render-burst
+  ;; The :event nil + :reagent/quiescent match that lands right after
+  ;; synthetic-match. carries the sub-state with :run? entries and is
+  ;; the id range that contains :render traces.
+  {:match-info
+   [{:id 120 :op-type :event :tags {}}
+    {:id 130 :op-type :reagent/quiescent}]
+   :sub-state
+   {:reaction-state
+    {"rx1" {:subscription [:cart/total]    :order [:sub/run]}
+     "rx2" {:subscription [:cart/items]    :order [:sub/run] :sub/traits {:unchanged? true}}
+     "rx3" {:subscription [:other/dormant]}}}})
+
+(def ^:private synthetic-traces
+  ;; Full trace stream. Renders fall inside the render-burst match's id
+  ;; range [120..130]; one outside should be filtered out.
+  [{:id 122 :op-type :render :duration 1.4
+    :tags {:component-name "re_com.buttons.button" :reaction "rxn-2"}}
+   {:id 125 :op-type :render :duration 0.6
+    :tags {:component-name "app.views.cart_panel" :reaction "rxn-3"}}
+   {:id 200 :op-type :render :duration 0.5
+    :tags {:component-name "app.views.outside_match" :reaction "rxn-4"}}])
 
 (deftest coerce-epoch-shape
-  (let [e (rt/coerce-epoch synthetic-match)]
+  (let [ctx {:all-traces synthetic-traces
+             :all-matches [synthetic-match synthetic-render-burst]}
+        e (rt/coerce-epoch synthetic-match ctx)]
     (testing "id is the first trace's id"
       (is (= 100 (:id e))))
     (testing "timestamp from event trace's :start"
@@ -204,19 +222,21 @@
       (is (some? (:app-db/diff e)))
       (is (= {:cart {:coupon "SPRING25"}} (get-in e [:app-db/diff :only-after])))
       (is (nil? (get-in e [:app-db/diff :only-before]))))
-    (testing "subs/ran captured from :sub/run traces"
-      (is (= 1 (count (:subs/ran e))))
-      (is (= [:cart/total] (-> e :subs/ran first :query-v)))
-      (is (= 0.8 (-> e :subs/ran first :time-ms))))
-    (testing "subs/cache-hit captured from :sub/create with :cached?"
+    (testing "subs/ran — reactions that re-ran AND value changed
+              (read from :sub-state :reaction-state, not :match-info)"
+      (is (= [{:query-v [:cart/total]}] (:subs/ran e))))
+    (testing "subs/cache-hit — reactions that re-ran but value was
+              :unchanged? (closest signal 10x exposes to a 'cache hit')"
       (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
-    (testing "renders translate :component-name -> :component and classify re-com"
+    (testing "renders — pulled from the full trace stream filtered by
+              the match's id range, with munged component names
+              demunged to dotted form"
       (is (= 2 (count (:renders e))))
       (let [[btn panel] (:renders e)]
-        (is (= "re-com.buttons/button" (:component btn)))
+        (is (= "re-com.buttons.button" (:component btn)))
         (is (true? (:re-com? btn)))
         (is (= :input (:re-com/category btn)))
-        (is (= "app.views/cart-panel" (:component panel)))
+        (is (= "app.views.cart-panel" (:component panel)))
         (is (nil? (:re-com? panel)))))
     (testing "effects/fired flattens the :fx vector and keeps top-level effects"
       (let [fired (:effects/fired e)

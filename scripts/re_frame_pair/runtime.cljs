@@ -247,6 +247,19 @@
   []
   (some-> (ten-x-inlined-rf) (aget-path ["db" "app_db"])))
 
+(defn- read-10x-all-traces
+  "Full trace stream from 10x's internal app-db at `[:traces :all]`.
+   This is `re-frame.trace`'s raw stream, with every op-type intact:
+   `:event :sub/run :sub/create :sub/dispose :render :raf :raf-end
+   :event/handler` etc. The skeleton stored at `(:match-info match)`
+   only retains the subset that fits 10x's epoch start/end markers
+   (event-run, fsm-trigger, end-of-match, sync) — for renders and
+   sub-runs we have to come back here. Returns [] when 10x isn't
+   loaded so callers can no-op gracefully."
+  []
+  (or (some-> (ten-x-app-db-ratom) deref :traces :all)
+      []))
+
 (defn- ten-x-rf-core
   "10x's inlined re-frame.core JS namespace object. Holds .dispatch,
    .dispatch_sync, .subscribe — used by the undo adapter to drive
@@ -324,70 +337,176 @@
                      [{:fx-id k :value v}])))
          vec)))
 
-(defn- sub-runs
-  "§4.3a :subs/ran from the match's :sub/run traces. Each carries its
-   query-v and the time-ms (trace duration)."
+(defn- match-trace-ids
+  "[first-id last-id] of the match's :match-info, or nil if empty."
   [match]
-  (->> (traces-of match :sub/run)
-       (mapv (fn [t]
-               (let [tags (:tags t)]
-                 (cond-> {:query-v (:query-v tags)
-                          :time-ms (:duration t)}
-                   (contains? tags :reaction)
-                   (assoc :reaction (:reaction tags))))))))
+  (let [mi (:match-info match)]
+    (when (seq mi)
+      [(:id (first mi)) (:id (last mi))])))
 
-(defn- sub-cache-hits
-  "§4.3a :subs/cache-hit — derived from `:sub/create` traces tagged
-   `{:cached? true}`. (See re-frame.query.alpha.cljc.)"
-  [match]
-  (->> (traces-of match :sub/create)
-       (filter #(get-in % [:tags :cached?]))
-       (mapv (fn [t] {:query-v (get-in t [:tags :query-v])}))))
+(defn- traces-in-id-range
+  "Slice of `all-traces` whose `:id` falls within [first-id last-id]
+   inclusive. The full trace stream lives at `[:traces :all]` in 10x's
+   internal app-db; matches store only their boundary traces in
+   :match-info, so for sub-runs and renders we have to come back to
+   the stream and filter by id range (matching 10x's own
+   `::filtered-by-epoch-always` sub)."
+  [all-traces first-id last-id]
+  (filterv (fn [t] (let [id (:id t)]
+                     (and id (<= first-id id last-id))))
+           all-traces))
 
-(defn- renders-for
-  "§4.3a :renders. Reagent's `:render` traces tag `:component-name`;
-   we expose it as `:component` to match the spec. Each entry is run
-   through `classify-render-entry` so re-com renders pick up
-   `:re-com?` and `:re-com/category`."
+(defn- demunge-component-name
+  "Reagent's `:component-name` tag arrives munged: dots-and-underscores
+   like `re_com.box.h_box`. `cljs.core/demunge` returns the dotted
+   hyphenated form (`re-com.box.h-box`) — close enough for our
+   `re-com?` prefix check and category heuristics, and stays edn-clean."
+  [s]
+  (when (string? s) (cljs.core/demunge s)))
+
+(defn- sub-runs-from-state
+  "§4.3a :subs/ran. 10x's `:match-info` doesn't carry `:sub/run` traces
+   directly (`metam/parse-traces` strips them when building partitions);
+   instead the post-epoch reaction state at
+   `(-> match :sub-state :reaction-state)` records `:run? true` and
+   `:order [:sub/run ...]` for each reaction that re-ran during the
+   epoch. We pick those whose value *changed* — `:sub/traits
+   :unchanged?` not set — and expose just the user-facing query-v.
+
+   `:time-ms` is not stored per-sub at this layer; omit it rather than
+   make it up. Total sub time is in :timing :animation-frame-subs if
+   needed."
   [match]
-  (->> (traces-of match :render)
-       (mapv (fn [t]
-               (let [tags (:tags t)
-                     comp (or (:component-name tags) (:operation t))]
-                 {:component comp
-                  :time-ms   (:duration t)
-                  :reaction  (:reaction tags)})))
-       (mapv classify-render-entry)))
+  (->> (-> match :sub-state :reaction-state)
+       (filter (fn [[_ sub]]
+                 (and (some #{:sub/run} (:order sub))
+                      (not (get-in sub [:sub/traits :unchanged?])))))
+       (mapv (fn [[_ sub]] {:query-v (:subscription sub)}))))
+
+(defn- sub-cache-hits-from-state
+  "§4.3a :subs/cache-hit. Re-frame doesn't trace genuine cache hits
+   (deref-without-recompute), but we surface the closest signal 10x
+   exposes: subs that re-ran AND produced an equal value
+   (`:sub/traits {:unchanged? true}`). These are the subs whose
+   downstream short-circuited because the result was `=` to the prior
+   value — semantically what `:subs/cache-hit` is documenting in §4.3a
+   (sub did its work but didn't propagate change)."
+  [match]
+  (->> (-> match :sub-state :reaction-state)
+       (filter (fn [[_ sub]]
+                 (and (some #{:sub/run} (:order sub))
+                      (get-in sub [:sub/traits :unchanged?]))))
+       (mapv (fn [[_ sub]] {:query-v (:subscription sub)}))))
+
+(defn- renders-from-traces
+  "§4.3a :renders. Reagent records each component render as a
+   `:op-type :render` trace with `:tags :component-name` (munged form,
+   e.g. `re_com.box.h_box`). These are in the full trace stream, not
+   the skeleton :match-info. Filter by the match's id range, demunge,
+   and run through `classify-render-entry` for re-com annotation."
+  [match all-traces]
+  (when-let [[first-id last-id] (match-trace-ids match)]
+    (->> (traces-in-id-range all-traces first-id last-id)
+         (filter #(= :render (:op-type %)))
+         (mapv (fn [t]
+                 (let [tags (:tags t)
+                       comp (demunge-component-name
+                              (or (:component-name tags) (str (:operation t))))]
+                   {:component comp
+                    :time-ms   (:duration t)
+                    :reaction  (:reaction tags)})))
+         (mapv classify-render-entry))))
+
+(defn- has-render-burst?
+  "True if the match's :match-info contains a `:reagent/quiescent`
+   close — meaning Reagent rendered before the match closed. These
+   matches carry `:render` traces in their id range AND have
+   :run? entries in their `:sub-state :reaction-state`.
+
+   Two cases this catches:
+   1. A queued user dispatch where the page was actively rendering:
+      one match holds event + handler + renders + quiescent.
+   2. A render-burst follow-up to a `dispatch-sync` (which closes its
+      match at `:sync` *before* reagent renders): the next match has
+      `:event nil` (or whatever the next event was) and ends at
+      `:reagent/quiescent` once renders finish.
+
+   When this match itself doesn't have a quiescent close (e.g. a
+   `dispatch-sync` ending at :sync, or a match closed by the start of
+   the next event), `coerce-epoch` looks at the immediately-following
+   match for the render data."
+  [match]
+  (boolean
+   (and match
+        (some #(= :reagent/quiescent (:op-type %)) (:match-info match)))))
+
+(defn- match-after
+  "The match that comes immediately after `match` in chronological
+   order in `all-matches`, or nil if `match` is the head."
+  [match all-matches]
+  (let [target-id (match-id match)
+        tail      (drop-while #(not= target-id (match-id %)) all-matches)]
+    (second tail)))
 
 (defn coerce-epoch
   "Translate a raw 10x match into the §4.3a epoch record. Returns nil
    when raw is nil. Public so callers that already pulled matches from
    10x's buffer can reshape them.
 
-   Note: `:renders[].src` is not populated here — re-com's `:src` is
-   not threaded into the render trace today. The `dom/*` ops do that
-   join via the live DOM (§4.3b)."
-  [raw]
-  (when raw
-    (let [event-trace (find-trace raw :event)
-          tags        (:tags event-trace)]
-      {:id                (match-id raw)
-       :t                 (:start event-trace)
-       :time-ms           (:duration event-trace)
-       :event             (:event tags)
-       :coeffects         (:coeffects tags)
-       :effects           (:effects tags)
-       :effects/fired     (flatten-fx (:effects tags))
-       ;; Just the chain of :id keywords — the raw interceptor records
-       ;; carry :before / :after function refs that print as #object[...]
-       ;; and don't survive the edn round-trip back through cljs-eval.
-       ;; Callers who want the real interceptor map can hit
-       ;; `registrar/describe :event <id>`.
-       :interceptor-chain (mapv :id (:interceptors tags))
-       :app-db/diff       (diff-app-db event-trace)
-       :subs/ran          (sub-runs raw)
-       :subs/cache-hit    (sub-cache-hits raw)
-       :renders           (renders-for raw)})))
+   How render / sub-run data is sourced
+   -----------------------------------
+   re-frame's user-event match closes at `:sync` (or before reagent
+   has rendered). The render burst — sub re-runs and component
+   renders — lands in the *next* match in 10x's buffer, which has a
+   nil `:event` tag and ends at `:reagent/quiescent`. So when we
+   coerce a user-event match, we look up the immediately-following
+   render-burst match and merge its `:subs/ran`, `:subs/cache-hit`,
+   and `:renders` into the result. If the match itself IS a
+   render burst (no preceding user event in the buffer), we read
+   directly from it.
+
+   `:app-db/diff`, `:event`, `:effects`, `:coeffects` always come from
+   the user-event match — those are the things the user actually
+   dispatched.
+
+   Two arities:
+     (coerce-epoch raw)
+       Fetches `all-traces` and `all-matches` from 10x's app-db.
+     (coerce-epoch raw {:keys [all-traces all-matches]})
+       Pass explicit context (for batching across many epochs, or
+       for tests with a synthetic environment).
+
+   Note: `:renders[].src` is not populated — re-com's `:src` is not
+   threaded into the render trace today. The `dom/*` ops do that join
+   via the live DOM (§4.3b)."
+  ([raw]
+   (coerce-epoch raw {:all-traces  (read-10x-all-traces)
+                      :all-matches (when (ten-x-app-db-ratom)
+                                     (read-10x-epochs))}))
+  ([raw {:keys [all-traces all-matches]}]
+   (when raw
+     (let [event-trace (find-trace raw :event)
+           tags        (:tags event-trace)
+           render-src  (or (when (has-render-burst? raw) raw)
+                           (let [nxt (match-after raw all-matches)]
+                             (when (has-render-burst? nxt) nxt)))]
+       {:id                (match-id raw)
+        :t                 (:start event-trace)
+        :time-ms           (:duration event-trace)
+        :event             (:event tags)
+        :coeffects         (:coeffects tags)
+        :effects           (:effects tags)
+        :effects/fired     (flatten-fx (:effects tags))
+        ;; Just the chain of :id keywords — the raw interceptor records
+        ;; carry :before / :after function refs that print as #object[...]
+        ;; and don't survive the edn round-trip back through cljs-eval.
+        ;; Callers who want the real interceptor map can hit
+        ;; `registrar/describe :event <id>`.
+        :interceptor-chain (mapv :id (:interceptors tags))
+        :app-db/diff       (diff-app-db event-trace)
+        :subs/ran          (when render-src (sub-runs-from-state render-src))
+        :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src))
+        :renders           (when render-src (renders-from-traces render-src all-traces))}))))
 
 (defn latest-epoch-id
   "Id of 10x's newest match, or nil if the buffer is empty."
