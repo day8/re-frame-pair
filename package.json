@@ -25,7 +25,8 @@
   "license": "MIT",
   "author": "day8 (https://github.com/day8)",
   "scripts": {
-    "test": "shadow-cljs compile runtime-test && node out/runtime-test.js"
+    "test": "shadow-cljs compile runtime-test && node out/runtime-test.js",
+    "prepublishOnly": "npm test"
   },
   "devDependencies": {
     "shadow-cljs": "3.2.0"
