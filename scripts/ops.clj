@@ -413,11 +413,55 @@
   (let [{events true others false} (group-by #(str/starts-with? % "[") args)]
     [(first events) (concat others (rest events))]))
 
-;; The bash-side wait between tagged-dispatch-sync! and collect-after-dispatch.
-;; Mirror runtime.cljs's `trace-debounce-settle-ms`: trace's ~50ms callback
-;; debounce + 1 render frame for `:render` traces to land. 80ms is a
-;; comfortable upper bound.
-(def ^:private trace-collect-wait-ms 80)
+;; ---------------------------------------------------------------------------
+;; Tunable timings — keep them named so it's obvious where each comes from
+;; ---------------------------------------------------------------------------
+
+(def ^:private trace-collect-wait-ms
+  "Bash-side sleep between `tagged-dispatch-sync!` and
+   `collect-after-dispatch`. Mirrors runtime.cljs's
+   trace-debounce-settle-ms: re-frame.trace's ~50ms callback debounce
+   + 1 render frame for :render traces to land. 80ms is a comfortable
+   upper bound."
+  80)
+
+(def ^:private default-watch-poll-ms
+  "Default watch-epochs.sh poll cadence (overridable with --poll-ms)."
+  100)
+
+(def ^:private default-watch-window-ms
+  "Default watch window when --count not yet hit (overridable with --window-ms).
+   Half-open from start-of-watch."
+  30000)
+
+(def ^:private default-watch-idle-ms
+  "In streaming mode, terminate when no match has fired this many ms
+   (overridable with --idle-ms)."
+  30000)
+
+(def ^:private default-watch-hard-cap-ms
+  "Absolute upper bound on a watch invocation (overridable with --hard-ms).
+   The 'never silently runs forever' invariant from spec §4.4."
+  300000)
+
+(def ^:private default-watch-count
+  "Default match count to wait for before terminating
+   (overridable with --count)."
+  5)
+
+(def ^:private default-tail-build-wait-ms
+  "Default tail-build.sh probe wait window (overridable with --wait-ms).
+   Hard cap on how long we'll wait for a probe to flip after an edit."
+  5000)
+
+(def ^:private tail-build-poll-ms
+  "tail-build.sh probe poll cadence."
+  100)
+
+(def ^:private tail-build-soft-delay-ms
+  "When --probe is omitted, tail-build.sh just sleeps this long and
+   reports :soft? true (per spec §4.5 — best we can do without a probe)."
+  300)
 
 (defn- dispatch-op [args]
   (ensure-port!)
@@ -556,12 +600,12 @@
   (let [build-id    (build-id-from-args args)
         stream?     (has-flag? args "--stream")
         stop?       (has-flag? args "--stop")
-        window-ms   (Long/parseLong (flag-value args "--window-ms" "30000"))
-        count-n     (Long/parseLong (flag-value args "--count" "5"))
+        window-ms   (Long/parseLong (flag-value args "--window-ms" (str default-watch-window-ms)))
+        count-n     (Long/parseLong (flag-value args "--count" (str default-watch-count)))
         pred        (parse-predicate-args args)
-        idle-ms     (Long/parseLong (flag-value args "--idle-ms" "30000"))
-        hard-ms     (Long/parseLong (flag-value args "--hard-ms" "300000"))
-        poll-ms     (Long/parseLong (flag-value args "--poll-ms" "100"))
+        idle-ms     (Long/parseLong (flag-value args "--idle-ms" (str default-watch-idle-ms)))
+        hard-ms     (Long/parseLong (flag-value args "--hard-ms" (str default-watch-hard-cap-ms)))
+        poll-ms     (Long/parseLong (flag-value args "--poll-ms" (str default-watch-poll-ms)))
         reinjected? (when-not stop? (ensure-injected! build-id))]
     (cond
       stop?
@@ -629,17 +673,18 @@
 (defn- tail-build-op [args]
   (ensure-port!)
   (let [build-id    (build-id-from-args args)
-        wait-ms     (Long/parseLong (flag-value args "--wait-ms" "5000"))
+        wait-ms     (Long/parseLong (flag-value args "--wait-ms" (str default-tail-build-wait-ms)))
         probe       (flag-value args "--probe" nil)
-        poll-ms     100
+        poll-ms     tail-build-poll-ms
         reinjected? (ensure-injected! build-id)]
     (cond
       (nil? probe)
       ;; Soft / timer-based fallback: no probe = wait a fixed delay
       ;; and report :soft? true per spec §4.5.
-      (do (Thread/sleep 300)
+      (do (Thread/sleep tail-build-soft-delay-ms)
           (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? true
-                         :note "No probe supplied; waited a 300ms fixed delay."}
+                         :note (str "No probe supplied; waited a "
+                                    tail-build-soft-delay-ms "ms fixed delay.")}
                   reinjected? (assoc :reinjected? true))))
 
       :else
