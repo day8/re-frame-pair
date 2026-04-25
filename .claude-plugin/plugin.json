@@ -35,7 +35,7 @@
     "./scripts/watch-epochs.sh",
     "./scripts/tail-build.sh",
     "./scripts/ops.clj",
-    "./scripts/runtime.cljs"
+    "./scripts/re_frame_pair/runtime.cljs"
   ],
   "requirements": {
     "babashka": ">=1.3.0"

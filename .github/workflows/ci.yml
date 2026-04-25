@@ -1,7 +1,7 @@
 name: ci
 
-# Runs on every push and PR. Smoke-tests the babashka shims and,
-# once wired up, the runtime.cljs unit test suite.
+# Runs on every push and PR. Smoke-tests the babashka shims and runs
+# the runtime-test shadow-cljs build (cljs.test on node).
 
 on:
   push:
@@ -44,3 +44,35 @@ jobs:
           for f in $(node -e "console.log(require('./.claude-plugin/plugin.json').scripts.join('\n'))"); do
             test -f "$f" || { echo "Missing: $f"; exit 1; }
           done
+
+  runtime-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Set up JDK
+        uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Cache deps.edn deps
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: ${{ runner.os }}-cljs-${{ hashFiles('deps.edn', 'shadow-cljs.edn') }}
+          restore-keys: ${{ runner.os }}-cljs-
+
+      - name: Install npm deps
+        run: npm install
+
+      - name: Run runtime tests (shadow-cljs :node-test)
+        run: npm test

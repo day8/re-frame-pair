@@ -67,11 +67,17 @@ jobs:
           bb scripts/ops.clj unknown-subcommand 2>&1 | grep -q ":unknown-subcommand"
           echo "ops.clj dispatcher responds"
 
+      - name: Set up JDK (for shadow-cljs)
+        uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Install npm deps
+        run: npm install
+
       - name: Run CLJS unit tests
-        # Placeholder: wire up shadow-cljs once the fixture + test build are in place.
-        # For now this step is a no-op — runtime_test.cljs exists but has no build.
-        run: |
-          echo "CLJS unit tests: deferred until tests/fixture is wired up."
+        run: npm test
 
       - name: Publish to npm
         run: npm publish

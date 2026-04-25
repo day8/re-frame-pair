@@ -1,0 +1,21 @@
+;; deps for the runtime-test shadow-cljs build (rfp-8sg). The unit
+;; tests under tests/runtime/ exercise the pure helpers in
+;; scripts/re_frame_pair/runtime.cljs (re-com classification,
+;; rc-src parsing, predicate matching, coerce-epoch shape, etc.) —
+;; all without a live browser or re-frame app.
+;;
+;; The fixture (tests/fixture/) has its own deps.edn. We don't share
+;; this one with it because the fixture pulls every dep transitively
+;; (10x, re-com) and the runtime-tests only need the re-frame surface
+;; that runtime.cljs requires.
+
+{:paths ["scripts" "tests/runtime"]
+ :deps  {;; Pinned to mvn versions so CI can build without
+         ;; needing the sibling repos co-located. The fixture's
+         ;; deps.edn uses :local/root because it's exercising
+         ;; *current* source — but the runtime-test build only
+         ;; cares about the public re-frame surface that runtime.cljs
+         ;; requires (re-frame.core, re-frame.db, re-frame.registrar,
+         ;; re-frame.subs, re-frame.trace), which is stable.
+         re-frame/re-frame {:mvn/version "1.4.5"}
+         reagent/reagent   {:mvn/version "1.2.0"}}}

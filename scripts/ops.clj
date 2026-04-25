@@ -150,7 +150,11 @@
             port-file-candidates)))
 
 (defn- runtime-cljs-path []
-  (.getPath (io/file (.getParent (io/file *file*)) "runtime.cljs")))
+  ;; Lives at scripts/re_frame_pair/runtime.cljs — canonical
+  ;; ns-to-path layout for the `re-frame-pair.runtime` namespace, so
+  ;; shadow-cljs can compile it for the runtime-test build alongside
+  ;; the inject path.
+  (.getPath (io/file (.getParent (io/file *file*)) "re_frame_pair" "runtime.cljs")))
 
 ;; ---------------------------------------------------------------------------
 ;; Output helpers
