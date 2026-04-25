@@ -140,18 +140,20 @@ scripts/tail-build.sh --wait-ms 5000 --probe '(some/probe-form)'
 
 `--probe` is a CLJS form chosen to change when the edited code reloads (see *Hot-reload protocol* below). If you don't know a good probe, omit `--probe` and the script falls back to a 300ms timer; the result includes `:soft? true` so you know it's timer-based.
 
-### Time-travel (planned adapter over 10x internals)
+### Time-travel (adapter over 10x internals)
 
-These ops are **planned** adapters over re-frame-10x's internal epoch navigation — 10x has no stable public undo API, so the adapter reaches into 10x internals directly. Until implemented, calls error with `{:not-yet-implemented true}`.
+These ops dispatch into re-frame-10x's *inlined* re-frame instance — 10x has no stable public undo API, so the adapter reaches into 10x internals directly. The events live in `day8.re-frame-10x.navigation.epochs.events`; each navigation event triggers `::reset-current-epoch-app-db`, which is `(reset! userland.re-frame.db/app-db <pre-state>)` — that's the time-travel mechanism. The reset only fires when 10x's `:settings :app-db-follows-events?` is true (default true; users can toggle from 10x's Settings panel). When 10x isn't loaded, the ops fail with `{:reason :ten-x-missing}`.
 
 | Op | Invocation | Purpose |
 |---|---|---|
-| `undo/step-back` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-step-back)'` | Rewind one epoch |
-| `undo/step-forward` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-step-forward)'` | Redo |
-| `undo/to-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-to-epoch "<id>")'` | Jump to epoch |
-| `undo/status` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-status)'` | Position + `:side-effects-since` |
+| `undo/step-back` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-step-back)'` | Rewind one epoch (`::previous`) |
+| `undo/step-forward` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-step-forward)'` | Redo (`::next`) |
+| `undo/most-recent` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-most-recent)'` | Jump to head (`::most-recent`) |
+| `undo/to-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-to-epoch <id>)'` | Jump to specific epoch (`::load`) |
+| `undo/replay` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-replay)'` | Re-fire the selected event (`::replay`) |
+| `undo/status` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/undo-status)'` | `:selected-epoch-id`, `:back-count`, `:forward-count`, `:total-epochs`, `:app-db-follows-events?` |
 
-Caveat (tell the user): undo rewinds `app-db` only. Side effects that already fired (`:http-xhrio`, navigation, `:dispatch-later`) are *not* undone. Warn before an experiment that depends on clean state.
+Caveat (tell the user): undo rewinds `app-db` only. Side effects that already fired (`:http-xhrio`, navigation, `:dispatch-later`) are *not* undone. Warn before an experiment that depends on clean state. If `:app-db-follows-events?` is false, navigation succeeds but the app-db doesn't move — the ops surface `:warning :app-db-follows-events?-disabled` so you can flag this.
 
 ---
 
@@ -252,7 +254,7 @@ Use `dom/fire-click-at-src`. Report the resulting epoch. Useful when you want to
 
 **Why this works:** the same starting `app-db`, the same event, only the code changes — so any difference in the resulting epoch is attributable to *your edit*, nothing else. That makes it a controlled experiment rather than a fix-and-pray. Reach for this loop whenever you're unsure whether a change has the intended effect.
 
-> **Executability note:** as of this release, the `undo/*` ops below are planned adapters over 10x internals and currently return `{:not-yet-implemented true}` (see `STATUS.md` — §6 Time-travel). Until the 10x undo adapter lands, you can still follow steps 1 → 4 → 5 → 6 (patch and re-dispatch without a true rewind) and reason about the diff, but you can't restore `app-db` to an exact pre-event state. Tell the user this limitation before starting.
+> **Executability note:** the `undo/*` ops dispatch into 10x's internal navigation events; they only rewind `app-db` when 10x's `:settings :app-db-follows-events?` is true (default true). If 10x isn't loaded, the ops fail with `:reason :ten-x-missing` — tell the user 10x must be in the build before starting this loop. If 10x is loaded but `:app-db-follows-events?` is off, you'll get a `:warning` field in the result; have the user toggle it from 10x's Settings panel.
 
 Canonical procedure:
 
