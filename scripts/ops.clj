@@ -370,27 +370,37 @@
 ;; Subcommand: inject
 ;; ---------------------------------------------------------------------------
 
-(defn- inject-runtime-force!
-  "Like inject-runtime! but *always* re-ships scripts/runtime.cljs
-   regardless of whether the session sentinel already exists. Used by
-   the standalone `scripts/inject-runtime.sh` so skill developers
-   editing runtime.cljs can re-push their changes into a live browser
-   without a full page refresh."
-  [build-id]
-  (let [source (slurp (runtime-cljs-path))]
-    (cljs-eval build-id source))
-  (cljs-eval-value build-id "(re-frame-pair.runtime/health)"))
-
 (defn- inject-op [args]
   (ensure-port!)
   (let [build-id (build-id-from-args args)]
-    (try
-      (emit (assoc (inject-runtime-force! build-id)
-                   :build-id build-id
-                   :forced? true
-                   :note "Source re-shipped regardless of sentinel. Use this after editing scripts/runtime.cljs."))
-      (catch Exception e
-        (emit {:ok? false :reason :inject-failed :message (.getMessage e)})))))
+    ;; Two failure modes worth distinguishing:
+    ;;   :inject-failed — the source-ship eval threw (compile error,
+    ;;                    nREPL transport problem). Health was never
+    ;;                    attempted; the runtime is unchanged or
+    ;;                    partially loaded.
+    ;;   :health-failed — source shipped fine, but the post-inject
+    ;;                    health read threw. The runtime is probably
+    ;;                    in place but its `health` fn errored or
+    ;;                    something downstream broke.
+    ;; Lumping them as :inject-failed (the previous behavior) made
+    ;; debugging hard — operator couldn't tell whether to re-edit
+    ;; runtime.cljs or look elsewhere.
+    (let [shipped? (try
+                     (cljs-eval build-id (slurp (runtime-cljs-path)))
+                     true
+                     (catch Exception e
+                       (emit {:ok? false :reason :inject-failed
+                              :message (.getMessage e)})
+                       false))]
+      (when shipped?
+        (try
+          (emit (assoc (cljs-eval-value build-id "(re-frame-pair.runtime/health)")
+                       :build-id build-id
+                       :forced? true
+                       :note "Source re-shipped regardless of sentinel. Use this after editing scripts/runtime.cljs."))
+          (catch Exception e
+            (emit {:ok? false :reason :health-failed :message (.getMessage e)
+                   :hint "Source shipped, but the post-inject `health` read threw. Try `scripts/discover-app.sh` for a fresh check."})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: dispatch
