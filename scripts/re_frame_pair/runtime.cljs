@@ -448,26 +448,43 @@
         tail      (drop-while #(not= target-id (match-id %)) all-matches)]
     (second tail)))
 
+(defn- resolve-render-source
+  "Pick the match that holds render data for `match`, working around
+   re-frame + 10x's split between user-event and render epochs.
+
+   Three cases:
+
+   1. `match` itself ends at `:reagent/quiescent` — typical for a
+      queued `dispatch` on an actively-rendering page. Render data
+      is in this match's id range and sub-state. Return `match`.
+
+   2. `match` ends at `:sync` (a `dispatch-sync`, e.g. our --trace
+      bash path). Reagent renders fire on a later animation frame,
+      so 10x splits them into the *next* match (nil `:event` tag,
+      `:reagent/quiescent` close). Return that next match.
+
+   3. Neither — page tab inactive / throttled, or the match is the
+      head of the buffer with no follow-up yet. Return nil; the
+      caller leaves `:renders` / `:subs/ran` / `:subs/cache-hit`
+      blank rather than misleadingly empty.
+
+   `all-matches` is 10x's full buffer in chronological order so we can
+   reach for the next match. Tests pass it explicitly; live calls
+   pull it from the runtime."
+  [match all-matches]
+  (or (when (has-render-burst? match) match)
+      (let [nxt (match-after match all-matches)]
+        (when (has-render-burst? nxt) nxt))))
+
 (defn coerce-epoch
   "Translate a raw 10x match into the §4.3a epoch record. Returns nil
    when raw is nil. Public so callers that already pulled matches from
    10x's buffer can reshape them.
 
-   How render / sub-run data is sourced
-   -----------------------------------
-   re-frame's user-event match closes at `:sync` (or before reagent
-   has rendered). The render burst — sub re-runs and component
-   renders — lands in the *next* match in 10x's buffer, which has a
-   nil `:event` tag and ends at `:reagent/quiescent`. So when we
-   coerce a user-event match, we look up the immediately-following
-   render-burst match and merge its `:subs/ran`, `:subs/cache-hit`,
-   and `:renders` into the result. If the match itself IS a
-   render burst (no preceding user event in the buffer), we read
-   directly from it.
-
    `:app-db/diff`, `:event`, `:effects`, `:coeffects` always come from
    the user-event match — those are the things the user actually
-   dispatched.
+   dispatched. `:subs/ran`, `:subs/cache-hit`, `:renders` come from
+   `resolve-render-source` (which may step to the next match).
 
    Two arities:
      (coerce-epoch raw)
@@ -487,9 +504,7 @@
    (when raw
      (let [event-trace (find-trace raw :event)
            tags        (:tags event-trace)
-           render-src  (or (when (has-render-burst? raw) raw)
-                           (let [nxt (match-after raw all-matches)]
-                             (when (has-render-burst? nxt) nxt)))]
+           render-src  (resolve-render-source raw all-matches)]
        {:id                (match-id raw)
         :t                 (:start event-trace)
         :time-ms           (:duration event-trace)
