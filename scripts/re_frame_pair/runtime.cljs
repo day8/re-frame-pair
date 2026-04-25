@@ -443,11 +443,26 @@
        :id-aged-out? true
        :requested-id id})))
 
+(defn- now-ms
+  "Same clock re-frame.trace uses for trace `:start`: `performance.now()`
+   when available (page-load-relative monotonic ms), else `Date.now()`
+   (epoch ms). Match the trace clock — comparing across the two gives
+   nonsense (perf.now is in the thousands, Date.now in the trillions)."
+  []
+  (if (and (exists? js/performance) (exists? js/performance.now))
+    (.now js/performance)
+    (.now js/Date)))
+
 (defn epochs-in-last-ms
   "Epochs appended in the last N ms (pull). Compares against the event
-   trace's `:start` timestamp (interop/now millis at trace entry)."
+   trace's `:start` timestamp.
+
+   `:start` comes from re-frame.trace via `interop/now` — that's
+   `performance.now()` (page-load-relative) when available, not wall-clock
+   `Date.now()`. The cutoff has to be on the same clock or every epoch
+   looks ancient."
   [ms]
-  (let [cutoff (- (js/Date.now) ms)]
+  (let [cutoff (- (now-ms) ms)]
     (->> (read-10x-epochs)
          (filter (fn [m] (let [t (:start (find-trace m :event))]
                            (and t (>= t cutoff)))))
