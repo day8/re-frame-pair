@@ -382,48 +382,67 @@
 (defn- has-flag? [args flag]
   (boolean (some #(= % flag) args)))
 
+(defn- partition-dispatch-args
+  "Split dispatch.sh args into [event-str other-args]. The event-str is
+   the first arg starting with `[` (the edn event-vec); everything else
+   is treated as a flag. Order-independent so
+
+     dispatch.sh '[:ev]' --trace
+     dispatch.sh --trace '[:ev]'
+     dispatch.sh --trace '[:ev]' --build=app
+
+   all parse identically."
+  [args]
+  (let [{events true others false} (group-by #(str/starts-with? % "[") args)]
+    [(first events) (concat others (rest events))]))
+
+;; The bash-side wait between tagged-dispatch-sync! and collect-after-dispatch.
+;; Mirror runtime.cljs's `trace-debounce-settle-ms`: trace's ~50ms callback
+;; debounce + 1 render frame for `:render` traces to land. 80ms is a
+;; comfortable upper bound.
+(def ^:private trace-collect-wait-ms 80)
+
 (defn- dispatch-op [args]
   (ensure-port!)
-  (when (empty? args) (die :missing-event :hint "usage: dispatch '[:ev/id args...]' [--sync] [--trace]"))
-  (let [event-str (first args)
-        rest-args (rest args)
-        build-id  (build-id-from-args rest-args)
-        sync?     (has-flag? rest-args "--sync")
-        trace?    (has-flag? rest-args "--trace")]
-    (try
-      (cond
-        ;; --trace: sync dispatch; wait two animation frames bash-side
-        ;; so Reagent's render traces land; then fetch the epoch by id.
-        ;; The frame wait is bash-side (sleep) rather than runtime-side
-        ;; (js/Promise) because Promise results don't survive the
-        ;; cljs-eval round-trip cleanly.
-        trace?
-        (let [sync-result (cljs-eval-value
-                            build-id
-                            (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))]
-          (if (and (map? sync-result) (:ok? sync-result) (:epoch-id sync-result))
-            (do
-              (Thread/sleep 32)            ; ~2 animation frames at 60fps
-              (let [epoch (cljs-eval-value
-                            build-id
-                            (format "(re-frame-pair.runtime/epoch-by-id %s)"
-                                    (pr-str (:epoch-id sync-result))))]
-                (emit (merge {:mode :trace} sync-result
-                             (when epoch {:epoch epoch})))))
-            (emit (merge {:mode :trace :epoch nil} sync-result))))
+  (let [[event-str rest-args] (partition-dispatch-args args)]
+    (when-not event-str
+      (die :missing-event :hint "usage: dispatch '[:ev/id args...]' [--sync] [--trace] [--build=<id>]"))
+    (let [build-id (build-id-from-args rest-args)
+          sync?    (has-flag? rest-args "--sync")
+          trace?   (has-flag? rest-args "--trace")]
+      (try
+        (cond
+          ;; --trace: sync dispatch, capture before-id, wait past
+          ;; trace-debounce, then collect+tag the new epoch in a second
+          ;; eval. We do the wait bash-side because dispatch-and-collect
+          ;; (the Promise version) doesn't round-trip cleanly through
+          ;; cljs-eval.
+          trace?
+          (let [sync-result (cljs-eval-value
+                              build-id
+                              (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))]
+            (if (and (map? sync-result) (:ok? sync-result))
+              (do
+                (Thread/sleep trace-collect-wait-ms)
+                (let [collected (cljs-eval-value
+                                  build-id
+                                  (format "(re-frame-pair.runtime/collect-after-dispatch %s)"
+                                          (pr-str (:before-id sync-result))))]
+                  (emit (merge {:mode :trace} sync-result collected))))
+              (emit (merge {:mode :trace :epoch nil} sync-result))))
 
-        sync?
-        (emit (merge {:mode :sync}
-                     (cljs-eval-value build-id
-                       (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))))
+          sync?
+          (emit (merge {:mode :sync}
+                       (cljs-eval-value build-id
+                         (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))))
 
-        :else
-        (emit (merge {:mode :queued}
-                     (cljs-eval-value build-id
-                       (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str)))))
-      (catch Exception e
-        (emit {:ok? false :reason :dispatch-failed :message (.getMessage e)
-               :ex-data (ex-data e)})))))
+          :else
+          (emit (merge {:mode :queued}
+                       (cljs-eval-value build-id
+                         (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str)))))
+        (catch Exception e
+          (emit {:ok? false :reason :dispatch-failed :message (.getMessage e)
+                 :ex-data (ex-data e)}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: trace-recent

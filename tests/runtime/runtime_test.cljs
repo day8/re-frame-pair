@@ -196,8 +196,10 @@
     (testing "coeffects + effects pulled through"
       (is (= {:db {:cart {:items []}}} (:coeffects e)))
       (is (map? (:effects e))))
-    (testing "interceptor chain"
-      (is (= [{:id :coeffects} {:id :db-handler}] (:interceptor-chain e))))
+    (testing "interceptor chain — :id keywords only (raw maps carry
+              :before/:after function refs that don't edn-roundtrip
+              back through cljs-eval)"
+      (is (= [:coeffects :db-handler] (:interceptor-chain e))))
     (testing "app-db/diff has clojure.data/diff results"
       (is (some? (:app-db/diff e)))
       (is (= {:cart {:coupon "SPRING25"}} (get-in e [:app-db/diff :only-after])))

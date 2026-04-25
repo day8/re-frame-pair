@@ -356,7 +356,12 @@
        :coeffects         (:coeffects tags)
        :effects           (:effects tags)
        :effects/fired     (flatten-fx (:effects tags))
-       :interceptor-chain (:interceptors tags)
+       ;; Just the chain of :id keywords — the raw interceptor records
+       ;; carry :before / :after function refs that print as #object[...]
+       ;; and don't survive the edn round-trip back through cljs-eval.
+       ;; Callers who want the real interceptor map can hit
+       ;; `registrar/describe :event <id>`.
+       :interceptor-chain (mapv :id (:interceptors tags))
        :app-db/diff       (diff-app-db event-trace)
        :subs/ran          (sub-runs raw)
        :subs/cache-hit    (sub-cache-hits raw)
@@ -567,6 +572,37 @@
                                       :after-id  after-id
                                       :hint   "10x did not append a new match within the debounce + 1 frame. The dispatch fired, but no trace landed — possible causes: trace-enabled? false, handler threw before tracing finished, or browser tab is throttled."}))))))) ]
        (js/setTimeout settle trace-debounce-settle-ms)))))
+
+(defn collect-after-dispatch
+  "Companion to `tagged-dispatch-sync!`: after a bash-side wait past
+   the trace-debounce, sample the new head id, tag it as
+   Claude-originated, and return the coerced epoch.
+
+   This is the synchronous equivalent of `dispatch-and-collect`'s
+   post-await branch — split out so the bb shim can drive the wait
+   itself (the JS Promise from `dispatch-and-collect` doesn't survive
+   the cljs-eval round-trip back to babashka).
+
+   Caller pattern (in ops.clj's --trace path):
+     1. cljs-eval `(tagged-dispatch-sync! ev)` → grab :before-id
+     2. Thread/sleep ~80ms (trace-debounce-settle-ms below)
+     3. cljs-eval `(collect-after-dispatch <before-id>)` → epoch + tag
+
+   Returns:
+     {:ok? true :epoch-id <id> :epoch <coerced>}    — new epoch landed
+     {:ok? false :reason :no-new-epoch :before-id ... :after-id ...}"
+  [before-id]
+  (let [after-id (latest-epoch-id)]
+    (if (and after-id (not= before-id after-id))
+      (do (swap! claude-epoch-ids conj after-id)
+          {:ok?      true
+           :epoch-id after-id
+           :epoch    (epoch-by-id after-id)})
+      {:ok?       false
+       :reason    :no-new-epoch
+       :before-id before-id
+       :after-id  after-id
+       :hint      "10x did not append a new match within the wait window. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."})))
 
 ;; ---------------------------------------------------------------------------
 ;; re-com awareness
