@@ -1289,17 +1289,31 @@
           nil)
         :unknown)))
 
-(defn- version-below?
+(defn version-below?
   "Compare observed to floor as dotted-number strings. Returns true if
    observed is strictly below floor. Returns false if either is
-   :unknown or nil (can't enforce what we can't read)."
+   :unknown or nil (can't enforce what we can't read).
+
+   Public so tests can exercise it without setting up a live
+   re-com.config/version goog-define.
+
+   Implementation: pull digit runs from each side, zero-pad both
+   sides to the same length, then compare. CLJS's `compare` on
+   vectors compares LENGTHS first (unlike JVM Clojure's
+   compare-indexed which compares elements first), so without padding
+   `[2 20 0]` and `[2 21]` would order by `(> 3 2)` instead of
+   `(< 20 21)`. Padding makes the comparison length-invariant."
   [observed floor]
   (and (string? observed) (string? floor)
        (let [->ints #(mapv (fn [s]
                              (let [n (js/parseInt s 10)]
                                (if (js/Number.isNaN n) 0 n)))
-                           (re-seq #"\d+" %))]
-         (neg? (compare (->ints observed) (->ints floor))))))
+                           (re-seq #"\d+" %))
+             obs    (->ints observed)
+             flr    (->ints floor)
+             width  (max (count obs) (count flr))
+             pad    (fn [v] (vec (concat v (repeat (- width (count v)) 0))))]
+         (neg? (compare (pad obs) (pad flr))))))
 
 (defn version-report
   "Per-dep version read. Returned shape:
