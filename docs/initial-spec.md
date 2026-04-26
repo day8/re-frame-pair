@@ -585,6 +585,8 @@ CI runs (1) and (2) on every push; (3) and (4) on main + nightly. Release gates 
 
 ## Appendix A — Proposed companion changes to re-frame, re-frame-10x, and re-com
 
+See [`docs/companion-re-frame.md`](./companion-re-frame.md), [`docs/companion-re-frame-10x.md`](./companion-re-frame-10x.md), and [`docs/companion-re-com.md`](./companion-re-com.md) for implementation-ready writeups of each item below.
+
 re-frame-pair can ship against these libraries as they exist today. The following changes to re-frame, re-frame-10x, and re-com would reduce re-frame-pair's code size, stabilise its contract, or unlock new recipes. Ordered by leverage.
 
 ### Tier 1 — high leverage
