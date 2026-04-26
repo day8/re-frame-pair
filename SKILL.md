@@ -206,6 +206,21 @@ When the user asks a matching question, run the procedure below rather than impr
 3. Walk the Layer 2 → Layer 3 chain of that sub. For each layer, compare the pre- and post-epoch value.
 4. Report the equality gate that held the value constant ("Layer 2 at `[:user/profile]` returned the same map both times, so Layer 3 at `[:user/display-name]` short-circuited").
 
+### "Is the rendered output correct?" / "Verify the view matches the data"
+
+When the user asks whether a panel is showing the right values, don't stop at the data-flow check — verify what's actually in the DOM. Strong-form: prove data → sub → render → DOM, not just data → sub.
+
+1. Read the panel's data inputs (`app-db/get`, relevant sub outputs).
+2. Compute the expected rendered text from those inputs (e.g. `(str "items: " (count items))`).
+3. Use `dom/find-by-src "<view-file>.cljs" <line>` for a specific element, or a broader query when you don't know the line:
+   ```
+   eval-cljs '(->> (.. js/document (querySelectorAll "[data-rc-src]"))
+                   array-seq
+                   (filter #(re-find #"<pattern>" (.-textContent %)))
+                   (mapv #(hash-map :src (.getAttribute % "data-rc-src") :text (.-textContent %))))'
+   ```
+4. Compare rendered vs expected. If they differ, data was right but Reagent didn't re-render — chase sub invalidation or `:dev/after-load`. If both match, the panel is correct end-to-end.
+
 ### "Explain this dispatch"
 
 Run `trace/dispatch-and-collect` (or read a recent epoch), then narrate the six dominoes:
