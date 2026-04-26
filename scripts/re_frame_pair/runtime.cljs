@@ -1492,3 +1492,50 @@
    :versions            (version-report)
    :epoch-count         (epoch-count)
    :claude-epoch-count  (count @claude-epoch-ids)})
+
+;; ---------------------------------------------------------------------------
+;; Session-bootstrap summary
+;; ---------------------------------------------------------------------------
+
+(defn- value-shape-tag
+  "Compact one-level-deep shape descriptor for app-summary. Returns
+   a symbol naming the type without dragging the value itself into
+   the response."
+  [v]
+  (cond
+    (nil? v)        'nil
+    (map? v)        'map
+    (vector? v)     'vec
+    (set? v)        'set
+    (sequential? v) 'seq
+    (string? v)     'string
+    (boolean? v)    'boolean
+    (keyword? v)    'keyword
+    (number? v)     'number
+    :else           'other))
+
+(defn app-summary
+  "One-call session-bootstrap bundle. Returns versions, registrar
+   inventory, live subs, app-db top-level keys + one-level shape,
+   and the health map — saves 5+ separate ops at session start.
+
+   Returned shape:
+     {:ok?          true
+      :versions     <version-report>
+      :registrar    {:event [...] :sub [...] :fx [...] :cofx [...]}
+      :live-subs    [<query-v> ...]
+      :app-db-keys  [...]               ;; nil if app-db is not a map
+      :app-db-shape {<key> <type-sym>}  ;; nil if app-db is not a map
+      :health       <health map>
+      :ts           <unix-ms>}"
+  []
+  (let [db @db/app-db]
+    {:ok?          true
+     :versions     (version-report)
+     :registrar    (:by-kind (registrar-describe))
+     :live-subs    (subs-live)
+     :app-db-keys  (when (map? db) (vec (keys db)))
+     :app-db-shape (when (map? db)
+                     (into {} (map (fn [[k v]] [k (value-shape-tag v)])) db))
+     :health       (health)
+     :ts           (js/Date.now)}))

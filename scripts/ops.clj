@@ -734,6 +734,22 @@
               (recur))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Subcommand: app-summary
+;; ---------------------------------------------------------------------------
+
+(defn- app-summary-op [args]
+  (ensure-port!)
+  (let [build-id    (build-id-from-args args)
+        reinjected? (ensure-injected! build-id)]
+    (try
+      (let [result (cljs-eval-value build-id "(re-frame-pair.runtime/app-summary)")]
+        (emit (cond-> result
+                reinjected? (assoc :reinjected? true))))
+      (catch Exception e
+        (emit (cond-> {:ok? false :reason :app-summary-failed :message (.getMessage e)}
+                reinjected? (assoc :reinjected? true)))))))
+
+;; ---------------------------------------------------------------------------
 ;; Subcommand: console-tail
 ;; ---------------------------------------------------------------------------
 
@@ -773,7 +789,8 @@
     "watch"        (watch-op (rest args))
     "tail-build"   (tail-build-op (rest args))
     "console-tail" (console-tail-op (rest args))
+    "app-summary"  (app-summary-op (rest args))
     (die :unknown-subcommand :arg (first args)
-         :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build" "console-tail"})))
+         :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build" "console-tail" "app-summary"})))
 
 (apply -main *command-line-args*)

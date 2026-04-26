@@ -51,9 +51,12 @@ Before any other op, run:
 
 ```
 scripts/discover-app.sh
+scripts/app-summary.sh    # versions + registrar + live subs + app-db shape + health, in one round-trip
 ```
 
-This locates the shadow-cljs nREPL port, connects, switches the session to `:cljs` mode for the running build, verifies re-frame + re-frame-10x + re-com + `trace-enabled?`, and injects the runtime namespace.
+`discover-app.sh` locates the shadow-cljs nREPL port, connects, switches the session to `:cljs` mode for the running build, verifies re-frame + re-frame-10x + re-com + `trace-enabled?`, and injects the runtime namespace.
+
+`app-summary.sh` is the recommended second call: a bootstrap bundle that lets you ground the conversation in 'what handlers exist, what subs are live, what's in app-db' without 5+ separate ops.
 
 If any precondition fails, the script returns a structured error like `{:ok? false :missing :re-frame-10x}`. Report the failing check to the user verbatim; do *not* guess at workarounds.
 
@@ -69,6 +72,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 
 | Op | Invocation | Returns |
 |---|---|---|
+| `app/summary` | `scripts/app-summary.sh` | Bootstrap bundle: versions, registrar inventory, live subs, app-db top-level keys + one-level shape, health. Use this as the first call after `discover-app.sh`. |
 | `app-db/snapshot` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/snapshot)'` | Current `@app-db` |
 | `app-db/get` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/app-db-at [:path :to :value])'` | Path-scoped value |
 | `app-db/schema` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/schema)'` | Opt-in schema or nil |
