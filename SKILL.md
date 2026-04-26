@@ -105,6 +105,8 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
 | `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
 
+Every coerced epoch also carries `:debux/code` — a vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries written by [re-frame-debux](https://github.com/day8/re-frame-debux) when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`. `nil` when debux isn't on the classpath or the handler wasn't wrapped; a vec (possibly empty) when it was. See the *"Trace a handler / sub / fx form-by-form"* recipe below for the on-demand wrap procedure.
+
 ### Console / errors
 
 A ring buffer of `js/console.{log,warn,error,info,debug}` calls captured by the runtime, tagged with `:who` so you can ask "what did MY dispatch log, vs the user's app, vs which handler threw?". Installed by `health` (idempotent, max 500 entries).
