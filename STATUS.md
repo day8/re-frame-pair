@@ -2,7 +2,7 @@
 
 A living record of what's actually implemented, what's scaffolded, and what's blocked on the spike. Updated per release. See `docs/initial-spec.md` for the design this is measured against.
 
-**Last updated:** 2026-04-25 (post-spike, pre-tag)
+**Last updated:** 2026-04-26 (post-beta.2 merge)
 
 ---
 
@@ -16,11 +16,11 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | `scripts/ops.clj` + shell shims | Written — babashka dispatches every op |
 | `.claude-plugin/plugin.json` | Written |
 | `package.json` + GH Actions (CI + release) | Written; CI now runs the runtime-test build per push |
-| `tests/runtime/` unit tests | Wired to shadow-cljs `:node-test` build and exercise the new coerce-epoch shape |
-| `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app for end-to-end spike runs |
-| End-to-end against a live re-frame app | **Pending operator** — fixture compiles structurally; first run with `cd tests/fixture && npm install && npx shadow-cljs watch app` is the gate to tagging beta.1 |
+| `tests/runtime/` unit tests | **16 deftests / 141 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
+| `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app; bundled bootstrap + re-com CSS for self-contained rendering |
+| End-to-end against a live re-frame app | **Verified** — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 predicate filters validated; time-travel rolls userland app-db correctly. v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs #1, #2). |
 
-Pre-alpha is over: every ground-truth question from §8a has been answered against current source (see *Spike findings* below). The remaining work is operator-side validation against the fixture.
+v0.1.0-beta.2 is on `main`. All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, and CI is green on both PRs. Remaining gate to tag: operator decision.
 
 ---
 
@@ -28,15 +28,15 @@ Pre-alpha is over: every ground-truth question from §8a has been answered again
 
 | Phase | Deliverable | State | Notes |
 |---|---|---|---|
-| 0 | `eval-cljs.sh` round-trips a form | **Coded, not yet run** | `scripts/eval-cljs.sh` + `ops.clj` implement it; needs a live nREPL to verify. |
-| 1 | Read surface (§4.1) | **Coded** | `app-db/snapshot`, `app-db/get`, `app-db/schema`, `registrar/list`, `registrar/describe`, `subs/live`, `subs/sample` — all in `runtime.cljs` + SKILL.md. `subs/live` extracts `:re-frame/query-v` from current re-frame's `[cache-key-map dyn-vec]` cache keys. |
-| 2 | Dispatch + trace (§4.2–§4.3) | **Coded, real 10x reader** | `tagged-dispatch!`, `tagged-dispatch-sync!`, `dispatch-and-collect` in place. The 10x epoch-buffer reader is real — reads from `day8.re-frame-10x.inlined-deps.re-frame.<ver>.re-frame.db/app-db` at `[:epochs :match-ids]` / `[:epochs :matches-by-id]`, coerces match-info traces into the §4.3a shape. |
-| 3 | Live watch (§4.4) | **Coded, pull-mode only** | `scripts/watch-epochs.sh` runs repeated short evals at 100ms cadence; streaming-via-`:out` transport deferred — keep pull-mode as v1. |
-| 4 | Hot-swap (REPL) | **Coded** | Delivered by `reg-event`/`reg-sub`/`reg-fx` via `eval-cljs.sh`. |
-| 5 | Hot-reload coordination (§4.5) | **Coded** | `tail-build.sh` implements the probe-based protocol — nREPL polling rather than actual server-stdout tailing. Soft fallback at 300ms when no probe. |
-| 6 | Time-travel (§4.6) | **Coded** | `undo-status`, `undo-step-back`, `undo-step-forward`, `undo-to-epoch`, `undo-most-recent`, `undo-replay` dispatch into 10x's *inlined* re-frame instance (`day8.re-frame-10x.navigation.epochs.events/{::previous,::next,::most-recent,::load,::replay}`). 10x's `::reset-current-epoch-app-db` does the `(reset! userland.re-frame.db/app-db ...)` that is the time-travel mechanism. Returns `:ten-x-missing` cleanly when 10x isn't loaded. |
-| 7 | Diagnostics recipes (§4.7) | **Coded as SKILL.md procedures** | Listed; will be refined as real usage surfaces needed ops. |
-| 8 | Packaging | **Coded** | `package.json`, `plugin.json`, GH Actions for CI + npm release on tag. CI runs the runtime-test build per push. See `RELEASING.md`. |
+| 0 | `eval-cljs.sh` round-trips a form | **Verified** | Round-trip confirmed against the live fixture; `(re-frame-pair.runtime/snapshot)` returns the full app-db. |
+| 1 | Read surface (§4.1) | **Verified** | `snapshot`, `app-db-at`, `schema`, `registrar-list`, `registrar-describe`, `subs-live`, `subs-sample` all callable against the fixture. `registrar-describe` post-fix returns full `:by-kind` map (rfp-l7m A); `subs-live` correctly partitions ran-vs-cache-hit subs after a UI click. |
+| 2 | Dispatch + trace (§4.2–§4.3) | **Verified** | `dispatch.sh --trace` returns the user-fired event's epoch with all §4.3a fields populated (rfp-fgm + rfp-l7m C); chained `:dispatch` effects no longer corrupt the returned epoch; `:claude-epoch-count` increments correctly on tagged dispatches. |
+| 3 | Live watch (§4.4) | **Verified** | All 5 predicate filters (`--event-id`, `--event-id-prefix`, `--effects`, `--touches-path`, `--timing-ms`) match expected counts. G3 fix for empty `:touches-path '[]'` confirmed; G5 fix for malformed `--timing-ms` rejection confirmed. Pull-mode at 100ms cadence; streaming-via-`:out` deferred to v0.2. |
+| 4 | Hot-swap (REPL) | **Verified** | `reg-event` / `reg-sub` / `reg-fx` via `eval-cljs.sh` work; experiment-loop recipe end-to-end relies on this. |
+| 5 | Hot-reload coordination (§4.5) | **Coded** | `tail-build.sh` probe-based protocol implemented; G7 fix surfaces probe-error on timeout instead of silently masquerading as build failure. Live verification across an actual file edit + reload cycle still pending. |
+| 6 | Time-travel (§4.6) | **Verified** | `undo-step-back` rolls userland app-db back exactly one step against the fixture; `undo-most-recent` restores; `:app-db-follows-events?` setting surfaces correctly. |
+| 7 | Diagnostics recipes (§4.7) | **Verified** | Recipes exercised; SKILL.md tightened in beta.2 (`rfp-mo0`) to remove drift and prune verbose prefaces. |
+| 8 | Packaging | **Verified** | CI green on PR #1 (#2). `prepublishOnly` gate added (rfp-czf B); CLAUDE.md / AGENTS.md de-duplicated (rfp-czf C). npm publish OIDC + provenance deferred to v0.2. |
 
 ---
 
@@ -111,25 +111,50 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 - 10x's epoch-store path and shape, plus its navigation event surface.
 - re-com's `:src` format and debug gate (`re-com.config/debug?` = `^boolean js/goog.DEBUG`).
 
-**Unit-tested (`tests/runtime/runtime_test.cljs`, runs via `npm test`):**
+**Unit-tested (`tests/runtime/runtime_test.cljs` + `tests/runtime/fixtures.cljs`, runs via `npm test`):**
 
+- 16 deftests / 141 assertions / 0 failures.
 - `re-com?` / `re-com-category` (broadened heuristics).
-- `parse-rc-src` (file:line shape, malformed cases).
-- `extract-query-vs` (cache-key map → query-v).
-- `epoch-matches?` predicate matrix.
-- `coerce-epoch` shape against a synthetic 10x match record.
+- `parse-rc-src` (file:line shape, malformed cases, edge cases).
+- `extract-query-vs` (cache-key map → query-v, duplicates, malformed entries).
+- `epoch-matches?` predicate matrix (each flag in isolation, sparse epoch fields, falsy vs nil semantics).
+- `coerce-epoch` shape against synthetic 10x match records (including orphaned render-burst).
+- `version-below?` semver comparison (mismatched part counts, alpha tags, nil floor/observed).
 - `undo-*` ten-x-missing failure paths.
+- Synthetic-match fixture helper extracted to `tests/runtime/fixtures.cljs` so 10x shape changes only update one place.
 
-**Operator-pending (the gate to tagging):**
+**Verified end-to-end against the live fixture (2026-04-25 / 26):**
 
-- `cd tests/fixture && npm install && npx shadow-cljs watch app` actually compiles and serves.
-- `scripts/discover-app.sh --build app` finds nREPL on 8777 and reports a healthy runtime.
-- `scripts/dispatch.sh --trace '[:counter/inc]'` returns an epoch with populated `:app-db/diff`, `:subs/ran`, `:renders` — the end-to-end §8a spike-3 deliverable, against this fixture.
+- `cd tests/fixture && npm install && npx shadow-cljs watch app` compiles and serves at `:8280`; nREPL on `:8777`.
+- `scripts/discover-app.sh` returns `{:ok? true ...}` with all 5 health checks green (`:re-com-debug?`, `:last-click-capture?`, `:ten-x-loaded?`, `:app-db-initialised?`, `:trace-enabled?`).
+- `scripts/dispatch.sh --trace '[:counter/inc]'` returns the user-fired event's epoch with every §4.3a field populated.
+- All 5 watch predicate filters validated against script-driven dispatches; G3 fix (empty `:touches-path '[]'`) and G5 fix (malformed `--timing-ms` rejection) confirmed.
+- Time-travel: `undo-step-back` rolls app-db back exactly one step against the fixture, `undo-most-recent` restores; gated correctly on `:app-db-follows-events?`.
+- UI-click epoch shape: `:renders` populated with 21 components annotated by re-com category; `:subs/ran` and `:subs/cache-hit` correctly partition recomputed-vs-unchanged subs.
+- Auto-reinject: clearing the session sentinel triggers seamless re-shipping of `runtime.cljs` with `:reinjected? true` flag on the response (no operator action needed after a browser refresh).
 
 ---
 
 ## Next actions
 
-1. Run the fixture end-to-end (the operator-pending bullets above).
-2. Catch any structural gaps the source survey missed.
-3. Tag `v0.1.0-beta.1` once (1) is green. **Do not tag before this.**
+### Near-term (between beta.2 and beta.3)
+
+1. **Tag `v0.1.0-beta.2`** — operator decision; CI green, validation done.
+2. **Phase 5 live verification** — exercise the edit-then-reload cycle end-to-end (`Edit` a fixture handler, `tail-build.sh --probe`, dispatch, observe). The probe protocol is coded and unit-tested, but no real edit→reload cycle has been run.
+3. **Real-world day8 app exercise** — point re-frame-pair at an actual day8 re-frame application (not just the fixture) and run the SKILL.md recipes. Catch anything the fixture's narrow surface doesn't cover.
+4. **Babashka-side unit tests** — `ops.clj` currently has zero tests despite being ~700 LOC of critical glue. Bencode encode/decode roundtrip (property-test via `test.check`), `parse-predicate-args` flag-combination matrix, `read-port`'s candidate-cascade. ~5 hours of work, high-value.
+5. **CI: bash-shim E2E** — current smoke job only validates shebangs and `unknown-subcommand` parsing. Add a job that boots the fixture (or a mock nREPL listener), runs `discover-app.sh` + `dispatch.sh --trace`, and asserts edn shape. Catches regressions the unit tests can't.
+6. **SKILL.md doc completeness** — surface `registrar-handler-ref` (used in experiment-loop recipe but undocumented) and `health`/`version-report` (called by discover but unlisted) in the ops tables. Flesh out `README.md` quickstart.
+
+### v0.2 / deferred backlog
+
+7. **Headless Playwright E2E rig** — ~6 weeks of work; replaces operator-driven fixture validation with automated browser-driven test. Right tool for full release-gate confidence.
+8. **npm OIDC trusted publisher + `--provenance`** — release.yml currently uses a bare `NODE_AUTH_TOKEN` with no signing. Switch to OIDC (https://docs.npmjs.com/generating-authentication-tokens) and add `--provenance` for verifiable supply-chain.
+9. **Watch streaming-via-`:out` transport** — currently pull-mode at 100ms. Streaming would reduce round-trips for long-running watches; spec §4.4 sketches the mechanism but reachability questions remain.
+10. **Prune `docs/initial-spec.md`** to a design-archive (sections 1–3 + 7–8 only) — §4 ops definitions are now superseded by SKILL.md and runtime.cljs source.
+11. **Move `tests/fixture/public/css/`** to CDN-link or generate at build time — 8.4k lines of bootstrap.css in the repo bloats checkout. Tradeoff: loses offline / air-gapped dev story.
+12. **Inline-rf version path** — `inlined-rf-version-paths` is now an enumeration fallback (rfp-czf G6) but still hard-codes a known list. Probe `js/goog.global.day8.re_frame_10x.inlined_deps.re_frame` keys at runtime as the canonical source.
+
+### Tracking
+
+`ci-8rn` (the umbrella city-level bead "drive re-frame-pair to v0.1.0-beta.1") is the only open work bead. Closing it is gated on the beta.1 / beta.2 tag operator decision (item 1 above).
