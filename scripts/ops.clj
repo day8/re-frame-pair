@@ -344,6 +344,13 @@
                :required floor}))
           by-dep)))
 
+;; Forward reference: list-builds-on-port is defined further down with
+;; the rest of the discover-list machinery. Babashka/sci does no
+;; forward-symbol resolution at analysis time, so without this declare
+;; loading ops.clj throws "Unable to resolve symbol" and every shim
+;; breaks (rfp-xhx).
+(declare list-builds-on-port)
+
 (defn- discover [args]
   (ensure-port!)
   (let [build-id        (build-id-from-args args)
