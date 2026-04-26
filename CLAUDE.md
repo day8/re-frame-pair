@@ -1,6 +1,6 @@
 # Project Instructions for AI Agents
 
-This file provides instructions and context for AI coding agents working on this project.
+This file provides instructions and context for AI coding agents working on this project. AGENTS.md is a thin pointer to this file; everything authoritative lives here.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
@@ -49,6 +49,23 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+
+## Non-Interactive Shell Commands
+
+`cp`, `mv`, `rm` may be aliased to `-i` (interactive) on some systems. Always pass `-f` so an agent doesn't hang on a y/n prompt:
+
+```bash
+cp -f source dest           # not: cp source dest
+mv -f source dest           # not: mv source dest
+rm -f file                  # not: rm file
+rm -rf directory            # not: rm -r directory
+cp -rf source dest          # not: cp -r source dest
+```
+
+Other commands that may prompt:
+- `scp` / `ssh` — `-o BatchMode=yes` to fail rather than prompt
+- `apt-get` — `-y`
+- `brew` — `HOMEBREW_NO_AUTO_UPDATE=1`
 
 ## Build & Test
 

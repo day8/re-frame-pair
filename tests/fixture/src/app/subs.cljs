@@ -8,9 +8,7 @@
 (rf/reg-sub :counter      (fn [db _] (:counter db)))
 (rf/reg-sub :items        (fn [db _] (:items db)))
 (rf/reg-sub :coupon       (fn [db _] (:coupon db)))
-(rf/reg-sub :user         (fn [db _] (:user db)))
 (rf/reg-sub :events-fired (fn [db _] (:events-fired db)))
-(rf/reg-sub :last-error   (fn [db _] (:last-error db)))
 
 ;; -----------------------------------------------------------------------------
 ;; Layer 3 — depend on Layer 2. The spike specifically asks for one

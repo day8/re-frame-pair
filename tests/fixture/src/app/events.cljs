@@ -94,10 +94,3 @@
    ;; Intentional: returning a non-map sets app-db to a vector. Most
    ;; subs will then break on next tick. Reset event clears it.
    [:not :a :map]))
-
-(rf/reg-event-db
- :error/clear
- (fn [db _]
-   (-> db
-       (assoc :last-error nil)
-       (update :events-fired inc))))

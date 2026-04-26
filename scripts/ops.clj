@@ -370,27 +370,37 @@
 ;; Subcommand: inject
 ;; ---------------------------------------------------------------------------
 
-(defn- inject-runtime-force!
-  "Like inject-runtime! but *always* re-ships scripts/runtime.cljs
-   regardless of whether the session sentinel already exists. Used by
-   the standalone `scripts/inject-runtime.sh` so skill developers
-   editing runtime.cljs can re-push their changes into a live browser
-   without a full page refresh."
-  [build-id]
-  (let [source (slurp (runtime-cljs-path))]
-    (cljs-eval build-id source))
-  (cljs-eval-value build-id "(re-frame-pair.runtime/health)"))
-
 (defn- inject-op [args]
   (ensure-port!)
   (let [build-id (build-id-from-args args)]
-    (try
-      (emit (assoc (inject-runtime-force! build-id)
-                   :build-id build-id
-                   :forced? true
-                   :note "Source re-shipped regardless of sentinel. Use this after editing scripts/runtime.cljs."))
-      (catch Exception e
-        (emit {:ok? false :reason :inject-failed :message (.getMessage e)})))))
+    ;; Two failure modes worth distinguishing:
+    ;;   :inject-failed — the source-ship eval threw (compile error,
+    ;;                    nREPL transport problem). Health was never
+    ;;                    attempted; the runtime is unchanged or
+    ;;                    partially loaded.
+    ;;   :health-failed — source shipped fine, but the post-inject
+    ;;                    health read threw. The runtime is probably
+    ;;                    in place but its `health` fn errored or
+    ;;                    something downstream broke.
+    ;; Lumping them as :inject-failed (the previous behavior) made
+    ;; debugging hard — operator couldn't tell whether to re-edit
+    ;; runtime.cljs or look elsewhere.
+    (let [shipped? (try
+                     (cljs-eval build-id (slurp (runtime-cljs-path)))
+                     true
+                     (catch Exception e
+                       (emit {:ok? false :reason :inject-failed
+                              :message (.getMessage e)})
+                       false))]
+      (when shipped?
+        (try
+          (emit (assoc (cljs-eval-value build-id "(re-frame-pair.runtime/health)")
+                       :build-id build-id
+                       :forced? true
+                       :note "Source re-shipped regardless of sentinel. Use this after editing scripts/runtime.cljs."))
+          (catch Exception e
+            (emit {:ok? false :reason :health-failed :message (.getMessage e)
+                   :hint "Source shipped, but the post-inject `health` read threw. Try `scripts/discover-app.sh` for a fresh check."})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: dispatch
@@ -413,11 +423,55 @@
   (let [{events true others false} (group-by #(str/starts-with? % "[") args)]
     [(first events) (concat others (rest events))]))
 
-;; The bash-side wait between tagged-dispatch-sync! and collect-after-dispatch.
-;; Mirror runtime.cljs's `trace-debounce-settle-ms`: trace's ~50ms callback
-;; debounce + 1 render frame for `:render` traces to land. 80ms is a
-;; comfortable upper bound.
-(def ^:private trace-collect-wait-ms 80)
+;; ---------------------------------------------------------------------------
+;; Tunable timings — keep them named so it's obvious where each comes from
+;; ---------------------------------------------------------------------------
+
+(def ^:private trace-collect-wait-ms
+  "Bash-side sleep between `tagged-dispatch-sync!` and
+   `collect-after-dispatch`. Mirrors runtime.cljs's
+   trace-debounce-settle-ms: re-frame.trace's ~50ms callback debounce
+   + 1 render frame for :render traces to land. 80ms is a comfortable
+   upper bound."
+  80)
+
+(def ^:private default-watch-poll-ms
+  "Default watch-epochs.sh poll cadence (overridable with --poll-ms)."
+  100)
+
+(def ^:private default-watch-window-ms
+  "Default watch window when --count not yet hit (overridable with --window-ms).
+   Half-open from start-of-watch."
+  30000)
+
+(def ^:private default-watch-idle-ms
+  "In streaming mode, terminate when no match has fired this many ms
+   (overridable with --idle-ms)."
+  30000)
+
+(def ^:private default-watch-hard-cap-ms
+  "Absolute upper bound on a watch invocation (overridable with --hard-ms).
+   The 'never silently runs forever' invariant from spec §4.4."
+  300000)
+
+(def ^:private default-watch-count
+  "Default match count to wait for before terminating
+   (overridable with --count)."
+  5)
+
+(def ^:private default-tail-build-wait-ms
+  "Default tail-build.sh probe wait window (overridable with --wait-ms).
+   Hard cap on how long we'll wait for a probe to flip after an edit."
+  5000)
+
+(def ^:private tail-build-poll-ms
+  "tail-build.sh probe poll cadence."
+  100)
+
+(def ^:private tail-build-soft-delay-ms
+  "When --probe is omitted, tail-build.sh just sleeps this long and
+   reports :soft? true (per spec §4.5 — best we can do without a probe)."
+  300)
 
 (defn- dispatch-op [args]
   (ensure-port!)
@@ -512,36 +566,38 @@
                                                 (if (str/starts-with? raw ":") raw (str ":" raw)))))
       (= a "--effects")         (recur (rest more) (assoc pred :effects (->kw (first more))))
       (= a "--timing-ms")
+      ;; Anchored regex: exactly `<` or `>`, then digits, end. The
+      ;; previous `re-seq #"[<>]|\d+"` silently accepted garbage like
+      ;; `><100` or `100>5` because re-seq returned multiple matches
+      ;; and we only inspected the first two.
       (let [raw (first more)
-            [op-str n-str] (re-seq #"[<>]|\d+" (or raw ""))
-            op (case op-str ">" :> "<" :< nil)]
+            m   (when raw (re-matches #"^([<>])(\d+)$" raw))
+            [_ op-str n-str] m
+            op  (case op-str ">" :> "<" :< nil)]
         (if (and op n-str)
           (recur (rest more)
                  (assoc pred :timing-ms [op (Integer/parseInt n-str)]))
-          (do
-            (emit {:ok? false :reason :bad-timing-ms
-                   :arg raw
-                   :hint "Expected e.g. '>100' or '<5'. Operators >= / <= / = are not supported."})
-            (System/exit 1))))
+          (die :bad-timing-ms
+               :arg raw
+               :hint "Expected e.g. '>100' or '<5'. Operators >= / <= / = and any other shape are not supported.")))
       (= a "--touches-path")    (recur (rest more) (assoc pred :touches-path
                                                            (edn/read-string (first more))))
       (= a "--sub-ran")         (recur (rest more) (assoc pred :sub-ran (->kw (first more))))
       (= a "--render")          (recur (rest more) (assoc pred :render (first more)))
 
-      ;; --custom is reserved in the spec as an arbitrary CLJS predicate,
-      ;; but v1 does not implement it (would require shipping user forms
-      ;; into the runtime). Fail loudly rather than silently dropping —
-      ;; users seeing "no matches" with a --custom flag should know why.
+      ;; --custom was reserved as an arbitrary CLJS predicate in earlier
+      ;; spec drafts; v0.1 ships only the discrete keys above. `die`
+      ;; emits the structured rejection AND exits 1 — the previous
+      ;; (do (emit ...) (System/exit 1)) sequence broke the shell
+      ;; contract because emit + exit-after-emit isn't idempotent
+      ;; through pipes.
       (= a "--custom")
-      (do
-        (emit {:ok? false
-               :reason :not-yet-supported
-               :flag :--custom
-               :hint (str "Arbitrary CLJS predicate filters are reserved "
-                          "but not yet implemented. Use --event-id-prefix, "
-                          "--effects, --timing-ms, --touches-path, --sub-ran, "
-                          "or --render instead.")})
-        (System/exit 1))
+      (die :flag-not-supported
+           :flag "--custom"
+           :hint (str "Arbitrary CLJS predicate filters are deferred "
+                      "to v0.2. v0.1 supports --event-id-prefix, "
+                      "--effects, --timing-ms, --touches-path, "
+                      "--sub-ran, --render."))
 
       :else                     (recur more pred))))
 
@@ -557,12 +613,12 @@
   (let [build-id    (build-id-from-args args)
         stream?     (has-flag? args "--stream")
         stop?       (has-flag? args "--stop")
-        window-ms   (Long/parseLong (flag-value args "--window-ms" "30000"))
-        count-n     (Long/parseLong (flag-value args "--count" "5"))
+        window-ms   (Long/parseLong (flag-value args "--window-ms" (str default-watch-window-ms)))
+        count-n     (Long/parseLong (flag-value args "--count" (str default-watch-count)))
         pred        (parse-predicate-args args)
-        idle-ms     (Long/parseLong (flag-value args "--idle-ms" "30000"))
-        hard-ms     (Long/parseLong (flag-value args "--hard-ms" "300000"))
-        poll-ms     (Long/parseLong (flag-value args "--poll-ms" "100"))
+        idle-ms     (Long/parseLong (flag-value args "--idle-ms" (str default-watch-idle-ms)))
+        hard-ms     (Long/parseLong (flag-value args "--hard-ms" (str default-watch-hard-cap-ms)))
+        poll-ms     (Long/parseLong (flag-value args "--poll-ms" (str default-watch-poll-ms)))
         reinjected? (when-not stop? (ensure-injected! build-id))]
     (cond
       stop?
@@ -630,26 +686,39 @@
 (defn- tail-build-op [args]
   (ensure-port!)
   (let [build-id    (build-id-from-args args)
-        wait-ms     (Long/parseLong (flag-value args "--wait-ms" "5000"))
+        wait-ms     (Long/parseLong (flag-value args "--wait-ms" (str default-tail-build-wait-ms)))
         probe       (flag-value args "--probe" nil)
-        poll-ms     100
+        poll-ms     tail-build-poll-ms
         reinjected? (ensure-injected! build-id)]
     (cond
       (nil? probe)
       ;; Soft / timer-based fallback: no probe = wait a fixed delay
       ;; and report :soft? true per spec §4.5.
-      (do (Thread/sleep 300)
+      (do (Thread/sleep tail-build-soft-delay-ms)
           (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? true
-                         :note "No probe supplied; waited a 300ms fixed delay."}
+                         :note (str "No probe supplied; waited a "
+                                    tail-build-soft-delay-ms "ms fixed delay.")}
                   reinjected? (assoc :reinjected? true))))
 
       :else
-      (let [before (try (cljs-eval-value build-id probe) (catch Exception _ ::error))
-            start  (System/currentTimeMillis)]
+      ;; Track the first error the probe ever produced so a "timeout"
+      ;; that's actually a broken probe (compile error in the probe
+      ;; form itself, undefined ns, etc.) reports the cause instead
+      ;; of just "did not change". Without this, the operator chases
+      ;; build output for a problem that's in the probe expression.
+      (let [first-err   (atom nil)
+            try-probe!  (fn []
+                          (try (cljs-eval-value build-id probe)
+                               (catch Exception e
+                                 (when-not @first-err
+                                   (reset! first-err (.getMessage e)))
+                                 ::error)))
+            before      (try-probe!)
+            start       (System/currentTimeMillis)]
         (loop []
           (Thread/sleep poll-ms)
           (let [elapsed (- (System/currentTimeMillis) start)
-                now     (try (cljs-eval-value build-id probe) (catch Exception _ ::error))]
+                now     (try-probe!)]
             (cond
               (and (not= now ::error) (not= now before))
               (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? false}
@@ -657,7 +726,8 @@
 
               (>= elapsed wait-ms)
               (emit (cond-> {:ok? false :reason :timed-out :timed-out? true
-                             :note "Probe did not change within --wait-ms. Likely a compile error; check your dev build output."}
+                             :note "Probe did not change within --wait-ms. Likely a compile error in your dev build, OR a broken probe expression — see :probe-error if present."}
+                      @first-err  (assoc :probe-error @first-err)
                       reinjected? (assoc :reinjected? true)))
 
               :else

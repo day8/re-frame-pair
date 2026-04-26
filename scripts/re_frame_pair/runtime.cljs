@@ -216,11 +216,13 @@
 ;; Used by `renders-for` to annotate render entries with re-com hints.
 (declare classify-render-entry)
 
-(def ^:private inlined-rf-version-paths
-  "Known 10x-inlined re-frame version path segments. Newest first.
-   Each is the directory name under
-   `day8/re-frame-10x/inlined-deps/re-frame/<slug>/re-frame/`.
-   Add new entries when a 10x release bumps its bundled re-frame."
+(def ^:private inlined-rf-known-version-paths
+  "Best-known 10x-inlined re-frame version slugs. Tried first so the
+   common case is one aget-path lookup. If none match, we fall back
+   to enumerating whatever child keys live under
+   `day8.re_frame_10x.inlined_deps.re_frame` at runtime — see
+   `ten-x-inlined-rf`. Update this list opportunistically; the
+   fallback handles fresh 10x releases on its own."
   ["v1v3v0"])
 
 (defn- aget-path
@@ -232,15 +234,38 @@
               (try (aget acc k) (catch :default _ nil))))
           obj path))
 
+(defn- ^js js-keys-array
+  "Object.keys via interop. Returns a JS array; callers convert to seq.
+   Wrapped in try/catch because aget'd JS values may be primitives."
+  [o]
+  (try
+    (when o (js/Object.keys o))
+    (catch :default _ nil)))
+
 (defn- ten-x-inlined-rf
-  "The JS object for 10x's inlined `re-frame` package, probing version
-   slugs. Returns nil if 10x isn't loaded under any known slug."
+  "The JS object for 10x's inlined `re-frame` package.
+
+   Strategy: try the known-version slugs first (cheap, deterministic),
+   then fall back to enumerating every child key under
+   `day8.re_frame_10x.inlined_deps.re_frame` and picking the first
+   that has a `re_frame.db.app_db` underneath. The fallback means a
+   fresh 10x release with a new slug works without any code change —
+   `read-10x-epochs` no longer throws `:ten-x-missing` just because
+   we shipped before the slug got added to the known list."
   []
   (when-let [g (some-> js/goog .-global)]
-    (some (fn [ver]
-            (aget-path g ["day8" "re_frame_10x" "inlined_deps"
-                          "re_frame" ver "re_frame"]))
-          inlined-rf-version-paths)))
+    (let [base (aget-path g ["day8" "re_frame_10x" "inlined_deps" "re_frame"])
+          via-known (some (fn [ver] (aget-path base [ver "re_frame"]))
+                          inlined-rf-known-version-paths)]
+      (or via-known
+          ;; Fallback: enumerate any child key and look for one that
+          ;; carries the expected `re_frame.db.app_db` shape.
+          (when base
+            (some (fn [k]
+                    (let [candidate (aget-path base [k "re_frame"])]
+                      (when (aget-path candidate ["db" "app_db"])
+                        candidate)))
+                  (array-seq (or (js-keys-array base) #js []))))))))
 
 (defn- ten-x-app-db-ratom
   "The Reagent ratom holding 10x's internal app-db. Nil if 10x missing."
@@ -287,8 +312,14 @@
     (when-not a
       (throw (ex-info "re-frame-10x epoch buffer unreachable"
                       {:reason :ten-x-missing
-                       :tried-version-paths inlined-rf-version-paths
-                       :hint "10x is not loaded, or its inlined re-frame version slug has changed; add it to inlined-rf-version-paths."})))
+                       :tried-known-paths inlined-rf-known-version-paths
+                       :hint (str "10x is not loaded, or its inlined "
+                                  "re-frame namespace doesn't carry the "
+                                  "expected `re_frame.db.app_db` ratom. "
+                                  "ten-x-inlined-rf already tries every "
+                                  "child key under inlined_deps.re_frame "
+                                  "as a fallback — if you're hitting this, "
+                                  "10x itself probably isn't preloaded.")})))
     (let [db    @a
           ids   (get-in db [:epochs :match-ids] [])
           by-id (get-in db [:epochs :matches-by-id] {})]
@@ -448,26 +479,43 @@
         tail      (drop-while #(not= target-id (match-id %)) all-matches)]
     (second tail)))
 
+(defn- resolve-render-source
+  "Pick the match that holds render data for `match`, working around
+   re-frame + 10x's split between user-event and render epochs.
+
+   Three cases:
+
+   1. `match` itself ends at `:reagent/quiescent` — typical for a
+      queued `dispatch` on an actively-rendering page. Render data
+      is in this match's id range and sub-state. Return `match`.
+
+   2. `match` ends at `:sync` (a `dispatch-sync`, e.g. our --trace
+      bash path). Reagent renders fire on a later animation frame,
+      so 10x splits them into the *next* match (nil `:event` tag,
+      `:reagent/quiescent` close). Return that next match.
+
+   3. Neither — page tab inactive / throttled, or the match is the
+      head of the buffer with no follow-up yet. Return nil; the
+      caller leaves `:renders` / `:subs/ran` / `:subs/cache-hit`
+      blank rather than misleadingly empty.
+
+   `all-matches` is 10x's full buffer in chronological order so we can
+   reach for the next match. Tests pass it explicitly; live calls
+   pull it from the runtime."
+  [match all-matches]
+  (or (when (has-render-burst? match) match)
+      (let [nxt (match-after match all-matches)]
+        (when (has-render-burst? nxt) nxt))))
+
 (defn coerce-epoch
   "Translate a raw 10x match into the §4.3a epoch record. Returns nil
    when raw is nil. Public so callers that already pulled matches from
    10x's buffer can reshape them.
 
-   How render / sub-run data is sourced
-   -----------------------------------
-   re-frame's user-event match closes at `:sync` (or before reagent
-   has rendered). The render burst — sub re-runs and component
-   renders — lands in the *next* match in 10x's buffer, which has a
-   nil `:event` tag and ends at `:reagent/quiescent`. So when we
-   coerce a user-event match, we look up the immediately-following
-   render-burst match and merge its `:subs/ran`, `:subs/cache-hit`,
-   and `:renders` into the result. If the match itself IS a
-   render burst (no preceding user event in the buffer), we read
-   directly from it.
-
    `:app-db/diff`, `:event`, `:effects`, `:coeffects` always come from
    the user-event match — those are the things the user actually
-   dispatched.
+   dispatched. `:subs/ran`, `:subs/cache-hit`, `:renders` come from
+   `resolve-render-source` (which may step to the next match).
 
    Two arities:
      (coerce-epoch raw)
@@ -487,9 +535,7 @@
    (when raw
      (let [event-trace (find-trace raw :event)
            tags        (:tags event-trace)
-           render-src  (or (when (has-render-burst? raw) raw)
-                           (let [nxt (match-after raw all-matches)]
-                             (when (has-render-burst? nxt) nxt)))]
+           render-src  (resolve-render-source raw all-matches)]
        {:id                (match-id raw)
         :t                 (:start event-trace)
         :time-ms           (:duration event-trace)
@@ -509,9 +555,17 @@
         :renders           (when render-src (renders-from-traces render-src all-traces))}))))
 
 (defn latest-epoch-id
-  "Id of 10x's newest match, or nil if the buffer is empty."
+  "Id of 10x's newest match, or nil if the buffer is empty / 10x is
+   not loaded.
+
+   Cheap path: 10x already keeps an ordered `:match-ids` vec at
+   `[:epochs :match-ids]` in its app-db; the head of it IS what we
+   want. Avoids `read-10x-epochs`'s full per-match map-rebuild —
+   significant for `watch-epochs.sh`, which polls this at ~100ms cadence
+   and used to construct a fresh 25-entry coerced-match vec every tick."
   []
-  (-> (read-10x-epochs) last match-id))
+  (when-let [a (ten-x-app-db-ratom)]
+    (last (get-in @a [:epochs :match-ids]))))
 
 (defn epoch-count
   "Total matches in 10x's ring buffer."
@@ -932,8 +986,8 @@
 
 (defn dom-source-at
   "Given a CSS selector (or `:last-clicked` / `\"last-clicked\"`),
-   return the `:src` {:file :line :column} attached by re-com's debug
-   path. Returns a structured result."
+   return the `:src` {:file :line} attached by re-com's debug path.
+   Returns a structured result."
   [selector]
   (if-let [el (selector-or-last-clicked selector)]
     (if-let [src-attr (.getAttribute el "data-rc-src")]
@@ -946,14 +1000,28 @@
      :hint (when (or (= selector :last-clicked) (= selector "last-clicked"))
              "Nothing clicked this session; interact with the page first, or pass a CSS selector instead.")}))
 
+(defn- src-pattern-matches?
+  "True if the element's `data-rc-src` attribute contains
+   `file:line`. Used by `dom-find-by-src` and `dom-fire-click`. We
+   pull every `[data-rc-src]` and compare strings rather than
+   building a CSS selector with the file embedded — single quotes,
+   spaces, brackets etc. in real-world paths break the
+   string-interpolated selector and there's no portable escape that
+   covers every case (`CSS.escape` exists but isn't always available
+   in older webviews and doesn't escape `'` itself for attribute
+   selectors)."
+  [el pattern]
+  (when-let [v (.getAttribute el "data-rc-src")]
+    (str/includes? v pattern)))
+
 (defn dom-find-by-src
   "Find live DOM elements whose `data-rc-src` matches file+line.
    Returns a list of {:selector :src :tag} summaries."
   [file line]
   (let [pattern (str file ":" line)
-        nodes   (.querySelectorAll js/document
-                                    (str "[data-rc-src*='" pattern "']"))]
+        nodes   (.querySelectorAll js/document "[data-rc-src]")]
     (->> (array-seq nodes)
+         (filter #(src-pattern-matches? % pattern))
          (mapv (fn [node]
                  {:tag   (.toLowerCase (.-tagName node))
                   :id    (not-empty (.-id node))
@@ -964,9 +1032,9 @@
   "Synthesise a click on the element matching file+line. Picks the
    first match if multiple. Returns the epoch produced (if any)."
   [file line]
-  (let [pattern  (str file ":" line)
-        selector (str "[data-rc-src*='" pattern "']")
-        el       (.querySelector js/document selector)]
+  (let [pattern (str file ":" line)
+        nodes   (array-seq (.querySelectorAll js/document "[data-rc-src]"))
+        el      (first (filter #(src-pattern-matches? % pattern) nodes))]
     (if el
       (let [before (latest-epoch-id)
             ev     (js/Event. "click" #js {:bubbles true :cancelable true})]
@@ -1035,10 +1103,17 @@
             :< (< (:time-ms epoch 0) n)
             true))
         true)
-      (if touches-path    (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
-                            (or (some? (get-in only-before touches-path))
-                                (some? (get-in only-after touches-path))))
-                          true)
+      (if touches-path
+        (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
+          (if (empty? touches-path)
+            ;; Empty path = "the root touched at all" — any non-empty
+            ;; diff matches. Without this special-case, `(get-in nil
+            ;; [])` returns nil and the predicate always fails for the
+            ;; root path, which is surprising.
+            (or (seq only-before) (seq only-after))
+            (or (some? (get-in only-before touches-path))
+                (some? (get-in only-after touches-path)))))
+        true)
       (if sub-ran         (some #(= sub-ran (first (:query-v %))) (:subs/ran epoch)) true)
       (if render          (some #(= render (:component %)) (:renders epoch)) true)))))
 
@@ -1214,17 +1289,31 @@
           nil)
         :unknown)))
 
-(defn- version-below?
+(defn version-below?
   "Compare observed to floor as dotted-number strings. Returns true if
    observed is strictly below floor. Returns false if either is
-   :unknown or nil (can't enforce what we can't read)."
+   :unknown or nil (can't enforce what we can't read).
+
+   Public so tests can exercise it without setting up a live
+   re-com.config/version goog-define.
+
+   Implementation: pull digit runs from each side, zero-pad both
+   sides to the same length, then compare. CLJS's `compare` on
+   vectors compares LENGTHS first (unlike JVM Clojure's
+   compare-indexed which compares elements first), so without padding
+   `[2 20 0]` and `[2 21]` would order by `(> 3 2)` instead of
+   `(< 20 21)`. Padding makes the comparison length-invariant."
   [observed floor]
   (and (string? observed) (string? floor)
        (let [->ints #(mapv (fn [s]
                              (let [n (js/parseInt s 10)]
                                (if (js/Number.isNaN n) 0 n)))
-                           (re-seq #"\d+" %))]
-         (neg? (compare (->ints observed) (->ints floor))))))
+                           (re-seq #"\d+" %))
+             obs    (->ints observed)
+             flr    (->ints floor)
+             width  (max (count obs) (count flr))
+             pad    (fn [v] (vec (concat v (repeat (- width (count v)) 0))))]
+         (neg? (compare (pad obs) (pad flr))))))
 
 (defn version-report
   "Per-dep version read. Returned shape:
