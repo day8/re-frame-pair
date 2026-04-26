@@ -300,28 +300,174 @@
       (and (string? v) (seq v)))
     (catch Exception _ false)))
 
+;; ---------------------------------------------------------------------------
+;; Inject mechanics — failure detection + chunked source-ship
+;; ---------------------------------------------------------------------------
+;;
+;; nREPL's transport buffer caps a single eval at ~64KB. Sending the whole
+;; runtime.cljs (currently ~67KB) as one cljs-eval call silently fails:
+;; the JVM-side reader chokes mid-form with a CompilerException, the
+;; response carries :ex / :err — and the OLD inject-path discarded the
+;; response, reporting success. Defns past the truncation boundary never
+;; landed; downstream ops returned nil. This bit rfp-r5s: app-summary
+;; and handler-source weren't reachable at all on the live fixture.
+;;
+;; Two changes here, working together:
+;;   1. `inject-failure` inspects the cljs-eval response shape and
+;;      classifies transport / compile failures so callers (`ensure-
+;;      injected!`, `inject-op`) can surface them as structured errors
+;;      instead of pretending success.
+;;   2. `chunked-inject!` splits the source at top-level form boundaries
+;;      and sends each chunk separately, well under the buffer ceiling.
+;;      Each chunk re-asserts `(ns re-frame-pair.runtime ...)` so vars
+;;      land in the right namespace regardless of cljs-eval's per-call
+;;      ns reset.
+
+(defn- inject-failure
+  "Inspect a cljs-eval response and return a structured failure map
+   if the inject didn't complete cleanly, or nil if it succeeded.
+
+   :ex set                  → JVM-side compile / read failure.
+   :err matches Syntax / CompilerException → ditto, just no ex object.
+   :value present + a known-bad sentinel inside → honor that.
+   anything else            → assume success."
+  [resp]
+  (let [ex   (:ex resp)
+        err  (str (:err resp))]
+    (cond
+      ex
+      {:reason :inject-failed
+       :stage  :transport
+       :ex     ex
+       :err    (when (seq err) err)
+       :hint   "Source did not parse on the JVM side. Most common cause: file too large for the nREPL transport buffer (~64KB). With chunked-inject this should be unreachable; if you see it, the chunker may have produced an unbalanced split."}
+
+      (re-find #"Syntax error|CompilerException|FileNotFoundException" err)
+      {:reason :inject-failed
+       :stage  :compile
+       :err    err
+       :hint   "Source did not compile in the connected runtime."}
+
+      :else nil)))
+
+(require '[clojure.tools.reader :as tr]
+         '[clojure.tools.reader.reader-types :as trt])
+
+(defn- form-end-offsets
+  "Read `src` as a sequence of top-level CLJS forms and return the
+   end character-offset of each one. tools.reader handles `#js`,
+   regex literals, char literals, ::keywords, comments, and reader
+   conditionals via the `:cljs` feature; the homegrown char-walker
+   we started with would have to re-implement all of that.
+
+   Returns a vec of int offsets (each is the index of the FIRST char
+   AFTER that form's last char, suitable for `subs`)."
+  [src]
+  (let [;; Pre-compute char offsets of each line start so we can
+        ;; convert the reader's (line, col) → absolute offset.
+        line-starts (let [n (count src)]
+                      (loop [i 0, acc [0]]
+                        (if (>= i n) acc
+                            (if (= \newline (.charAt ^String src i))
+                              (recur (inc i) (conj acc (inc i)))
+                              (recur (inc i) acc)))))
+        lc->off  (fn [line col] (+ (nth line-starts (dec line)) (dec col)))
+        reader   (trt/indexing-push-back-reader src)
+        ignore   (fn [v] v)]
+    (binding [tr/*data-readers* {'js ignore 'queue ignore 'inst ignore 'uuid ignore}]
+      (loop [offs []]
+        (let [form (tr/read {:eof :END :read-cond :allow :features #{:cljs}}
+                            reader)]
+          (if (= form :END)
+            offs
+            (recur (conj offs (lc->off (trt/get-line-number reader)
+                                       (trt/get-column-number reader))))))))))
+
+(defn- chunk-source
+  "Split `src` into N strings, each a self-contained CLJS file
+   re-asserting the ns and containing as many top-level forms as fit
+   under `max-bytes`. The first chunk is the verbatim leading slice;
+   subsequent chunks are `<ns-form>\\n<forms-slice>`.
+
+   Each cljs-eval call starts fresh in cljs.user — re-asserting the
+   ns at the top of every chunk is what makes the defns in chunks 2+
+   land in re-frame-pair.runtime instead of cljs.user."
+  [src max-bytes]
+  (let [ends            (form-end-offsets src)
+        ns-end          (first ends)
+        ns-text         (subs src 0 ns-end)
+        ns-prefix-bytes (inc ns-end) ;; ns-text + "\n"
+        ranges (loop [i 0, chunk-start 0, last-end 0, ranges []]
+                 (cond
+                   (>= i (count ends))
+                   (if (> (count src) chunk-start)
+                     (conj ranges [chunk-start (count src)])
+                     ranges)
+
+                   :else
+                   (let [end          (nth ends i)
+                         first-chunk? (zero? (count ranges))
+                         prefix-bytes (if first-chunk? 0 ns-prefix-bytes)
+                         tentative    (+ prefix-bytes (- end chunk-start))]
+                     (if (and (> tentative max-bytes)
+                              (> last-end chunk-start))
+                       ;; Flush current chunk at last-end; reconsider this
+                       ;; form in the next chunk.
+                       (recur i last-end last-end (conj ranges [chunk-start last-end]))
+                       (recur (inc i) chunk-start end ranges)))))]
+    (mapv (fn [[a b]]
+            (let [body (subs src a b)]
+              (if (zero? a)
+                body
+                (str ns-text "\n" body))))
+          ranges)))
+
+(def ^:private inject-chunk-bytes
+  "Per-chunk size ceiling for the inject path. Well under the ~64KB
+   nREPL transport buffer so we have head-room for the
+   `(shadow.cljs.devtools.api/cljs-eval ...)` wrapping."
+  32000)
+
+(defn- chunked-inject!
+  "Source-ship `runtime.cljs` to the connected runtime in size-bounded
+   chunks. Returns a vec of `[chunk-index resp]` for each chunk so
+   callers can detect partial failures."
+  [build-id src]
+  (let [chunks (chunk-source src inject-chunk-bytes)]
+    (loop [i 0, results []]
+      (if (>= i (count chunks))
+        results
+        (let [resp (cljs-eval build-id (nth chunks i))
+              fail (inject-failure resp)]
+          (if fail
+            (conj results [i (assoc fail :chunk-index i :chunk-count (count chunks))])
+            (recur (inc i) (conj results [i resp]))))))))
+
 (defn- ensure-injected!
   "Idempotently ensure scripts/runtime.cljs is loaded in the connected
    browser runtime. Returns true if it had to (re-)ship the source,
    false if the runtime was already present.
 
-   Fast path: a single nREPL round-trip that reads the session sentinel.
-   Slow path (first connect, or after a full page refresh): slurp and
-   cljs-eval the whole file as one block.
-
-   Every op that calls into re-frame-pair.runtime/* should call this
-   first so a browser refresh doesn't silently break dispatch / eval /
-   watch — the namespace would otherwise be undefined until the operator
-   manually re-ran discover. Callers should surface a `:reinjected? true`
-   flag on the response when this returns true (don't auto-recover
-   silently)."
+   Source-ship is chunked: the CLJS file gets split at top-level form
+   boundaries and shipped in pieces sized well under nREPL's transport
+   buffer. Each chunk re-asserts the ns. If any chunk fails, dies with
+   a structured `:inject-failed` response carrying the offending
+   chunk index, error, and a hint."
   [build-id]
   (if (runtime-already-injected? build-id)
     false
-    (do
-      ;; Ship as a single block so all forms execute atomically.
-      (cljs-eval build-id (slurp (runtime-cljs-path)))
-      true)))
+    (let [results (chunked-inject! build-id (slurp (runtime-cljs-path)))
+          last-result (last results)]
+      (if (and last-result (:reason (second last-result)))
+        (let [[idx fail] last-result]
+          (die :inject-failed
+               :stage         (:stage fail)
+               :chunk-index   idx
+               :chunk-count   (:chunk-count fail)
+               :ex            (:ex fail)
+               :err           (:err fail)
+               :hint          (:hint fail)))
+        true))))
 
 (defn- inject-runtime!
   "Ensure scripts/runtime.cljs is loaded and return the health map.
@@ -445,19 +591,31 @@
     ;; Lumping them as :inject-failed (the previous behavior) made
     ;; debugging hard — operator couldn't tell whether to re-edit
     ;; runtime.cljs or look elsewhere.
-    (let [shipped? (try
-                     (cljs-eval build-id (slurp (runtime-cljs-path)))
-                     true
-                     (catch Exception e
-                       (emit {:ok? false :reason :inject-failed
-                              :message (.getMessage e)})
-                       false))]
+    (let [results (try
+                    (chunked-inject! build-id (slurp (runtime-cljs-path)))
+                    (catch Exception e
+                      (emit {:ok? false :reason :inject-failed
+                             :stage :transport-throw
+                             :message (.getMessage e)})
+                      ::failed))
+          shipped? (and (not= results ::failed)
+                        (let [last-result (last results)
+                              fail (when last-result
+                                     (let [[_ resp-or-fail] last-result]
+                                       (when (:reason resp-or-fail) resp-or-fail)))]
+                          (if fail
+                            (do (emit (assoc fail
+                                             :ok? false
+                                             :chunk-count (count results)))
+                                false)
+                            true)))]
       (when shipped?
         (try
           (emit (assoc (cljs-eval-value build-id "(re-frame-pair.runtime/health)")
                        :build-id build-id
                        :forced? true
-                       :note "Source re-shipped regardless of sentinel. Use this after editing scripts/runtime.cljs."))
+                       :chunk-count (count results)
+                       :note "Source re-shipped via chunked inject. Use after editing scripts/runtime.cljs."))
           (catch Exception e
             (emit {:ok? false :reason :health-failed :message (.getMessage e)
                    :hint "Source shipped, but the post-inject `health` read threw. Try `scripts/discover-app.sh` for a fresh check."})))))))
