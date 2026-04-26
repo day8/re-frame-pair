@@ -946,4 +946,8 @@
     (die :unknown-subcommand :arg (first args)
          :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build" "console-tail" "app-summary" "handler-source"})))
 
-(apply -main *command-line-args*)
+;; Auto-run when invoked as a script. Tests load this file as a
+;; library and set OPS_NO_AUTO_RUN to skip the dispatcher (otherwise
+;; (case (first nil) ...) hits :else and System/exit 1's the runner).
+(when-not (System/getenv "OPS_NO_AUTO_RUN")
+  (apply -main *command-line-args*))

@@ -22,9 +22,18 @@ jobs:
       - name: ops.clj parses and dispatches
         run: |
           # Should emit a structured {:ok? false :reason :unknown-subcommand}
-          # result without needing a live nREPL.
+          # result without needing a live nREPL. Catches load-time
+          # regressions (rfp-xhx: a forward-reference at line 360 broke
+          # every shim because bb couldn't even load ops.clj).
           bb scripts/ops.clj unknown-subcommand 2>&1 | tee out.txt
           grep -q ":unknown-subcommand" out.txt
+
+      - name: ops.clj unit tests
+        run: |
+          # Per-helper coverage for list-builds-on-port, read-port-
+          # candidates, and the load-cleanly assertion. See
+          # tests/ops_smoke.bb header for context.
+          OPS_NO_AUTO_RUN=1 bb tests/ops_smoke.bb
 
       - name: Shell shims are executable and have valid shebangs
         run: |
