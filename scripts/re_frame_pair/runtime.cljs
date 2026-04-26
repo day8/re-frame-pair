@@ -790,9 +790,14 @@
   "Wrap `js/console.{log,warn,error,info,debug}` so each call appends
    to the console-log ring buffer in addition to the original
    behaviour. Idempotent — guarded by a window marker so a re-inject
-   doesn't double-wrap."
+   doesn't double-wrap.
+
+   Silent no-op when there is no browser-side `js/window`
+   (e.g. shadow-cljs's `:node-test` build); the runtime still loads
+   so unit tests can exercise unrelated machinery."
   []
-  (when-not (aget js/window "__rfp_console_capture__")
+  (when (and (exists? js/window)
+             (not (aget js/window "__rfp_console_capture__")))
     (aset js/window "__rfp_console_capture__" true)
     (doseq [level [:log :warn :error :info :debug]]
       (let [n    (name level)
@@ -1111,9 +1116,13 @@
 
    TODO verify the definitive gate in `re-com.config` in the spike;
    this heuristic is fine when the app has rendered at least once but
-   may misreport on a freshly-loaded page."
+   may misreport on a freshly-loaded page.
+
+   Returns false in non-browser environments (no `js/document`)."
   []
-  (some? (.querySelector js/document "[data-rc-src]")))
+  (boolean
+    (and (exists? js/document)
+         (some? (.querySelector js/document "[data-rc-src]")))))
 
 ;; Last-clicked capture — passive listener that records the element
 ;; most recently clicked anywhere on the page. Installed once by
@@ -1125,9 +1134,14 @@
 (defn install-last-click-capture!
   "Install a single capturing click listener on document that records
    the most recently clicked element. Idempotent — calling twice does
-   not double-register (guard via a marker on window)."
+   not double-register (guard via a marker on window).
+
+   Silent no-op when there is no browser-side `js/window` /
+   `js/document` (e.g. shadow-cljs's `:node-test` build)."
   []
-  (when-not (aget js/window "__rfp_click_capture__")
+  (when (and (exists? js/window)
+             (exists? js/document)
+             (not (aget js/window "__rfp_click_capture__")))
     (aset js/window "__rfp_click_capture__" true)
     (.addEventListener
      js/document
@@ -1533,17 +1547,22 @@
   []
   (install-last-click-capture!)
   (install-console-capture!)
-  {:ok?                 true
-   :session-id          session-id
-   :ten-x-loaded?       (ten-x-loaded?)
-   :trace-enabled?      re-frame.trace/trace-enabled?
-   :re-com-debug?       (re-com-debug-enabled?)
-   :last-click-capture? true
-   :console-capture?    true
-   :app-db-initialised? (map? @db/app-db)
-   :versions            (version-report)
-   :epoch-count         (epoch-count)
-   :claude-epoch-count  (count @claude-epoch-ids)})
+  ;; epoch-count throws when 10x isn't loaded (or when running outside
+  ;; the browser, e.g. shadow-cljs's node-test build). Health is meant
+  ;; to be a best-effort summary; catch and fall back to nil so the
+  ;; rest of the report still surfaces.
+  (let [ec (try (epoch-count) (catch :default _ nil))]
+    {:ok?                 true
+     :session-id          session-id
+     :ten-x-loaded?       (ten-x-loaded?)
+     :trace-enabled?      re-frame.trace/trace-enabled?
+     :re-com-debug?       (re-com-debug-enabled?)
+     :last-click-capture? true
+     :console-capture?    true
+     :app-db-initialised? (map? @db/app-db)
+     :versions            (version-report)
+     :epoch-count         ec
+     :claude-epoch-count  (count @claude-epoch-ids)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Session-bootstrap summary

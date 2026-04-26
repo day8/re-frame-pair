@@ -506,3 +506,94 @@
      (fn [db _ev] db))
     (rt/tagged-dispatch-sync! [:test/no-op])
     (is (= :app @rt/current-who))))
+
+;; ---------------------------------------------------------------------------
+;; Tests for rfp-r5s B: app/summary
+;; ---------------------------------------------------------------------------
+
+(deftest value-shape-tag-dispatch
+  (testing "value-shape-tag returns a symbol describing the type"
+    (is (= 'nil     (rt/value-shape-tag nil)))
+    (is (= 'map     (rt/value-shape-tag {:a 1})))
+    (is (= 'map     (rt/value-shape-tag {})))
+    (is (= 'vec     (rt/value-shape-tag [])))
+    (is (= 'vec     (rt/value-shape-tag [1 2 3])))
+    (is (= 'set     (rt/value-shape-tag #{:a :b})))
+    (is (= 'string  (rt/value-shape-tag "hello")))
+    (is (= 'boolean (rt/value-shape-tag true)))
+    (is (= 'boolean (rt/value-shape-tag false)))
+    (is (= 'keyword (rt/value-shape-tag :foo)))
+    (is (= 'number  (rt/value-shape-tag 42)))
+    (is (= 'number  (rt/value-shape-tag 3.14)))
+    (is (= 'other   (rt/value-shape-tag 'symbol)))
+    ;; Lists and seqs are :sequential? but not vector/set, so 'seq
+    (is (= 'seq     (rt/value-shape-tag '(1 2 3))))
+    (is (= 'seq     (rt/value-shape-tag (range 3))))))
+
+(deftest value-shape-tag-precedence
+  (testing "map dispatch beats sequential? for ordered records"
+    ;; Records are maps; cond-order should match :map first.
+    (is (= 'map (rt/value-shape-tag {:k :v}))))
+
+  (testing "vector beats sequential — both predicates would match"
+    (is (= 'vec (rt/value-shape-tag [:a :b])))))
+
+;; The full app-summary builder calls into version-report,
+;; registrar-describe, subs-live, and health. health installs the
+;; last-click and console-capture wrappers, which reach for js/window;
+;; in shadow-cljs's :node-test build js/window is bound to a node-side
+;; shim so the calls don't throw. The shape test below confirms the
+;; bundle returns the expected top-level keys.
+
+(deftest app-summary-shape
+  (testing "app-summary returns the bootstrap-bundle shape"
+    (let [s (rt/app-summary)]
+      (is (true? (:ok? s)))
+      (is (contains? s :versions))
+      (is (contains? s :registrar))
+      (is (contains? s :live-subs))
+      (is (contains? s :app-db-keys))
+      (is (contains? s :app-db-shape))
+      (is (contains? s :health))
+      (is (number? (:ts s)))
+      ;; :registrar must be the by-kind map (extracted from
+      ;; registrar-describe — not the raw envelope).
+      (is (map? (:registrar s)))
+      ;; live-subs is a vec of query-vectors (possibly empty).
+      (is (vector? (:live-subs s)))
+      ;; health is itself a map with :ok? true.
+      (is (true? (-> s :health :ok?))))))
+
+(deftest app-summary-app-db-shape-vs-non-map
+  (testing "when @app-db is not a map, :app-db-keys / :app-db-shape are nil"
+    ;; Save and restore re-frame.db/app-db so other tests aren't disturbed.
+    (let [orig @re-frame.db/app-db]
+      (try
+        (reset! re-frame.db/app-db [:not :a :map])
+        (let [s (rt/app-summary)]
+          (is (nil? (:app-db-keys s)))
+          (is (nil? (:app-db-shape s))))
+        (finally
+          (reset! re-frame.db/app-db orig))))))
+
+(deftest app-summary-app-db-shape-is-one-level-deep
+  (testing "with a structured app-db, :app-db-shape returns top-level type tags"
+    (let [orig @re-frame.db/app-db]
+      (try
+        (reset! re-frame.db/app-db
+                {:counter 0
+                 :items   [{:id 1} {:id 2}]
+                 :user    {:id 99 :name "alice"}
+                 :flags   #{:a :b}
+                 :note    "hi"})
+        (let [s (rt/app-summary)]
+          (is (= '{:counter number
+                   :items   vec
+                   :user    map
+                   :flags   set
+                   :note    string}
+                 (:app-db-shape s)))
+          (is (= #{:counter :items :user :flags :note}
+                 (set (:app-db-keys s)))))
+        (finally
+          (reset! re-frame.db/app-db orig))))))
