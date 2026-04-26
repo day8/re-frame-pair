@@ -573,7 +573,17 @@
 
    Note: `:renders[].src` is not populated — re-com's `:src` is not
    threaded into the render trace today. The `dom/*` ops do that join
-   via the live DOM (§4.3b)."
+   via the live DOM (§4.3b).
+
+   `:debux/code` surfaces re-frame-debux's per-form trace payload when
+   the user has wrapped a handler / sub / fx with
+   `day8.re-frame.tracing/fn-traced` (or `defn-traced`). debux's
+   `send-trace!` writes through `re-frame.trace/merge-trace!` into the
+   `:code` tag of the current trace event (re-frame-debux/src/day8/
+   re_frame/debux/common/util.cljc:132); we just expose that here under
+   a debux-namespaced key so consumers can spot it without colliding
+   with our own keys. Absent → `nil`. See docs/inspirations-debux.md
+   §3b for the bridge rationale and §3.0 for the on-demand-wrap recipe."
   ([raw]
    (coerce-epoch raw {:all-traces  (read-10x-all-traces)
                       :all-matches (when (ten-x-app-db-ratom)
@@ -599,7 +609,10 @@
         :app-db/diff       (diff-app-db event-trace)
         :subs/ran          (when render-src (sub-runs-from-state render-src))
         :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src))
-        :renders           (when render-src (renders-from-traces render-src all-traces))}))))
+        :renders           (when render-src (renders-from-traces render-src all-traces))
+        ;; Per-form trace from re-frame-debux's fn-traced — nil when
+        ;; debux isn't on the classpath OR the handler wasn't wrapped.
+        :debux/code        (:code tags)}))))
 
 (defn latest-epoch-id
   "Id of 10x's newest match, or nil if the buffer is empty / 10x is

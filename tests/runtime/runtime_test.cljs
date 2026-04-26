@@ -198,7 +198,44 @@
             fx-ids (set (map :fx-id fired))]
         (is (contains? fx-ids :db))
         (is (contains? fx-ids :dispatch))
-        (is (contains? fx-ids :http-xhrio))))))
+        (is (contains? fx-ids :http-xhrio))))
+    (testing ":debux/code is nil when re-frame-debux didn't write a :code tag"
+      (is (nil? (:debux/code e))))))
+
+(deftest coerce-epoch-surfaces-debux-code-when-present
+  ;; rfp-hjj item 1: when a fn-traced-wrapped handler runs, debux's
+  ;; send-trace! appends per-form trace entries onto the :code tag of
+  ;; the current trace event (re-frame-debux/src/day8/re_frame/debux/
+  ;; common/util.cljc:132). coerce-epoch should expose that under
+  ;; :debux/code so consumers can spot it without colliding with our
+  ;; own keys. See docs/inspirations-debux.md §3b.
+  (let [code-payload [{:form '(let [n (* 2 x)] (assoc db :n n))
+                       :result {:n 10}
+                       :indent-level 0
+                       :syntax-order 0
+                       :num-seen 0}
+                      {:form '(* 2 x) :result 10
+                       :indent-level 1 :syntax-order 1 :num-seen 0}]
+        ;; Synthetic match with the :code tag populated alongside
+        ;; :event etc. Mirror the exact shape debux emits.
+        match (-> fixtures/synthetic-match
+                  (assoc-in [:match-info 0 :tags :code] code-payload))
+        e     (rt/coerce-epoch match fixtures/basic-context)]
+    (testing ":debux/code surfaces verbatim when present"
+      (is (= code-payload (:debux/code e))))
+    (testing "other epoch keys are unchanged by the addition"
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e)))
+      (is (= 100 (:id e))))))
+
+(deftest coerce-epoch-debux-code-empty-vec
+  ;; Edge case: debux is loaded but the handler hasn't been wrapped, OR
+  ;; was wrapped but emitted no traces (e.g. fn-traced over an empty
+  ;; body). An empty vec should pass through unchanged — distinct from
+  ;; nil so consumers can tell "wrapped but silent" from "not wrapped".
+  (let [match (-> fixtures/synthetic-match
+                  (assoc-in [:match-info 0 :tags :code] []))
+        e     (rt/coerce-epoch match fixtures/basic-context)]
+    (is (= [] (:debux/code e)))))
 
 (deftest coerce-epoch-handles-nil
   (testing "nil input -> nil"
