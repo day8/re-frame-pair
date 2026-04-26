@@ -57,7 +57,7 @@ This locates the shadow-cljs nREPL port, connects, switches the session to `:clj
 
 If any precondition fails, the script returns a structured error like `{:ok? false :missing :re-frame-10x}`. Report the failing check to the user verbatim; do *not* guess at workarounds.
 
-Between user turns, the nREPL session persists, but a full page refresh in the browser drops the injected namespace. Every op checks the **session sentinel** (`re-frame-pair.runtime/session-id`) and re-injects if it's gone. You don't usually need to do this by hand.
+Every op auto-reinjects the runtime namespace if a browser refresh dropped it; the response carries `:reinjected? true` when this happens — informational, not an error.
 
 ---
 
@@ -100,7 +100,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 
 ### DOM ↔ source bridge (re-com `:src`)
 
-**Why this family matters — read first.** When a re-com component is called with `:src (at)`, re-com's debug path attaches a `data-rc-src` attribute to the rendered DOM element. The attribute's value is the **namespace (file path) and line number** of the call site that produced it — e.g. `"app/cart/view.cljs:84"` or `"app/cart/view.cljs:84:8"`. This gives you a direct, two-way bridge between a live DOM element and the exact line of source code that rendered it. You can go DOM → source (*"what file produced this button?"*) and source → DOM (*"which live elements did line 84 render?"*), and trigger interactions against a source location rather than fiddling with CSS selectors. **This is re-frame-pair's crown-jewel code↔runtime link — no other tooling (browser devtools, Chrome DevTools MCP, etc.) provides it.** Reach for it aggressively whenever the conversation is about a visible UI element.
+When a re-com component is called with `:src (at)`, re-com attaches `data-rc-src="file:line"` to the rendered element — a two-way bridge between live DOM and the source line that produced it. Use it whenever the conversation is about a visible element.
 
 **Prerequisites** — both must hold for a specific element's `:src` to resolve:
 - re-com's debug instrumentation enabled in the dev build (a config flag in `re-com.config`)
@@ -108,11 +108,11 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 
 **Degradation is per-element, not app-wide.** An app with `:src (at)` on most components but not all works fine — the bridge resolves where annotations are present and returns `{:src nil :reason :no-src-at-this-element}` for the few that aren't. When re-com debug is *entirely* off, every element returns `{:src nil :reason :re-com-debug-disabled}`. Tell the user which case they're hitting when it happens.
 
-**Parsing the raw attribute.** You normally don't need to — the structured ops (`dom/source-at`, `dom/describe`) and epoch render entries return `:src` as a pre-parsed map `{:file ... :line ... :column ...}`. If you ever read `data-rc-src` directly via `repl/eval` (e.g. `(.getAttribute el "data-rc-src")`), split the value on `":"` — the first segment is the file path, the second is the line number, and an optional third is the column. Example: `"app/cart/view.cljs:84:8"` → `{:file "app/cart/view.cljs" :line 84 :column 8}`. The `"file:line"` form (no column) is also valid. Caveat: the exact format is a §8a spike item; if the real re-com output differs, update `runtime.cljs/parse-rc-src` and this note together.
+**Parsing the raw attribute.** You normally don't need to — structured ops (`dom/source-at`, `dom/describe`) and epoch render entries return `:src` as a pre-parsed map `{:file ... :line ...}`. The raw attribute is `"file:line"` (e.g. `"app/cart/view.cljs:84"`).
 
 | Op | Invocation | Returns |
 |---|---|---|
-| `dom/source-at` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-source-at "#save-button")'` or `'(... :last-clicked)'` | `{:file :line :column}` for a CSS selector, or for the most recently clicked element |
+| `dom/source-at` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-source-at "#save-button")'` or `'(... :last-clicked)'` | `{:file :line}` for a CSS selector, or for the most recently clicked element |
 | `dom/find-by-src` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-find-by-src "view.cljs" 84)'` | Live DOM elements rendered by that source line |
 | `dom/fire-click-at-src` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-fire-click "view.cljs" 84)'` | Synthesise a click on the element rendered by that line — lets you exercise a specific call site by its source location, not a CSS path |
 | `dom/describe` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-describe "#save-button")'` | Attrs + `data-rc-src` + attached listeners |
@@ -201,7 +201,7 @@ Keep it short. One compact paragraph per domino.
 
 ### "Post-mortem — how did we get here?"
 
-**When the user is stuck in a broken state and can't describe how they got there.** Every event since page load is in 10x's buffer (subject to retention — see caveat below). You don't need the user to remember the sequence; you can walk it back.
+When the user is stuck in a broken state and can't describe how they got there.
 
 Procedure:
 
@@ -229,18 +229,16 @@ Given a component name or `:src`, find the latest epoch whose `:renders` include
 
 ### "Where in the code does this come from?"
 
-Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :line :column}`. If `:src` is nil, report which prerequisite is missing (re-com debug off, or this specific call site wasn't passed `:src (at)`).
+Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :line}`. If `:src` is nil, report which prerequisite is missing (re-com debug off, or this specific call site wasn't passed `:src (at)`).
 
 ### "Understand this component" / "What is this thing?"
 
 When the user points at a UI element (CSS selector, *"the thing I last clicked"*, or a description), chain:
 
-1. `dom/source-at` — resolve to `{:file :line :column}`.
+1. `dom/source-at` — resolve to `{:file :line}`.
 2. `Read` the source file at that line, with ~30 lines of context.
 3. Narrate: what the component is, what props it takes, which event(s) its interactions dispatch, and (if you can see them nearby) which subscriptions it reads.
 4. If `data-rc-src` isn't resolvable, fall back to `dom/describe` to report tag/class/listeners, and ask the user to point at the source instead.
-
-This is one of the most grounding moves you can make — it turns *"that button"* into *"`re-com/button` at `app/cart/view.cljs:84`, dispatching `[:cart/checkout]`"* in one step.
 
 ### "Fire the button at file:line"
 
@@ -252,9 +250,7 @@ Use `dom/fire-click-at-src`. Report the resulting epoch. Useful when you want to
 
 ### Experiment loop
 
-**Why this works:** the same starting `app-db`, the same event, only the code changes — so any difference in the resulting epoch is attributable to *your edit*, nothing else. That makes it a controlled experiment rather than a fix-and-pray. Reach for this loop whenever you're unsure whether a change has the intended effect.
-
-> **Executability note:** the `undo/*` ops dispatch into 10x's internal navigation events; they only rewind `app-db` when 10x's `:settings :app-db-follows-events?` is true (default true). If 10x isn't loaded, the ops fail with `:reason :ten-x-missing` — tell the user 10x must be in the build before starting this loop. If 10x is loaded but `:app-db-follows-events?` is off, you'll get a `:warning` field in the result; have the user toggle it from 10x's Settings panel.
+Same starting `app-db`, same event, only the code changes — any difference in the resulting epoch is attributable to your edit. Use whenever you're unsure if a change has the intended effect. Prerequisites: see *Time-travel* — 10x loaded with `:app-db-follows-events?` enabled.
 
 Canonical procedure:
 
@@ -309,5 +305,5 @@ Common cases:
 - **Experiment, don't speculate.** When an answer isn't obvious, probe at the REPL against live data.
 - **Validate before proposing.** When a hot-swap or suggestion is on the table, compose the form and run it against current state first.
 - **Narrow detail as you go.** Summaries first; drill into a specific epoch, diff, or sub when the user asks.
-- **Always resolve UI references to `:src` first.** When the user mentions a button, view, panel, or "the thing I clicked", run `dom/source-at` (or read the `:src` field from the relevant epoch's `:renders`) *before* speculating about behaviour. Reporting `re-com/button at app/cart/view.cljs:84` grounds the conversation in a file the user can open; reporting *"probably the Save button somewhere in the profile view"* doesn't. This applies to every render entry in an epoch too — when narrating what re-rendered, cite file:line wherever `:src` is populated.
+- **Always resolve UI references to `:src` first.** When the user mentions a UI element, run `dom/source-at` (or read `:src` from the relevant epoch's `:renders`) before speculating about behaviour. `re-com/button at app/cart/view.cljs:84` grounds the conversation; *"the Save button somewhere in the profile view"* doesn't.
 - **Surface undo limits.** Before any time-travel experiment, call `undo/status` and tell the user which side effects the undo cannot reverse.
