@@ -18,6 +18,12 @@
 #   --sub-ran :cart/total
 #   --render 'my.ns/foo'
 #
+# Output filters:
+#   --dedupe-by :event   Suppress consecutive epochs whose :event vec
+#                        matches the previous emitted one — useful with
+#                        --stream against handlers that fire many times
+#                        in a row.
+#
 # Stopping defaults: idle-ms 30000, hard-ms 300000, count 5.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"

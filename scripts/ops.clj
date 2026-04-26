@@ -846,6 +846,12 @@
         idle-ms     (Long/parseLong (flag-value args "--idle-ms" (str default-watch-idle-ms)))
         hard-ms     (Long/parseLong (flag-value args "--hard-ms" (str default-watch-hard-cap-ms)))
         poll-ms     (Long/parseLong (flag-value args "--poll-ms" (str default-watch-poll-ms)))
+        ;; --dedupe-by :event suppresses consecutive duplicate emissions
+        ;; whose :event vec matches the previous emitted one. Cribbed
+        ;; from debux's :once option (docs/inspirations-debux.md §3c).
+        ;; Only :event is accepted today; the flag shape leaves room for
+        ;; future :event-id, :touches-path etc. without breaking the CLI.
+        dedupe-by   (->kw (flag-value args "--dedupe-by" nil))
         reinjected? (when-not stop? (ensure-injected! build-id))]
     (cond
       stop?
@@ -854,10 +860,11 @@
 
       :else
       (try
-        (let [start     (System/currentTimeMillis)
-              last-id   (atom (cljs-eval-value build-id "(re-frame-pair.runtime/latest-epoch-id)"))
-              emitted   (atom 0)
-              last-hit  (atom (System/currentTimeMillis))
+        (let [start         (System/currentTimeMillis)
+              last-id       (atom (cljs-eval-value build-id "(re-frame-pair.runtime/latest-epoch-id)"))
+              emitted       (atom 0)
+              last-emitted  (atom ::none) ;; nil is a real :event value, so use a sentinel
+              last-hit      (atom (System/currentTimeMillis))
               done?     (fn []
                           (let [now      (System/currentTimeMillis)
                                 elapsed  (- now start)
@@ -895,9 +902,19 @@
                 (emit {:ok? true :warning :id-aged-out
                        :note "The id we were tracking fell off 10x's ring buffer between polls — some matching epochs may have been missed."}))
               (doseq [m matches]
-                (swap! emitted inc)
-                (reset! last-hit (System/currentTimeMillis))
-                (emit {:ok? true :epoch m}))
+                ;; When --dedupe-by :event is set, skip an epoch whose
+                ;; :event matches the last-emitted one. Useful with
+                ;; --stream against handlers that fire many times in a
+                ;; row (UI mash, polling, etc.).
+                (let [key (case dedupe-by
+                            :event (:event m)
+                            nil)
+                      dup? (and dedupe-by (= key @last-emitted))]
+                  (when-not dup?
+                    (when dedupe-by (reset! last-emitted key))
+                    (swap! emitted inc)
+                    (reset! last-hit (System/currentTimeMillis))
+                    (emit {:ok? true :epoch m}))))
               (if-let [[_ why] (done?)]
                 (emit (cond-> {:ok? true :finished? true :reason why :emitted @emitted}
                         reinjected? (assoc :reinjected? true)))
