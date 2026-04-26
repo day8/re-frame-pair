@@ -966,17 +966,23 @@
 
 (defn- list-builds-on-port
   "Ask the shadow-cljs nREPL on `port` for the active build IDs via
-   `(shadow.cljs.devtools.api/active-builds)`. Returns a vec of
+   `(shadow.cljs.devtools.api/active-builds)`. Returns a sorted vec of
    keywords on success, nil on any failure (port not listening,
-   shadow-cljs not loaded, parse failure)."
+   shadow-cljs not loaded, parse failure).
+
+   Note: shadow-cljs returns a SET (e.g. `#{:app}`), not a vector —
+   accept both shapes (and any other coll? value, defensively) so a
+   single-build setup doesn't read as 'no builds active' (rfp-j2i)."
   [port]
   (try
     (let [resp (combine-responses
                 (nrepl-eval-raw port "(shadow.cljs.devtools.api/active-builds)"))
           v    (some-> resp :value safe-edn)]
       (cond
-        (sequential? v) (vec v)
-        :else           nil))
+        (or (sequential? v) (set? v))
+        (vec (sort-by str v))
+
+        :else nil))
     (catch Exception _ nil)))
 
 (defn- runtime-injected-on?

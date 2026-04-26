@@ -56,17 +56,17 @@
     (with-redefs [ops/nrepl-eval-raw (fn [_ _] (throw (ex-info "no socket" {})))]
       (is (nil? (#'ops/list-builds-on-port 8777))))))
 
-;; The `#{:app}` (set) case is a known bug: list-builds-on-port checks
-;; (sequential? v), which is false for sets, so a real shadow build
-;; reports :builds [] under --list. Tracked in rfp-j2i; this test
-;; documents the current behaviour. Re-introduce as a passing test
-;; once rfp-j2i lands.
-(deftest list-builds-on-port-set-input-current-buggy-behaviour
-  (testing "set return — known bug: returns nil instead of vec (rfp-j2i)"
+(deftest list-builds-on-port-set-input
+  (testing "shadow-cljs returns a set (e.g. #{:app}) — coerced to a sorted vec"
     (with-redefs [ops/nrepl-eval-raw  (fn [_ _] :unused)
                   ops/combine-responses (fn [_] {:value "#{:app}"})]
-      (is (nil? (#'ops/list-builds-on-port 8777))
-          "When rfp-j2i fixes this, flip to (= [:app] ...) and rename the deftest"))))
+      (is (= [:app] (#'ops/list-builds-on-port 8777))))
+
+    (with-redefs [ops/nrepl-eval-raw  (fn [_ _] :unused)
+                  ops/combine-responses (fn [_] {:value "#{:storybook :app}"})]
+      ;; Sets are unordered — the fn sorts by str so the result is
+      ;; deterministic across calls.
+      (is (= [:app :storybook] (#'ops/list-builds-on-port 8777))))))
 
 (deftest read-port-candidates-env-override
   (testing "SHADOW_CLJS_NREPL_PORT env var suppresses file probing"
