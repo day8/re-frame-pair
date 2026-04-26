@@ -615,27 +615,33 @@
         :debux/code        (:code tags)}))))
 
 (defn debux-runtime-api?
-  "True iff `day8.re-frame.tracing.runtime/wrap-handler!` is loaded
+  "True iff `day8.re-frame.tracing.runtime/runtime-api?` is loaded
    in this runtime — i.e. the on-demand instrumentation Phase 2
-   API is available. False both when day8.re-frame/tracing isn't
-   on the classpath at all AND when an older release is loaded that
-   ships only the macro layer (pre-rfd-8g9; the runtime ns landed in
-   re-frame-debux commit 4ed07c9, 2026-04-26).
+   API (wrap-handler! / unwrap-handler! / etc.) is available.
+   False both when day8.re-frame/tracing isn't on the classpath at
+   all AND when an older release is loaded that ships only the
+   fn-traced macro (pre-rfd-8g9; runtime ns landed in re-frame-debux
+   commit 4ed07c9, runtime-api? probe-var landed in commit 6b04e6b
+   under ci-hpg / rf-yvu).
 
    Used by SKILL.md's 'Trace a handler / sub / fx form-by-form'
    recipe to dispatch between the wrap-handler!/unwrap-handler!
    path (preferred — clean unwrap, no source-eval round-trip) and
    the manual fn-traced AST-rewrite fallback.
 
-   Detection probes the JS-side munged path
-   `day8.re_frame.tracing.runtime.wrap_handler_BANG_` rather than
+   Probes the JS-side munged path
+   `day8.re_frame.tracing.runtime.runtime_api_QMARK_` rather than
    CLJS `resolve` because that pattern doesn't require the
    namespace to be on the cljs source path at runtime.cljs compile
-   time — the helper still works in builds that don't bundle debux."
+   time — the helper still works in builds that don't bundle debux.
+   Switched from probing `wrap_handler_BANG_` to the dedicated
+   `runtime_api_QMARK_` var (rf-yvu Phase 2): the upstream now owns
+   the detection contract, so the symbol won't be renamed away in
+   a refactor of the wrap/unwrap surface itself."
   []
   (boolean
     (when-let [g (some-> js/goog .-global)]
-      (aget-path g ["day8" "re_frame" "tracing" "runtime" "wrap_handler_BANG_"]))))
+      (aget-path g ["day8" "re_frame" "tracing" "runtime" "runtime_api_QMARK_"]))))
 
 (defn latest-epoch-id
   "Id of 10x's newest match, or nil if the buffer is empty / 10x is
