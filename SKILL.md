@@ -98,6 +98,19 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
 | `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
 
+### Console / errors
+
+A ring buffer of `js/console.{log,warn,error,info,debug}` calls captured by the runtime, tagged with `:who` so you can ask "what did MY dispatch log, vs the user's app, vs which handler threw?". Installed by `health` (idempotent, max 500 entries).
+
+**`:who` values.** `:claude` for entries during your `tagged-dispatch-sync!` (sync only — async-queued handlers tag `:app`); `:app` for everything else; `:handler-error` synthesised from a `tagged-dispatch-sync!` catch with the throwable's stack.
+
+| Op | Invocation | Returns |
+|---|---|---|
+| `console/tail` | `scripts/console-tail.sh` | All buffered entries newest-last |
+| `console/tail-since` | `scripts/console-tail.sh --since-id 42` | Entries with `:id >= 42` (use `:next-id` from previous call to tail incrementally) |
+| `console/tail-claude` | `scripts/console-tail.sh --who claude` | Only entries tagged `:claude` |
+| `console/tail-handler-errors` | `scripts/console-tail.sh --who handler-error` | Synthesised entries from `tagged-dispatch-sync!`'s handler-throw catch |
+
 ### DOM ↔ source bridge (re-com `:src`)
 
 When a re-com component is called with `:src (at)`, re-com attaches `data-rc-src="file:line"` to the rendered element — a two-way bridge between live DOM and the source line that produced it. Use it whenever the conversation is about a visible element.
@@ -243,6 +256,15 @@ When the user points at a UI element (CSS selector, *"the thing I last clicked"*
 ### "Fire the button at file:line"
 
 Use `dom/fire-click-at-src`. Report the resulting epoch. Useful when you want to exercise a specific call site by its source location rather than picking a CSS path — distinctive to re-frame-pair. Tell the user if `:src (at)` is missing on that call site.
+
+### "What did this dispatch log?"
+
+Ground console output to a specific dispatch by pairing `console/tail` with `trace/dispatch-and-collect`:
+
+1. `scripts/console-tail.sh` once first to read the current `:next-id` — that's your watermark.
+2. Fire the dispatch via `scripts/dispatch.sh --trace '[:foo ...]'`.
+3. `scripts/console-tail.sh --since-id <watermark>` — every entry that landed during the dispatch. Filter by `--who claude` if the user's app also logs during the same window and you want only the agent-driven side.
+4. `--who handler-error` surfaces the synthesised stack from `tagged-dispatch-sync!`'s catch when an event handler threw — pair with the structured `:reason :handler-threw` response.
 
 ### "Dead code scan"
 

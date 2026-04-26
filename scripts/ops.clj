@@ -734,6 +734,32 @@
               (recur))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Subcommand: console-tail
+;; ---------------------------------------------------------------------------
+
+(defn- console-tail-op [args]
+  (ensure-port!)
+  (let [since-id    (flag-value args "--since-id" "0")
+        who         (flag-value args "--who" nil)
+        build-id    (build-id-from-args args)
+        reinjected? (ensure-injected! build-id)
+        ;; Normalise --who: accept "app", ":app", "claude", ":claude", etc.
+        who-kw      (when who
+                      (str ":" (if (str/starts-with? who ":") (subs who 1) who)))
+        form        (if who-kw
+                      (format "(re-frame-pair.runtime/console-tail-since %s %s)"
+                              since-id who-kw)
+                      (format "(re-frame-pair.runtime/console-tail-since %s)"
+                              since-id))]
+    (try
+      (let [result (cljs-eval-value build-id form)]
+        (emit (cond-> result
+                reinjected? (assoc :reinjected? true))))
+      (catch Exception e
+        (emit (cond-> {:ok? false :reason :console-tail-failed :message (.getMessage e)}
+                reinjected? (assoc :reinjected? true)))))))
+
+;; ---------------------------------------------------------------------------
 ;; Dispatcher
 ;; ---------------------------------------------------------------------------
 
@@ -746,7 +772,8 @@
     "trace-recent" (trace-recent-op (rest args))
     "watch"        (watch-op (rest args))
     "tail-build"   (tail-build-op (rest args))
+    "console-tail" (console-tail-op (rest args))
     (die :unknown-subcommand :arg (first args)
-         :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build"})))
+         :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build" "console-tail"})))
 
 (apply -main *command-line-args*)

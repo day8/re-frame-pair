@@ -679,6 +679,100 @@
        (filterv pred)))
 
 ;; ---------------------------------------------------------------------------
+;; Console capture
+;; ---------------------------------------------------------------------------
+;;
+;; A ring buffer of `js/console.{log,warn,error,info,debug}` calls,
+;; tagged with a `:who` marker so the agent can ask "what did MY
+;; dispatch log, vs the user's app?". Installed by
+;; `install-console-capture!` from `health` so it's idempotent and
+;; runs once per browser runtime. Defaults to `:app` (i.e. user code);
+;; `tagged-dispatch!` / `tagged-dispatch-sync!` flip it to `:claude`
+;; for the duration of their dispatch.
+;;
+;; Async note: `tagged-dispatch!`'s handler runs out of band, so
+;; console.* calls *inside the handler* still tag `:app` — only
+;; synchronous calls during the enqueue itself catch `:claude`. Use
+;; `tagged-dispatch-sync!` (which runs the handler synchronously)
+;; when you need handler output tagged.
+
+(defonce ^:private console-log
+  (atom {:entries [] :next-id 0 :max-size 500}))
+
+(defonce ^:private current-who (atom :app))
+
+(defn- stringify-arg
+  "Stringify a console-call argument for the buffer. Avoids holding
+   live JS objects (DOM nodes, ratoms, large data structures) that
+   would inflate memory and prevent GC."
+  [v]
+  (cond
+    (nil? v)     "nil"
+    (string? v)  v
+    (number? v)  (str v)
+    (boolean? v) (str v)
+    (keyword? v) (str v)
+    :else        (try (str v)
+                      (catch :default _ "<unstringifiable>"))))
+
+(defn- append-console-entry!
+  "Append a single console event to the ring buffer. `who` defaults
+   to `@current-who`; pass `:handler-error` explicitly for the
+   exception-catch path."
+  ([level args stack] (append-console-entry! level args stack @current-who))
+  ([level args stack who]
+   (swap! console-log
+          (fn [{:keys [entries next-id max-size]}]
+            {:entries  (vec (take-last max-size
+                                       (conj entries
+                                             {:id    next-id
+                                              :ts    (js/Date.now)
+                                              :level level
+                                              :args  (mapv stringify-arg args)
+                                              :who   who
+                                              :stack stack})))
+             :next-id  (inc next-id)
+             :max-size max-size}))))
+
+(defn install-console-capture!
+  "Wrap `js/console.{log,warn,error,info,debug}` so each call appends
+   to the console-log ring buffer in addition to the original
+   behaviour. Idempotent — guarded by a window marker so a re-inject
+   doesn't double-wrap."
+  []
+  (when-not (aget js/window "__rfp_console_capture__")
+    (aset js/window "__rfp_console_capture__" true)
+    (doseq [level [:log :warn :error :info :debug]]
+      (let [n    (name level)
+            orig (aget js/console n)]
+        (aset js/window (str "__rfp_orig_console_" n) orig)
+        (aset js/console n
+              (fn [& args]
+                (let [stack (when (#{:error :warn} level)
+                              (try (.-stack (js/Error.))
+                                   (catch :default _ "")))]
+                  (append-console-entry! level args stack))
+                (.apply orig js/console (apply array args))))))))
+
+(defn console-tail-since
+  "Return console entries with `:id >= since-id`, optionally filtered
+   by `:who` (one of `:app` / `:claude` / `:handler-error`, or nil =
+   all). Returns `{:ok? true :entries [...] :next-id <int>}`.
+
+   `:next-id` is the id the next captured entry will receive — pass
+   it back as `since-id` on the next call to tail incrementally."
+  ([since-id]      (console-tail-since since-id nil))
+  ([since-id who]
+   (let [{:keys [entries next-id max-size]} @console-log
+         filtered (cond->> entries
+                    (some? since-id) (filter #(>= (:id %) since-id))
+                    (some? who)      (filter #(= (:who %) who)))]
+     {:ok?      true
+      :entries  (vec filtered)
+      :next-id  next-id
+      :max-size max-size})))
+
+;; ---------------------------------------------------------------------------
 ;; Claude-dispatch tagging
 ;; ---------------------------------------------------------------------------
 ;;
@@ -698,9 +792,18 @@
 
 (defn tagged-dispatch!
   "Dispatch an event (queued) and record the resulting epoch's id in
-   the Claude-originated set. Returns {:ok? true :epoch-id <id>}."
+   the Claude-originated set. Returns {:ok? true :epoch-id <id>}.
+
+   `current-who` is set to `:claude` for the duration of the enqueue
+   call; the handler itself runs out of band, so handler-side console
+   output tags `:app`. Use `tagged-dispatch-sync!` when you need
+   handler output tagged."
   [event-v]
-  (rf/dispatch event-v)
+  (reset! current-who :claude)
+  (try
+    (rf/dispatch event-v)
+    (finally
+      (reset! current-who :app)))
   {:ok? true
    :queued? true
    :event event-v
@@ -735,23 +838,37 @@
    failure shape."
   [event-v]
   (let [before-id (latest-epoch-id)]
+    (reset! current-who :claude)
     (try
-      (rf/dispatch-sync event-v)
-      {:ok?       true
-       :event     event-v
-       :before-id before-id
-       ;; Resolved by dispatch-and-collect after frame/debounce wait.
-       :epoch-id  nil
-       :note      "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or poll latest-epoch-id."}
-      (catch :default e
-        ;; Stringify ex-data — it can carry JS object refs (interceptor
-        ;; records, ratoms) that don't edn-roundtrip back to the bb shim.
-        {:ok?        false
-         :reason     :handler-threw
-         :event      event-v
-         :before-id  before-id
-         :error      (or (ex-message e) (str e))
-         :error-data (when-let [d (ex-data e)] (pr-str d))}))))
+      (try
+        (rf/dispatch-sync event-v)
+        {:ok?       true
+         :event     event-v
+         :before-id before-id
+         ;; Resolved by dispatch-and-collect after frame/debounce wait.
+         :epoch-id  nil
+         :note      "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or poll latest-epoch-id."}
+        (catch :default e
+          ;; Surface the throw on the console-log buffer too, tagged
+          ;; :handler-error, so console-tail picks it up alongside
+          ;; the structured response. Stack matters for these.
+          (let [stack (try (.-stack e) (catch :default _ ""))]
+            (append-console-entry!
+             :error
+             [(str "[handler-threw] " (or (ex-message e) (str e)))
+              (str event-v)]
+             stack
+             :handler-error))
+          ;; Stringify ex-data — it can carry JS object refs (interceptor
+          ;; records, ratoms) that don't edn-roundtrip back to the bb shim.
+          {:ok?        false
+           :reason     :handler-threw
+           :event      event-v
+           :before-id  before-id
+           :error      (or (ex-message e) (str e))
+           :error-data (when-let [d (ex-data e)] (pr-str d))}))
+      (finally
+        (reset! current-who :app)))))
 
 (defn last-claude-epoch
   "Most recent epoch that the skill dispatched in this session."
@@ -1358,16 +1475,19 @@
   "One-call summary of the runtime's view of the world. Used by
    `discover-app.sh` to confirm the environment is healthy.
 
-   Side effect: installs the last-clicked capture listener if it
-   isn't already installed. Idempotent."
+   Side effect: installs the last-clicked capture listener and the
+   console capture wrapper if they aren't already installed. Both
+   are idempotent."
   []
   (install-last-click-capture!)
+  (install-console-capture!)
   {:ok?                 true
    :session-id          session-id
    :ten-x-loaded?       (ten-x-loaded?)
    :trace-enabled?      re-frame.trace/trace-enabled?
    :re-com-debug?       (re-com-debug-enabled?)
    :last-click-capture? true
+   :console-capture?    true
    :app-db-initialised? (map? @db/app-db)
    :versions            (version-report)
    :epoch-count         (epoch-count)
