@@ -743,10 +743,15 @@
 ;; `tagged-dispatch-sync!` (which runs the handler synchronously)
 ;; when you need handler output tagged.
 
-(defonce ^:private console-log
+;; `console-log` and `current-who` are exposed (no ^:private) so the
+;; runtime-test build can reset / inspect them without warnings. The
+;; runtime API consumers should still go through `console-tail-since`
+;; / `tagged-dispatch-{!,sync!}` rather than poking the atoms.
+
+(defonce console-log
   (atom {:entries [] :next-id 0 :max-size 500}))
 
-(defonce ^:private current-who (atom :app))
+(defonce current-who (atom :app))
 
 (defn- stringify-arg
   "Stringify a console-call argument for the buffer. Avoids holding
@@ -1544,10 +1549,10 @@
 ;; Session-bootstrap summary
 ;; ---------------------------------------------------------------------------
 
-(defn- value-shape-tag
+(defn value-shape-tag
   "Compact one-level-deep shape descriptor for app-summary. Returns
    a symbol naming the type without dragging the value itself into
-   the response."
+   the response. Public so tests can exercise the dispatch directly."
   [v]
   (cond
     (nil? v)        'nil

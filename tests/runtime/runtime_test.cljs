@@ -388,3 +388,121 @@
     (is (false? (rt/version-below? "1.0" nil)))
     (is (false? (rt/version-below? :unknown "1.0")))
     (is (false? (rt/version-below? "1.0" :unknown)))))
+
+;; ---------------------------------------------------------------------------
+;; Tests for rfp-r5s A: console.* capture
+;; ---------------------------------------------------------------------------
+;;
+;; These tests exist because rfp-r5s A shipped without them, and the rfp-r5s
+;; D forward-reference regression demonstrated that a green `npm test` is no
+;; guarantee a code addition is exercised. See tests/ops_smoke.bb for the
+;; babashka-side load-smoke partner.
+
+(defn- reset-console-log!
+  "Reset the console-log atom and the :who pointer to the same shape
+   the runtime defonce starts at. Tests do this before each scenario
+   so order doesn't matter."
+  []
+  (reset! rt/console-log {:entries [] :next-id 0 :max-size 500})
+  (reset! rt/current-who :app))
+
+(deftest console-tail-since-empty-buffer
+  (testing "console-tail-since on a fresh buffer returns no entries"
+    (reset-console-log!)
+    (let [r (rt/console-tail-since 0)]
+      (is (true? (:ok? r)))
+      (is (= [] (:entries r)))
+      (is (= 0  (:next-id r)))
+      (is (= 500 (:max-size r))))))
+
+(deftest console-tail-since-id-filter
+  (testing "since-id selects only entries with :id >= since-id"
+    (reset-console-log!)
+    ;; Seed the atom directly so we don't depend on the JS console wrap
+    ;; in the node-test environment. The capture pipeline ends up calling
+    ;; the same swap! the wrapper does — this tests the read seam.
+    (reset! rt/console-log
+            {:entries  [{:id 0 :ts 100 :level :log   :args ["one"]   :who :app    :stack nil}
+                        {:id 1 :ts 110 :level :info  :args ["two"]   :who :claude :stack nil}
+                        {:id 2 :ts 120 :level :warn  :args ["three"] :who :app    :stack "stk"}
+                        {:id 3 :ts 130 :level :error :args ["four"]  :who :handler-error :stack "boom"}]
+             :next-id  4
+             :max-size 500})
+    (is (= [0 1 2 3] (mapv :id (:entries (rt/console-tail-since 0)))))
+    (is (= [2 3]     (mapv :id (:entries (rt/console-tail-since 2)))))
+    (is (= []        (mapv :id (:entries (rt/console-tail-since 4)))))
+    (is (= 4         (:next-id (rt/console-tail-since 0))))))
+
+(deftest console-tail-since-who-filter
+  (testing "who arg picks only entries tagged with that :who"
+    (reset-console-log!)
+    (reset! rt/console-log
+            {:entries  [{:id 0 :who :app    :level :log :args [] :ts 0 :stack nil}
+                        {:id 1 :who :claude :level :log :args [] :ts 0 :stack nil}
+                        {:id 2 :who :app    :level :log :args [] :ts 0 :stack nil}
+                        {:id 3 :who :handler-error :level :error :args [] :ts 0 :stack nil}]
+             :next-id  4
+             :max-size 500})
+    (is (= [0 2] (mapv :id (:entries (rt/console-tail-since 0 :app)))))
+    (is (= [1]   (mapv :id (:entries (rt/console-tail-since 0 :claude)))))
+    (is (= [3]   (mapv :id (:entries (rt/console-tail-since 0 :handler-error)))))
+    ;; nil who → no who-filter, all entries returned
+    (is (= [0 1 2 3] (mapv :id (:entries (rt/console-tail-since 0 nil)))))))
+
+(deftest console-tail-since-id-and-who-combined
+  (testing "since-id + who AND-combine"
+    (reset-console-log!)
+    (reset! rt/console-log
+            {:entries  [{:id 0 :who :app    :level :log :args [] :ts 0 :stack nil}
+                        {:id 1 :who :claude :level :log :args [] :ts 0 :stack nil}
+                        {:id 2 :who :app    :level :log :args [] :ts 0 :stack nil}
+                        {:id 3 :who :claude :level :log :args [] :ts 0 :stack nil}]
+             :next-id  4
+             :max-size 500})
+    (is (= [3] (mapv :id (:entries (rt/console-tail-since 2 :claude))))
+        ":id >= 2 AND :who :claude")))
+
+;; The append + ring-buffer trim is exercised end-to-end via
+;; tagged-dispatch-sync!'s :handler-threw catch — register a throwing
+;; handler, dispatch it, and verify the synthesised entry. This tests the
+;; SAME swap! the console wrapper uses, without depending on js/console
+;; being wrappable in the node-test environment.
+
+(deftest tagged-dispatch-sync-bang-synthesises-handler-error-entry
+  (testing "tagged-dispatch-sync! catch appends a :handler-error console entry"
+    (reset-console-log!)
+    (re-frame.core/reg-event-db
+     :test/throws-on-purpose
+     (fn [_db _ev] (throw (ex-info "boom" {:why :test}))))
+    (let [r    (rt/tagged-dispatch-sync! [:test/throws-on-purpose])
+          tail (rt/console-tail-since 0 :handler-error)]
+      (is (false?              (:ok? r)))
+      (is (= :handler-threw    (:reason r)))
+      (is (= 1                 (count (:entries tail))))
+      (let [e (first (:entries tail))]
+        (is (= :error          (:level e)))
+        (is (= :handler-error  (:who e)))
+        (is (string?           (:stack e)))
+        ;; Args carry the formatted '[handler-threw]' message + event vec.
+        (is (some #(re-find #"handler-threw" %) (:args e)))))))
+
+(deftest tagged-dispatch-sync-bang-restores-current-who-on-catch
+  (testing "even when the handler throws, current-who is restored to :app"
+    (reset-console-log!)
+    (reset! rt/current-who :app)
+    (re-frame.core/reg-event-db
+     :test/throws-on-purpose-2
+     (fn [_db _ev] (throw (ex-info "boom" {}))))
+    (rt/tagged-dispatch-sync! [:test/throws-on-purpose-2])
+    (is (= :app @rt/current-who)
+        "the (try ... (finally (reset! current-who :app))) wrapper must run on every exit")))
+
+(deftest tagged-dispatch-sync-bang-success-path-restores-who
+  (testing "after a successful dispatch, current-who is :app again"
+    (reset-console-log!)
+    (reset! rt/current-who :app)
+    (re-frame.core/reg-event-db
+     :test/no-op
+     (fn [db _ev] db))
+    (rt/tagged-dispatch-sync! [:test/no-op])
+    (is (= :app @rt/current-who))))
