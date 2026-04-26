@@ -221,6 +221,49 @@ When the user asks whether a panel is showing the right values, don't stop at th
    ```
 4. Compare rendered vs expected. If they differ, data was right but Reagent didn't re-render — chase sub invalidation or `:dev/after-load`. If both match, the panel is correct end-to-end.
 
+### "Trace a handler / sub / fx form-by-form"
+
+When the user wants to see what each *expression inside* a handler evaluated to — not just the inputs and outputs of the handler as a whole. Leverages [re-frame-debux](https://github.com/day8/re-frame-debux)'s `fn-traced` macro as a runtime instrumentation engine, driven via the REPL — no source edits, no recompile.
+
+**Prerequisite:** `day8.re-frame/tracing` must be on the classpath. If it isn't, ask the user to add it to dev deps; you can't conjure macros that aren't loaded.
+
+**Procedure** (wrap → dispatch → read → restore, in a single REPL turn):
+
+1. **Look up the handler** so you can restore it later:
+   ```
+   scripts/eval-cljs.sh '(re-frame.registrar/get-handler :event :cart/apply-coupon)'
+   ```
+   The fn that comes back is what you'll re-register in step 5. Capture the printed form mentally (or to a scratch pad); CLJS fn values don't pretty-print, but the registrar's stored value plus the original `reg-event-db` form in the user's source is enough to restore.
+
+2. **Wrap and re-register** via `eval-cljs.sh`. Match the original arity:
+   ```
+   scripts/eval-cljs.sh '(re-frame.core/reg-event-db
+                           :cart/apply-coupon
+                           (day8.re-frame.tracing/fn-traced [db [_ code]]
+                             (-> db
+                                 (assoc-in [:cart :coupon] code)
+                                 (assoc-in [:cart :coupon-status] :applied))))'
+   ```
+   `fn-traced` expands at REPL eval time; the wrapped body emits per-form trace into the epoch's `:tags :code` via re-frame-debux's `send-trace!`.
+
+3. **Dispatch with `--trace`** so you get the epoch back:
+   ```
+   scripts/dispatch.sh --trace '[:cart/apply-coupon "SPRING25"]'
+   ```
+
+4. **Read `:debux/code`** off the returned epoch. Each entry has `{:form, :result, :indent-level, :syntax-order, :num-seen}` — the form text (post `tidy-macroexpanded-form`), the value it evaluated to, nesting depth, and evaluation order. Walk inner-to-outer to see what each sub-form produced.
+
+5. **Restore.** Re-eval the original `reg-event-db` form from the user's source. If the user's source isn't accessible from the REPL, the safest restore is to ask them to do a hot-reload (saving any source file in the same namespace re-evaluates the original `reg-event-db`).
+
+**Limits to call out to the user:**
+
+- **Classpath only.** This recipe needs `day8.re-frame/tracing` already loaded. If it isn't, fall back to `repl/eval` with manual `tap>` probes around the handler body.
+- **`reg-*` / var-backed handlers only.** Handlers that were inlined into other fns at compile time can't be traced this way — wrapping operates on *registration*, not on previously compiled call sites.
+- **Same-shape arity.** The wrapped form has to match the original handler's argument shape (`[db ev]` for `reg-event-db`, `[ctx ev]` for `reg-event-fx`, etc.). Look up `registrar/describe :event :foo/bar` first to confirm — `:reg-event-db` vs `:reg-event-fx` lives in the response's `:kind`.
+- **Restore is critical.** A wrapped handler stays wrapped for the rest of the REPL session (until full page reload). Always pair wrap with restore in the same turn.
+
+This recipe is the on-demand half of the integration described in [`docs/inspirations-debux.md` §3.0](./docs/inspirations-debux.md). The bridge half (surfacing `:code` as `:debux/code` in the epoch) is automatic — see the `Trace` op table.
+
 ### "Explain this dispatch"
 
 Run `trace/dispatch-and-collect` (or read a recent epoch), then narrate the six dominoes:
