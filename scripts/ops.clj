@@ -734,6 +734,30 @@
               (recur))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Subcommand: handler-source
+;; ---------------------------------------------------------------------------
+
+(defn- handler-source-op [args]
+  (ensure-port!)
+  (when (< (count args) 2)
+    (die :missing-args :hint "usage: handler-source :event :foo/bar"))
+  (let [[kind id & more] args
+        build-id    (build-id-from-args more)
+        reinjected? (ensure-injected! build-id)
+        ;; Accept :event or event for both args.
+        kw          (fn [s]
+                      (str ":" (if (str/starts-with? s ":") (subs s 1) s)))
+        form        (format "(re-frame-pair.runtime/handler-source %s %s)"
+                            (kw kind) (kw id))]
+    (try
+      (let [result (cljs-eval-value build-id form)]
+        (emit (cond-> result
+                reinjected? (assoc :reinjected? true))))
+      (catch Exception e
+        (emit (cond-> {:ok? false :reason :handler-source-failed :message (.getMessage e)}
+                reinjected? (assoc :reinjected? true)))))))
+
+;; ---------------------------------------------------------------------------
 ;; Subcommand: app-summary
 ;; ---------------------------------------------------------------------------
 
@@ -788,9 +812,10 @@
     "trace-recent" (trace-recent-op (rest args))
     "watch"        (watch-op (rest args))
     "tail-build"   (tail-build-op (rest args))
-    "console-tail" (console-tail-op (rest args))
-    "app-summary"  (app-summary-op (rest args))
+    "console-tail"   (console-tail-op (rest args))
+    "app-summary"    (app-summary-op (rest args))
+    "handler-source" (handler-source-op (rest args))
     (die :unknown-subcommand :arg (first args)
-         :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build" "console-tail" "app-summary"})))
+         :valid #{"discover" "eval" "inject" "dispatch" "trace-recent" "watch" "tail-build" "console-tail" "app-summary" "handler-source"})))
 
 (apply -main *command-line-args*)

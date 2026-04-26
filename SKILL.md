@@ -80,6 +80,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `registrar/describe` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/registrar-describe :event :cart/apply-coupon)'` | Kind + interceptor ids (events only) |
 | `subs/live` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-live)'` | Currently-subscribed query vectors |
 | `subs/sample` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-sample [:cart/total])'` | One-shot deref |
+| `handler/source` | `scripts/handler-source.sh :event :cart/apply-coupon` | `{:file :line :column}` of the handler, when source-map meta is present. Returns `:no-source-meta` cleanly when stripped (advanced builds, etc.) |
 
 ### Write
 
@@ -247,6 +248,10 @@ Given a component name or `:src`, find the latest epoch whose `:renders` include
 ### "Where in the code does this come from?"
 
 Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :line}`. If `:src` is nil, report which prerequisite is missing (re-com debug off, or this specific call site wasn't passed `:src (at)`).
+
+### "Where in the code is this handler?"
+
+Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Returns `{:file :line :column}` when shadow-cljs's source-map metadata reached the compiled fn. If the response is `:no-source-meta` (typical for advanced-compiled builds), say so and fall back to grepping `'(reg-event-' files for the id — don't invent a path.
 
 ### "Understand this component" / "What is this thing?"
 

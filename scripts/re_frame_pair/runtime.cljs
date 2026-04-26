@@ -187,6 +187,53 @@
     (catch :default e
       {:ok? false :reason :sub-error :message (.-message e)})))
 
+(defn handler-source
+  "Source location of a registered handler, read from the metadata
+   that ClojureScript's source-map machinery attaches to compiled
+   fns. For `:event` handlers, drills into the terminal interceptor's
+   `:before` (which is the fn the user wrote in
+   `reg-event-{db,fx,ctx}`); other kinds use the stored value
+   directly.
+
+   Returns:
+     {:ok? true :kind ... :id ... :file ... :line ... :column ...}
+   or
+     {:ok? false :reason :not-registered :kind ... :id ...}
+     {:ok? false :reason :no-source-meta :kind ... :id ...}
+
+   `:no-source-meta` is common: not every CLJS compile mode populates
+   fn metadata. shadow-cljs dev builds with source-maps usually do;
+   advanced-compiled production builds typically don't. When the meta
+   is missing we surface the fact cleanly rather than guessing — tell
+   the user to grep for the handler id if you need the location.
+
+   This is the v1 hack; A7 in Appendix A proposes that re-frame
+   retain source forms in dev so a richer `(handler-source)` can also
+   return the form itself."
+  [kind id]
+  (let [stored (registrar/get-handler kind id)
+        ;; For :event the registered value is an interceptor chain;
+        ;; the user fn is the terminal interceptor's :before.
+        f      (cond
+                 (nil? stored)   nil
+                 (= kind :event) (some-> stored last :before)
+                 :else           stored)
+        m      (when f (meta f))]
+    (cond
+      (nil? stored)
+      {:ok? false :reason :not-registered :kind kind :id id}
+
+      (and m (or (:file m) (:line m)))
+      {:ok?    true
+       :kind   kind
+       :id     id
+       :file   (:file m)
+       :line   (:line m)
+       :column (:column m)}
+
+      :else
+      {:ok? false :reason :no-source-meta :kind kind :id id})))
+
 ;; ---------------------------------------------------------------------------
 ;; re-frame-10x epoch buffer adapter
 ;; ---------------------------------------------------------------------------
