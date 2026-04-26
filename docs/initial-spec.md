@@ -513,13 +513,17 @@ REPL hot-swap is ephemeral; source edits are permanent and must be followed by `
 
 ## 7. Open questions
 
-1. **Authorization surface for writes** — should `app-db/reset` and handler hot-swap require a second-level confirmation (an `AskUserQuestion` prompt) or is trusting the skill's in-prompt guardrails enough? Lean toward confirming for v1 and loosening later.
-2. **10x coupling** — re-frame-pair reads 10x internals, which aren't a public API. For v1 re-frame-pair absorbs that coupling directly. If 10x internals churn, the fix lands in re-frame-pair's adapter, not the skill vocabulary. See Appendix A (specifically A2) for the proposal to promote a stable public namespace in 10x.
-3. **Exact minimum versions** (§3.7 placeholders) — confirm floor versions on first release by checking which API surfaces each feature requires.
-4. **`app-db/schema` convention** — is `(get @app-db :re-frame-pair/schema)` the right convention to ask apps to opt into, or should re-frame-pair sniff a registry (malli / spec) directly? Revisit when `:schema` usage is observed in real apps.
-5. **Hot-reload probe fallback delay** — v1 uses a fixed post-"Build complete" delay (default 300ms) when no code-sensitive probe is available. Confirm empirically that 300ms is enough on typical dev builds; consider a larger default on CI / slow machines.
+> **Per-question status as of 2026-04-26 (v0.1.0-beta.2).** Each question
+> annotated with current state. Questions are still active design
+> choices, not stale verification items.
 
-(Contracts that need *verification against current source* — specific atom names, shadow-cljs nREPL port paths, re-com's `data-rc-src` form, 10x's epoch-buffer shape and internal navigation events, and the live-watch transport mechanism — are consolidated in §8a as spike deliverables. This section is reserved for design choices that are open even after plumbing is proven.)
+1. **Authorization surface for writes** — should `app-db/reset` and handler hot-swap require a second-level confirmation (an `AskUserQuestion` prompt) or is trusting the skill's in-prompt guardrails enough? Lean toward confirming for v1 and loosening later. *Status: still open. v0.1.0-beta.2 ships without an explicit confirmation gate; the SKILL.md cardinal rule (REPL changes ephemeral, lost on full reload) is the safety net. Revisit before v0.2.*
+2. **10x coupling** — re-frame-pair reads 10x internals, which aren't a public API. For v1 re-frame-pair absorbs that coupling directly. If 10x internals churn, the fix lands in re-frame-pair's adapter, not the skill vocabulary. See Appendix A (specifically A2) for the proposal to promote a stable public namespace in 10x. *Status: still open upstream. The A2 proposal is captured in `docs/companion-re-frame-10x.md`. No 10x maintainer movement yet; re-frame-pair continues to absorb the coupling.*
+3. **Exact minimum versions** (§3.7 placeholders) — confirm floor versions on first release by checking which API surfaces each feature requires. *Status: still open. Floors are `nil` across the board through v0.1.0-beta.2; `health` exposes `:versions.enforcement-live? false` so callers can tell. Tracked in STATUS.md *Spike findings* §"Other corrections shaken loose by the survey".*
+4. **`app-db/schema` convention** — is `(get @app-db :re-frame-pair/schema)` the right convention to ask apps to opt into, or should re-frame-pair sniff a registry (malli / spec) directly? Revisit when `:schema` usage is observed in real apps. *Status: still open. No real-world `:schema` usage observed yet against the fixture; revisit after first day8 app exercise (STATUS.md *Near-term* item 3).*
+5. **Hot-reload probe fallback delay** — v1 uses a fixed post-"Build complete" delay (default 300ms) when no code-sensitive probe is available. Confirm empirically that 300ms is enough on typical dev builds; consider a larger default on CI / slow machines. *Status: still open. Phase 5 live verification (STATUS.md *Near-term* item 2) is the natural venue — no automated edit→reload cycle has run end-to-end yet.*
+
+(Contracts that need *verification against current source* — specific atom names, shadow-cljs nREPL port paths, re-com's `data-rc-src` form, 10x's epoch-buffer shape and internal navigation events, and the live-watch transport mechanism — are consolidated in §8a as spike deliverables. **§8a is now resolved (2026-04-25); see banner there.** This section is reserved for design choices that are open even after plumbing is proven.)
 
 
 ---
@@ -536,6 +540,17 @@ The skill is useful if, after installing and starting a shadow-cljs dev build:
 ---
 
 ## 8a. Status: pre-spike
+
+> **Status update 2026-04-26: spike resolved.** All 6 unknowns in this
+> section have been ground-truthed end-to-end against the live fixture
+> (`tests/fixture/`). See `STATUS.md` *Spike findings (§8a, resolved
+> 2026-04-25)* for the per-item resolution: the 10x epoch-buffer
+> accessor, the time-travel adapter, the re-com `:src` parser, the
+> registrar shape, and the subscription cache shape are all wired to
+> real internals; v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs
+> #1, #2). The §6 phase deliverables are also marked Verified per
+> `STATUS.md`'s per-phase table. This section retained as historical
+> record of what the spike was meant to prove.
 
 This is a design document, not a running skill. The spec leans on internals of three libraries (re-frame, re-frame-10x, re-com) and of shadow-cljs itself. Two categories of claim need to be told apart:
 
