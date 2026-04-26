@@ -150,5 +150,40 @@
     (is (var? #'ops/read-port-candidates))
     (is (var? #'ops/discover-list))))
 
+;; ---------------------------------------------------------------------------
+;; rfp-jfp: build-id-from-args accepts both --build=app and --build=:app
+;; ---------------------------------------------------------------------------
+;;
+;; (keyword ":app") produces a keyword whose name is the literal string
+;; ":app", NOT the regular :app keyword. Without stripping the leading
+;; colon before keyword, --build=:app silently mis-selected the build —
+;; downstream cljs-eval got an unmatched build-id and inject failed
+;; silently. discover-app.sh:6 documents the leading-colon form, so
+;; this had been broken for as long as the flag has existed.
+
+(deftest build-id-from-args-bare-form
+  (testing "--build=app yields :app"
+    (is (= :app (#'ops/build-id-from-args ["--build=app"])))
+    (is (= :storybook (#'ops/build-id-from-args ["--build=storybook"])))))
+
+(deftest build-id-from-args-colon-form
+  (testing "--build=:app yields :app (not the malformed ::app)"
+    (is (= :app (#'ops/build-id-from-args ["--build=:app"])))
+    (is (= :storybook (#'ops/build-id-from-args ["--build=:storybook"])))
+    ;; The pre-fix behaviour produced (keyword \":app\") whose name is
+    ;; the literal \":app\" string. Make sure we're NOT in that state.
+    (is (not= ":app" (name (#'ops/build-id-from-args ["--build=:app"]))))
+    (is (= "app"     (name (#'ops/build-id-from-args ["--build=:app"]))))))
+
+(deftest build-id-from-args-default
+  (testing "no --build= arg → default-build-id"
+    (is (= ops/default-build-id (#'ops/build-id-from-args [])))
+    (is (= ops/default-build-id (#'ops/build-id-from-args ["--something-else"])))))
+
+(deftest build-id-from-args-amongst-other-args
+  (testing "--build= is picked out from a longer arg list"
+    (is (= :app (#'ops/build-id-from-args ["[:event/foo]" "--build=:app" "--sync"])))
+    (is (= :app (#'ops/build-id-from-args ["--sync" "--build=app" "[:foo]"])))))
+
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))

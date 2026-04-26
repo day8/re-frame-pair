@@ -277,9 +277,18 @@
       (die :nrepl-port-not-found
            :hint "Start your shadow-cljs dev build (`shadow-cljs watch <build>`).")))
 
-(defn- build-id-from-args [args]
+(defn- build-id-from-args
+  "Extract `--build=<id>` from `args` and return it as a keyword.
+   Accepts both `--build=app` and `--build=:app` (the latter is what
+   discover-app.sh's usage line documents). The leading colon on the
+   second form would otherwise survive into the keyword name —
+   `(keyword \":app\")` produces a keyword whose NAME is the literal
+   string \":app\", not the regular `:app` — so explicit build
+   selection silently missed the right build (rfp-jfp)."
+  [args]
   (or (some-> (some #(when (str/starts-with? % "--build=") %) args)
               (str/replace-first "--build=" "")
+              ((fn [s] (if (str/starts-with? s ":") (subs s 1) s)))
               keyword)
       default-build-id))
 
