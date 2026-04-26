@@ -12,7 +12,7 @@ Thumbs.db
 target/
 .shadow-cljs/
 out/
-public/js/compiled/
+**/public/js/compiled/
 resources/public/js/compiled/
 node_modules/
 .cpcache/
