@@ -58,6 +58,39 @@ charter onto the fixture surface.
 - **Production-mode build** — only `:dev` is exercised; `npx shadow-cljs release app` works but isn't part of the spike.
 - **End-to-end edit-then-reload** — Phase 5 (hot-reload coordination) probe protocol is unit-tested but not exercised live yet.
 
+## Optional re-frame-debux integration (rfp-mkf)
+
+The fixture's `deps.edn` declares `day8.re-frame/tracing` via `:local/root`
+so the spike can validate the `:debux/code` bridge in `runtime.cljs` against
+a real `fn-traced` handler — until rfp-mkf landed, that bridge was only
+covered by synthetic-data unit tests.
+
+`src/app/events.cljs` wraps `:counter/inc` with `day8.re-frame.tracing/fn-traced`
+as the worked example. Dispatch produces an epoch whose `:debux/code` is a
+non-nil vec of per-form trace records (see re-frame-debux's
+`send-trace!` schema in `common/util.cljc`).
+
+**Downstream apps templating off this fixture** would need their own
+`day8.re-frame/tracing` dep; nothing in re-frame-pair brings it transitively
+(re-frame-10x intentionally doesn't depend on tracing). Recommended coords:
+
+```clojure
+;; deps.edn (downstream app)
+{:deps {day8.re-frame/tracing {:mvn/version "<latest>"}}}
+;; or, to track current development:
+{:deps {day8.re-frame/tracing {:local/root "/path/to/re-frame-debux"}}}
+```
+
+The `closure-defines` already in `shadow-cljs.edn`
+(`day8.re-frame.tracing.trace-enabled? true`) gate the trace emit path; without
+those, `fn-traced` expands to a plain `fn` and emits nothing.
+
+> **Note for spike developers:** adding `day8.re-frame/tracing` to `deps.edn`
+> requires restarting `npx shadow-cljs watch app` — shadow caches its
+> classpath at startup and `reload-deps!` is `:standalone-only`. The
+> `npm test` suite (synthetic data) verifies the bridge logic itself; the
+> live-fixture validation needs a fresh watch.
+
 ## Validating against the fixture
 
 From the project root, with the watch running and a browser tab open:
@@ -67,6 +100,7 @@ cd ~/code/re-frame-pair
 scripts/discover-app.sh                                          # health report
 scripts/eval-cljs.sh '(re-frame-pair.runtime/snapshot)'          # round-trip
 scripts/dispatch.sh --trace '[:counter/inc]'                     # full §4.3a epoch
+                                                                 # — :debux/code is non-nil for this event (rfp-mkf)
 scripts/watch-epochs.sh --count 3                                # then click + 3 times in browser
 ```
 

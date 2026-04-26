@@ -1,6 +1,7 @@
 (ns app.events
-  (:require [re-frame.core :as rf]
-            [app.db        :as db]))
+  (:require [re-frame.core         :as rf]
+            [day8.re-frame.tracing :refer-macros [fn-traced]]
+            [app.db                :as db]))
 
 ;; -----------------------------------------------------------------------------
 ;; Bootstrap
@@ -17,9 +18,15 @@
 ;; mutation: dispatch, watch app-db, observe.
 ;; -----------------------------------------------------------------------------
 
+;; rfp-mkf — wrapped with fn-traced so each sub-form (the threading
+;; pipeline, the two updates) lands as a :code entry on the event's
+;; trace. runtime.cljs surfaces those as :debux/code on the epoch
+;; (scripts/re_frame_pair/runtime.cljs:615), which until now was only
+;; covered by synthetic-data unit tests. Worked example for the
+;; "Trace a handler/sub/fx form-by-form" recipe in SKILL.md.
 (rf/reg-event-db
  :counter/inc
- (fn [db _]
+ (fn-traced [db _]
    (-> db
        (update :counter inc)
        (update :events-fired inc))))
