@@ -597,3 +597,99 @@
                  (set (:app-db-keys s)))))
         (finally
           (reset! re-frame.db/app-db orig))))))
+
+;; ---------------------------------------------------------------------------
+;; Tests for rfp-r5s C: handler/source
+;; ---------------------------------------------------------------------------
+;;
+;; handler-source reads the metadata that ClojureScript's source-map machinery
+;; would attach to a compiled handler fn. To test it without depending on the
+;; compiler-time meta, we synthesize handlers with explicit `(with-meta f m)`
+;; and register them directly into re-frame's registrar atom — bypassing
+;; reg-sub / reg-event-db's wrapping so we can verify handler-source's
+;; lookup + drill-down logic in isolation.
+
+(defn- with-registered
+  "Register `handler` under [kind id] for the body, then dissoc.
+   Lets the body run without polluting other tests' registrar state."
+  [kind id handler body-fn]
+  (let [r re-frame.registrar/kind->id->handler]
+    (swap! r assoc-in [kind id] handler)
+    (try (body-fn)
+         (finally (swap! r update kind dissoc id)))))
+
+(deftest handler-source-sub-kind-with-meta
+  (testing ":sub stored value IS the user fn — meta surfaces directly"
+    (with-registered :sub :test/sub-with-meta
+      (with-meta (fn [_]) {:file "foo.cljs" :line 42 :column 3})
+      (fn []
+        (let [r (rt/handler-source :sub :test/sub-with-meta)]
+          (is (true? (:ok? r)))
+          (is (= :sub               (:kind r)))
+          (is (= :test/sub-with-meta (:id r)))
+          (is (= "foo.cljs"          (:file r)))
+          (is (= 42                  (:line r)))
+          (is (= 3                   (:column r))))))))
+
+(deftest handler-source-fx-kind
+  (testing ":fx kind looks at the stored fn's meta directly"
+    (with-registered :fx :test/fx-with-meta
+      (with-meta (fn [_]) {:file "fx.cljs" :line 10})
+      (fn []
+        (let [r (rt/handler-source :fx :test/fx-with-meta)]
+          (is (true? (:ok? r)))
+          (is (= "fx.cljs" (:file r)))
+          (is (= 10        (:line r)))
+          ;; column not provided → present as nil
+          (is (nil?        (:column r))))))))
+
+(deftest handler-source-event-drills-into-terminal-interceptor
+  (testing ":event stored value is an interceptor chain — drill into terminal :before"
+    (let [user-fn (with-meta (fn [_db _ev]) {:file "events.cljs" :line 99})
+          chain   [{:id :coeffects} {:id :do-fx} {:id :db-handler :before user-fn}]]
+      (with-registered :event :test/event-with-meta chain
+        (fn []
+          (let [r (rt/handler-source :event :test/event-with-meta)]
+            (is (true? (:ok? r)))
+            (is (= "events.cljs" (:file r)))
+            (is (= 99            (:line r)))))))))
+
+(deftest handler-source-no-source-meta
+  (testing "registered handler with no meta returns :no-source-meta cleanly"
+    (with-registered :sub :test/sub-no-meta
+      (fn [_])
+      (fn []
+        (let [r (rt/handler-source :sub :test/sub-no-meta)]
+          (is (false?           (:ok? r)))
+          (is (= :no-source-meta (:reason r)))
+          (is (= :sub            (:kind r)))
+          (is (= :test/sub-no-meta (:id r)))
+          ;; No throw, no leaked exception data.
+          (is (not (contains? r :error)))
+          (is (not (contains? r :file))))))))
+
+(deftest handler-source-not-registered
+  (testing "id that's not in the registrar returns :not-registered"
+    (let [r (rt/handler-source :sub :test/never-registered-i-promise)]
+      (is (false?            (:ok? r)))
+      (is (= :not-registered (:reason r)))
+      (is (= :sub            (:kind r)))
+      (is (= :test/never-registered-i-promise (:id r))))))
+
+(deftest handler-source-event-with-no-meta-on-terminal-fn
+  (testing "event with terminal :before lacking meta returns :no-source-meta"
+    (let [chain [{:id :coeffects} {:id :db-handler :before (fn [_db _ev])}]]
+      (with-registered :event :test/event-no-meta chain
+        (fn []
+          (let [r (rt/handler-source :event :test/event-no-meta)]
+            (is (false? (:ok? r)))
+            (is (= :no-source-meta (:reason r)))))))))
+
+(deftest handler-source-kind-with-empty-meta-map
+  (testing "meta map exists but has no :file / :line keys returns :no-source-meta"
+    (with-registered :sub :test/sub-empty-meta
+      (with-meta (fn [_]) {:doc "I have meta but nothing useful"})
+      (fn []
+        (let [r (rt/handler-source :sub :test/sub-empty-meta)]
+          (is (false? (:ok? r)))
+          (is (= :no-source-meta (:reason r))))))))
