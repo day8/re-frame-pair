@@ -6,6 +6,4 @@
              {:id 2 :name "bread"  :qty 1}
              {:id 3 :name "cheese" :qty 2}]
    :coupon  {:code "" :status :none}
-   :user    {:id 42 :name "alice" :role :admin}
-   :events-fired 0
-   :last-error   nil})
+   :events-fired 0})
