@@ -16,10 +16,13 @@ re-frame-pair should take from them.
 > - §3c dedupe: `watch-epochs.sh --dedupe-by :event` ships debux's `:once`
 >   semantics for the live-watch path.
 >
-> Phase 2 (§3.0 simplification once `re-frame-debux` ships
-> `wrap-handler!`/`unwrap-handler!` runtime API) is queued upstream as
-> `rfd-8g9` and tracked in re-frame-pair's `STATUS.md` *v0.2 / deferred
-> backlog*.
+> Phase 2 (§3.0 simplification using `wrap-handler!`/`unwrap-handler!`
+> runtime API) shipped 2026-04-26 in re-frame-debux commit `4ed07c9`
+> (rfd-8g9) and landed in this skill as `rfp-6z2` — the `Trace a
+> handler / sub / fx form-by-form` recipe in `SKILL.md` now branches
+> on `runtime/debux-runtime-api?` and uses the runtime API as the
+> primary path, with the manual `fn-traced` rewrite kept as a
+> fallback for older debux releases.
 
 ## 1. What debux / re-frame-debux are
 

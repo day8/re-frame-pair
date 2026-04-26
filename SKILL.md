@@ -229,15 +229,59 @@ When the user wants to see what each *expression inside* a handler evaluated to 
 
 **Prerequisite:** `day8.re-frame/tracing` must be on the classpath. If it isn't, ask the user to add it to dev deps; you can't conjure macros that aren't loaded.
 
-**Procedure** (wrap → dispatch → read → restore, in a single REPL turn):
+**Detect which API is available:**
 
-1. **Look up the handler** so you can restore it later:
+```
+scripts/eval-cljs.sh '(re-frame-pair.runtime/debux-runtime-api?)'
+```
+
+`true` → use the runtime-API path below (preferred). `false` → fall back to the manual fn-traced path further down.
+
+**Procedure (runtime API — preferred, debux ≥ 4ed07c9):**
+
+`day8.re-frame.tracing.runtime/wrap-handler!` saves the original handler verbatim into a side-table and re-registers a `fn-traced`-wrapped version under the same id. `unwrap-handler!` restores from the side-table — no source-eval round trip, interceptor chain comes back intact.
+
+1. **Wrap.** The macro takes `[kind id (fn [args] body)]`. Read the handler's body from source (or `scripts/handler-source.sh :event :foo/bar`) and pass it as a literal `fn`:
+
+   ```
+   scripts/eval-cljs.sh '(day8.re-frame.tracing.runtime/wrap-handler!
+                           :event :cart/apply-coupon
+                           (fn [db [_ code]]
+                             (-> db
+                                 (assoc-in [:cart :coupon] code)
+                                 (assoc-in [:cart :coupon-status] :applied))))'
+   ```
+
+   `kind` dispatches the matching `reg-event-db` / `reg-sub` / `reg-fx`, so you don't have to match the registration form yourself. Use `wrap-event-fx!` / `wrap-event-ctx!` for events that need the fx- or ctx-shaped interceptor chain.
+
+2. **Dispatch with `--trace`:**
+
+   ```
+   scripts/dispatch.sh --trace '[:cart/apply-coupon "SPRING25"]'
+   ```
+
+3. **Read `:debux/code`** off the returned epoch. Each entry has `{:form, :result, :indent-level, :syntax-order, :num-seen}` — the form text (post `tidy-macroexpanded-form`), the value it evaluated to, nesting depth, and evaluation order. Walk inner-to-outer to see what each sub-form produced.
+
+4. **Unwrap** to restore:
+
+   ```
+   scripts/eval-cljs.sh '(day8.re-frame.tracing.runtime/unwrap-handler! :event :cart/apply-coupon)'
+   ```
+
+   Returns `true` if a wrap was found and undone, `false` if `[kind id]` wasn't wrapped (no-op). Always pair wrap with unwrap in the same REPL turn.
+
+**Procedure (manual fn-traced — fallback for debux < 4ed07c9):**
+
+The runtime API is a thin wrapper over the same fn-traced macro; you can still drive it by hand:
+
+1. **Look up the handler** so you can restore it later. CLJS fn values don't pretty-print, but the registrar's stored value plus the original `reg-event-db` form in the user's source is enough to restore.
+
    ```
    scripts/eval-cljs.sh '(re-frame.registrar/get-handler :event :cart/apply-coupon)'
    ```
-   The fn that comes back is what you'll re-register in step 5. Capture the printed form mentally (or to a scratch pad); CLJS fn values don't pretty-print, but the registrar's stored value plus the original `reg-event-db` form in the user's source is enough to restore.
 
-2. **Wrap and re-register** via `eval-cljs.sh`. Match the original arity:
+2. **Wrap and re-register** with `fn-traced`. Match the original arity AND registration kind (`reg-event-db` / `reg-event-fx` / `reg-event-ctx`):
+
    ```
    scripts/eval-cljs.sh '(re-frame.core/reg-event-db
                            :cart/apply-coupon
@@ -246,23 +290,18 @@ When the user wants to see what each *expression inside* a handler evaluated to 
                                  (assoc-in [:cart :coupon] code)
                                  (assoc-in [:cart :coupon-status] :applied))))'
    ```
-   `fn-traced` expands at REPL eval time; the wrapped body emits per-form trace into the epoch's `:tags :code` via re-frame-debux's `send-trace!`.
 
-3. **Dispatch with `--trace`** so you get the epoch back:
-   ```
-   scripts/dispatch.sh --trace '[:cart/apply-coupon "SPRING25"]'
-   ```
+3. **Dispatch with `--trace`** and read `:debux/code` off the returned epoch (same as step 2-3 of the runtime-API path).
 
-4. **Read `:debux/code`** off the returned epoch. Each entry has `{:form, :result, :indent-level, :syntax-order, :num-seen}` — the form text (post `tidy-macroexpanded-form`), the value it evaluated to, nesting depth, and evaluation order. Walk inner-to-outer to see what each sub-form produced.
-
-5. **Restore.** Re-eval the original `reg-event-db` form from the user's source. If the user's source isn't accessible from the REPL, the safest restore is to ask them to do a hot-reload (saving any source file in the same namespace re-evaluates the original `reg-event-db`).
+4. **Restore.** Re-eval the original `reg-event-db` form from the user's source. If their source isn't accessible from the REPL, ask the user to hot-reload (saving any source file in the same namespace re-evaluates the original `reg-event-db`).
 
 **Limits to call out to the user:**
 
 - **Classpath only.** This recipe needs `day8.re-frame/tracing` already loaded. If it isn't, fall back to `repl/eval` with manual `tap>` probes around the handler body.
 - **`reg-*` / var-backed handlers only.** Handlers that were inlined into other fns at compile time can't be traced this way — wrapping operates on *registration*, not on previously compiled call sites.
+- **Body has to be a literal `(fn ...)`.** `fn-traced` operates on the AST at compile time; you cannot pass an already-compiled fn value. Both paths require the body to be a literal `fn` form at REPL-eval time.
 - **Same-shape arity.** The wrapped form has to match the original handler's argument shape (`[db ev]` for `reg-event-db`, `[ctx ev]` for `reg-event-fx`, etc.). Look up `registrar/describe :event :foo/bar` first to confirm — `:reg-event-db` vs `:reg-event-fx` lives in the response's `:kind`.
-- **Restore is critical.** A wrapped handler stays wrapped for the rest of the REPL session (until full page reload). Always pair wrap with restore in the same turn.
+- **Restore is critical.** A wrapped handler stays wrapped for the rest of the REPL session (until full page reload). Always pair wrap with unwrap (or the manual restore) in the same turn.
 
 This recipe is the on-demand half of the integration described in [`docs/inspirations-debux.md` §3.0](./docs/inspirations-debux.md). The bridge half (surfacing `:code` as `:debux/code` in the epoch) is automatic — see the `Trace` op table.
 
