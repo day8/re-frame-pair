@@ -986,8 +986,8 @@
 
 (defn dom-source-at
   "Given a CSS selector (or `:last-clicked` / `\"last-clicked\"`),
-   return the `:src` {:file :line :column} attached by re-com's debug
-   path. Returns a structured result."
+   return the `:src` {:file :line} attached by re-com's debug path.
+   Returns a structured result."
   [selector]
   (if-let [el (selector-or-last-clicked selector)]
     (if-let [src-attr (.getAttribute el "data-rc-src")]
