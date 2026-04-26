@@ -60,6 +60,8 @@ scripts/app-summary.sh    # versions + registrar + live subs + app-db shape + he
 
 If any precondition fails, the script returns a structured error like `{:ok? false :missing :re-frame-10x}`. Report the failing check to the user verbatim; do *not* guess at workarounds.
 
+**Multi-build setups.** If the connected nREPL has more than one shadow-cljs build active (e.g. `:app` and `:storybook` running side by side), `discover` adds `:warning :multiple-builds :picked <id> :others [...]` and writes a stderr line. Surface that to the user — the picked build may not be the one they meant. `scripts/discover-app.sh --list` lists every candidate port + its active builds without injecting, so you can pick deliberately via `--build=<id>` or `SHADOW_CLJS_BUILD_ID`. An explicit `--build=` or env var suppresses the warning (the operator made the choice).
+
 Every op auto-reinjects the runtime namespace if a browser refresh dropped it; the response carries `:reinjected? true` when this happens — informational, not an error.
 
 ---

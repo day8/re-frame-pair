@@ -4,6 +4,9 @@
 #
 # Usage:
 #   scripts/discover-app.sh [--build=:app]
+#   scripts/discover-app.sh --list   # list all candidate ports + active builds
+#                                    # without injecting; surfaces multi-build
+#                                    # setups so you can pick deliberately
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 command -v bb >/dev/null 2>&1 || {

@@ -149,6 +149,38 @@
                   (Integer/parseInt (str/trim (slurp f))))))
             port-file-candidates)))
 
+(defn- read-port-candidates
+  "Enumerate all plausibly-active shadow-cljs nREPL ports.
+
+   The `SHADOW_CLJS_NREPL_PORT` env override is treated as the
+   operator's explicit choice and suppresses file probing — when it's
+   set, only the env port is reported.
+
+   Otherwise: every existing candidate file with a parseable port.
+   Returns a (possibly empty) vec of `{:port int :path str-or-:env}`.
+
+   Used by `discover-list` and by `discover` itself to detect the
+   multi-build / multi-port case so we can surface a warning instead
+   of silently picking the first match."
+  []
+  (if-let [env-port (System/getenv "SHADOW_CLJS_NREPL_PORT")]
+    [{:port (Integer/parseInt env-port) :path :env}]
+    ;; De-dupe by port: a single shadow-cljs JVM can leave its
+    ;; nrepl.port file in more than one of the candidate locations.
+    ;; Keep the first path that resolved each unique port.
+    (->> (for [path port-file-candidates
+               :let [f (io/file path)]
+               :when (.exists f)
+               :let [text (str/trim (slurp f))]
+               :when (re-matches #"\d+" text)]
+           {:port (Integer/parseInt text) :path path})
+         (reduce (fn [acc {:keys [port] :as cand}]
+                   (if (some #(= port (:port %)) acc)
+                     acc
+                     (conj acc cand)))
+                 [])
+         vec)))
+
 (defn- runtime-cljs-path []
   ;; Lives at scripts/re_frame_pair/runtime.cljs — canonical
   ;; ns-to-path layout for the `re-frame-pair.runtime` namespace, so
@@ -314,10 +346,28 @@
 
 (defn- discover [args]
   (ensure-port!)
-  (let [build-id (build-id-from-args args)]
+  (let [build-id        (build-id-from-args args)
+        ;; If the operator named a build (--build= or env), we don't
+        ;; warn about multi-build — they made the choice.
+        explicit-build? (or (some #(str/starts-with? % "--build=") args)
+                            (boolean (System/getenv "SHADOW_CLJS_BUILD_ID")))]
     (try
       (let [health      (inject-runtime! build-id)
-            version-err (version-failure health)]
+            version-err (version-failure health)
+            ;; Multi-build awareness: probe active builds on the
+            ;; chosen port. Failure is non-fatal — `discover` still
+            ;; works, just without the warning.
+            builds      (try (list-builds-on-port (read-port))
+                             (catch Exception _ nil))
+            multi?      (and (sequential? builds)
+                             (> (count builds) 1)
+                             (not explicit-build?))]
+        (when multi?
+          (binding [*out* *err*]
+            (println (format "WARN: multiple shadow-cljs builds active on this nREPL port (%s); picked %s. Pass --build=<id> or set SHADOW_CLJS_BUILD_ID to choose explicitly. Run `scripts/discover-app.sh --list` to inspect all candidates."
+                             (str/join ", " (map #(str %) builds))
+                             build-id))
+            (flush)))
         (cond
           (not (:ok? health))
           (emit health)
@@ -333,14 +383,17 @@
           (some? version-err)
           (emit version-err)
 
-          (not (:re-com-debug? health))
-          (emit (merge health
-                       {:ok? true
-                        :warning :re-com-debug-disabled
-                        :note "DOM ↔ source ops will degrade; otherwise functional."}))
-
           :else
-          (emit (assoc health :ok? true :build-id build-id))))
+          (emit (cond-> health
+                  true                          (assoc :ok? true :build-id build-id)
+                  (not (:re-com-debug? health)) (assoc :warning :re-com-debug-disabled
+                                                       :note    "DOM ↔ source ops will degrade; otherwise functional.")
+                  ;; Multi-build wins as the structured :warning when
+                  ;; both apply — it's likely the cause of any other
+                  ;; surprises (wrong build picked).
+                  multi?                        (assoc :warning :multiple-builds
+                                                       :picked  build-id
+                                                       :others  (vec (remove #(= % build-id) builds)))))))
       (catch Exception e
         (emit {:ok? false
                :reason (or (:reason (ex-data e)) :unknown)
@@ -734,6 +787,72 @@
               (recur))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Subcommand: discover-list (multi-build awareness)
+;; ---------------------------------------------------------------------------
+;;
+;; `discover` picks the first nREPL port + the default build. In a
+;; setup with two shadow-cljs builds (e.g. :app and :storybook
+;; running side by side) the single match is silent, and the agent
+;; can attach to the wrong build without realising. `discover-list`
+;; surfaces ALL candidate ports + the active builds on each so the
+;; operator can pick deliberately, and `discover` itself uses the
+;; same query to attach a structured `:warning :multiple-builds`
+;; when more than one build is active on the chosen port.
+
+(defn- list-builds-on-port
+  "Ask the shadow-cljs nREPL on `port` for the active build IDs via
+   `(shadow.cljs.devtools.api/active-builds)`. Returns a vec of
+   keywords on success, nil on any failure (port not listening,
+   shadow-cljs not loaded, parse failure)."
+  [port]
+  (try
+    (let [resp (combine-responses
+                (nrepl-eval-raw port "(shadow.cljs.devtools.api/active-builds)"))
+          v    (some-> resp :value safe-edn)]
+      (cond
+        (sequential? v) (vec v)
+        :else           nil))
+    (catch Exception _ nil)))
+
+(defn- runtime-injected-on?
+  "Best-effort check: is `re-frame-pair.runtime/session-id` bound
+   for `build-id` on this specific `port`? Returns false on any
+   failure (build not running, nREPL down, parse error)."
+  [port build-id]
+  (try
+    (let [form (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
+                       (pr-str build-id)
+                       (pr-str "re-frame-pair.runtime/session-id"))
+          resp (combine-responses (nrepl-eval-raw port form))
+          v    (some-> resp :value safe-edn)
+          first-result (some-> v :results first safe-edn)]
+      (boolean (and (string? first-result) (seq first-result))))
+    (catch Exception _ false)))
+
+(defn- discover-list []
+  (let [candidates (read-port-candidates)]
+    (mapv
+     (fn [{:keys [port path]}]
+       (let [builds (or (list-builds-on-port port) [])]
+         {:port              port
+          :path              (str path)
+          :builds            builds
+          ;; Reflects the default build's injection state on this port.
+          ;; If default-build-id isn't running on this port we report
+          ;; false rather than probing every build (cheap signal that
+          ;; covers the common case).
+          :runtime-injected? (boolean
+                              (when (some #{default-build-id} builds)
+                                (runtime-injected-on? port default-build-id)))}))
+     candidates)))
+
+(defn- discover-list-op [_args]
+  (try
+    (emit {:ok? true :default-build default-build-id :ports (discover-list)})
+    (catch Exception e
+      (emit {:ok? false :reason :discover-list-failed :message (.getMessage e)}))))
+
+;; ---------------------------------------------------------------------------
 ;; Subcommand: handler-source
 ;; ---------------------------------------------------------------------------
 
@@ -805,7 +924,9 @@
 
 (defn -main [& args]
   (case (first args)
-    "discover"     (discover (rest args))
+    "discover"       (if (some #{"--list"} (rest args))
+                       (discover-list-op (rest args))
+                       (discover (rest args)))
     "eval"         (eval-op (rest args))
     "inject"       (inject-op (rest args))
     "dispatch"     (dispatch-op (rest args))
