@@ -4,9 +4,9 @@ Four surfaces need coverage at different fidelities. See `docs/initial-spec.md` 
 
 ## 1. Runtime unit tests (`tests/runtime/`)
 
-**Status: wired to shadow-cljs `:node-test` build. CI runs them per push.**
+**Status: wired to shadow-cljs `:node-test` build. 37 deftests / 227 assertions / 0 failures. CI runs them per push.**
 
-`runtime_test.cljs` covers pure fns in `scripts/re_frame_pair/runtime.cljs` — the re-com classifier (broadened to current re-com layout), the `:src` parser (file:line shape per `re-com.debug.cljs`), the predicate matcher, the cache-key extractor (`extract-query-vs`), the session-sentinel shape, the `coerce-epoch` translation against a synthetic 10x match record, and the `undo-*` ten-x-missing failure paths. They run via shadow-cljs's `:node-test` target — no browser, no live re-frame app.
+`runtime_test.cljs` covers pure fns in `scripts/re_frame_pair/runtime.cljs` — the re-com classifier (broadened to current re-com layout), the `:src` parser (file:line shape per `re-com.debug.cljs`), the predicate matcher (`epoch-matches?`), the cache-key extractor (`extract-query-vs`), the session-sentinel shape, the `coerce-epoch` translation against synthetic 10x match records (including the `:debux/code` surface from `:tags :code`), `version-below?` semver comparison, and the `undo-*` ten-x-missing failure paths. Synthetic-match helpers live in `tests/runtime/fixtures.cljs` — one place to update when 10x's shape changes. They run via shadow-cljs's `:node-test` target — no browser, no live re-frame app.
 
 **To run:**
 
@@ -16,6 +16,17 @@ npm test       # shadow-cljs compile runtime-test && node out/runtime-test.js
 ```
 
 CI runs the same target on every push (see `.github/workflows/ci.yml`'s `runtime-test` job).
+
+## 1b. Babashka-side smoke tests (`tests/ops_smoke.bb`)
+
+**Status: wired. 14 deftests / 30 assertions / 0 failures. CI runs them per push via `npm run test:ops`.**
+
+Closes the gap that `npm test` (CLJS-only) leaves around `scripts/ops.clj`. Two coverage axes:
+
+1. **Load-path smoke** — `bb scripts/ops.clj` parses + dispatches without analysis-time errors. The `rfp-xhx` regression (a forward reference to `list-builds-on-port`) slipped past `npm test` for exactly this reason; this runner catches the same shape next time.
+2. **Pure-helper coverage** — `list-builds-on-port` (set-vs-seq normalisation, `rfp-j2i`), `read-port-candidates`, `build-id-from-args` (both `--build=app` and `--build=:app` forms, `rfp-jfp`), via `with-redefs` over the nREPL / fs seams.
+
+Bencode round-trip, `parse-predicate-args` flag matrix, and `read-port` candidate-cascade are tracked in STATUS.md *Near-term* item 4.
 
 ## 2. Bash-shim integration (`tests/shim/`)
 
@@ -31,7 +42,7 @@ Recommended approach: [`bats`](https://bats-core.readthedocs.io/) or a simple ba
 
 ## 3. End-to-end in-browser (`tests/e2e/`)
 
-**Status: not yet written. Blocked on the spike (§8a).**
+**Status: not yet written.** §8a spike resolved 2026-04-25 (epoch-buffer accessor identified, `data-rc-src` format pinned, transport choice settled — see STATUS.md *Spike findings*); operator-driven validation of the recipes against the live fixture has stood in for an automated rig so far. Headless Playwright is tracked in STATUS.md *v0.2 / deferred backlog* item 9.
 
 Drives a headless Chrome via [playwright](https://playwright.dev/) against the fixture. Exercises:
 
@@ -78,9 +89,9 @@ Mitigation until we can run E2E per-push:
 
 ## What's explicitly **not** tested yet
 
-- Connection against a real shadow-cljs build with nREPL enabled
-- 10x epoch-buffer extraction — specific internal accessor needs spike
-- Live-watch transport — `:out` streaming vs pull-mode decision pending
-- Hot-reload probe-form selection heuristics
+- **Real edit→reload→probe cycle.** `tail-build.sh`'s probe protocol is unit-tested for selection logic, but no automated test fires a real edit through shadow-cljs and observes the probe land. STATUS.md *Near-term* item 2.
+- **Real-world day8 app exercise.** Fixture coverage is narrow by construction. STATUS.md *Near-term* item 3.
+- **Bash-shim integration via `tests/shim/`** (§2 above). The `tests/ops_smoke.bb` runner covers the babashka dispatcher's load and pure helpers but not the shell wrappers' edn-shape contracts.
+- **Headless E2E.** Browser-driven validation of `dom/*` ops, the watch transport, and full-refresh re-injection. STATUS.md *v0.2 / deferred backlog* item 9.
 
-These are the §8a spike deliverables. Until the spike resolves them, the code paths exist in shape but are not exercised against reality.
+The §8a spike unknowns (10x epoch-buffer accessor, `data-rc-src` format, live-watch transport choice) are all resolved — see STATUS.md *Spike findings*. The runtime accessors are exercised by both unit tests (against synthetic match records) and operator-driven fixture validation; what's missing is automating the latter.

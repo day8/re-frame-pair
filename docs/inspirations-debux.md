@@ -5,6 +5,22 @@ day8 fork [re-frame-debux](https://github.com/day8/re-frame-debux) (cloned
 locally at `/home/mike/code/re-frame-debux`), and what — if anything —
 re-frame-pair should take from them.
 
+> **Implementation status (2026-04-26).** Phase 1 of the integration described
+> in §6 has shipped on `main` as bead `rfp-hjj` (commits `3c3c8cd`, `09e30ec`,
+> `29cf2f6`, `3568c11`, plus README mention `09a9551`):
+>
+> - §3b bridge: `coerce-epoch` surfaces `:debux/code` from `:tags :code`
+>   (conditional-free; absent → `nil`).
+> - §3.0 recipe: SKILL.md *Trace a handler/sub/fx form-by-form* — REPL-driven
+>   `fn-traced` wrap → dispatch → read `:debux/code` → restore.
+> - §3c dedupe: `watch-epochs.sh --dedupe-by :event` ships debux's `:once`
+>   semantics for the live-watch path.
+>
+> Phase 2 (§3.0 simplification once `re-frame-debux` ships
+> `wrap-handler!`/`unwrap-handler!` runtime API) is queued upstream as
+> `rfd-8g9` and tracked in re-frame-pair's `STATUS.md` *v0.2 / deferred
+> backlog*.
+
 ## 1. What debux / re-frame-debux are
 
 **debux** is a *code-instrumentation* library. Sprinkle macros into

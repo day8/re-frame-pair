@@ -2,7 +2,7 @@
 
 A living record of what's actually implemented, what's scaffolded, and what's blocked on the spike. Updated per release. See `docs/initial-spec.md` for the design this is measured against.
 
-**Last updated:** 2026-04-26 (post-beta.2 merge)
+**Last updated:** 2026-04-26 (post-rfp-hjj — Phase 1 re-frame-debux integration on `main`)
 
 ---
 
@@ -16,11 +16,12 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | `scripts/ops.clj` + shell shims | Written — babashka dispatches every op |
 | `.claude-plugin/plugin.json` | Written |
 | `package.json` + GH Actions (CI + release) | Written; CI now runs the runtime-test build per push |
-| `tests/runtime/` unit tests | **16 deftests / 141 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
+| `tests/runtime/` unit tests | **37 deftests / 227 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
+| `tests/ops_smoke.bb` babashka tests | **14 deftests / 30 assertions / 0 failures**; ops.clj load-path + pure-helper coverage, run via `npm run test:ops`, gated in CI |
 | `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app; bundled bootstrap + re-com CSS for self-contained rendering |
 | End-to-end against a live re-frame app | **Verified** — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 predicate filters validated; time-travel rolls userland app-db correctly. v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs #1, #2). |
 
-v0.1.0-beta.2 is on `main`. All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, and CI is green on both PRs. Remaining gate to tag: operator decision.
+v0.1.0-beta.2 is on `main`. All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, and CI is green on both PRs. Phase 1 of the `re-frame-debux` integration (`rfp-hjj`, see *Post-spike additions* below) is also on `main` — `:debux/code` surfaces in epoch records, the SKILL.md recipe and ops-table row are written, and `watch-epochs.sh --dedupe-by :event` is shipped. Remaining gate to tag: operator decision.
 
 ---
 
@@ -113,7 +114,7 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 
 **Unit-tested (`tests/runtime/runtime_test.cljs` + `tests/runtime/fixtures.cljs`, runs via `npm test`):**
 
-- 16 deftests / 141 assertions / 0 failures.
+- 37 deftests / 227 assertions / 0 failures (CLJS) + 14 deftests / 30 assertions / 0 failures (babashka, `tests/ops_smoke.bb`).
 - `re-com?` / `re-com-category` (broadened heuristics).
 - `parse-rc-src` (file:line shape, malformed cases, edge cases).
 - `extract-query-vs` (cache-key map → query-v, duplicates, malformed entries).
@@ -122,6 +123,8 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 - `version-below?` semver comparison (mismatched part counts, alpha tags, nil floor/observed).
 - `undo-*` ten-x-missing failure paths.
 - Synthetic-match fixture helper extracted to `tests/runtime/fixtures.cljs` so 10x shape changes only update one place.
+- `:debux/code` surfaces from `:tags :code` when `re-frame-debux`'s `fn-traced` is in play; absent → `nil`. Conditional-free bridge.
+- `build-id-from-args` accepts both `--build=app` and `--build=:app` forms (`tests/ops_smoke.bb`).
 
 **Verified end-to-end against the live fixture (2026-04-25 / 26):**
 
@@ -135,6 +138,31 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 
 ---
 
+## Post-spike additions on `main`
+
+Work landed after the §8a ground-truth resolution that's not part of the spec's phase-numbered backbone.
+
+### `rfp-hjj` — Phase 1 `re-frame-debux` integration (2026-04-26)
+
+Surface `re-frame-debux`'s per-form value trace as a first-class field on epoch records — without taking a hard dependency on `day8.re-frame/tracing` and without re-implementing its zipper machinery. See `docs/inspirations-debux.md` for the design rationale; §3.0 (on-demand REPL-driven `fn-traced` wrapping) is the load-bearing recipe. Four commits:
+
+| Item | Commit | Change |
+|---|---|---|
+| 1 | `3c3c8cd` | `coerce-epoch` surfaces `:debux/code` from `:tags :code`. Absent → `nil`; conditional-free bridge. ~5 LOC. |
+| 2 | `09e30ec` | SKILL.md recipe: *Trace a handler/sub/fx form-by-form* — 5-step lookup → `fn-traced` wrap → dispatch → read `:debux/code` → restore. |
+| 3 | `29cf2f6` | SKILL.md *Trace* table: row noting `:debux/code` carries per-form trace when `fn-traced` is used. |
+| 4 | `3568c11` | `watch-epochs.sh --dedupe-by :event` (debux's `:once` analogue) — silences duplicate consecutive emissions of the same event. |
+
+README also notes `day8.re-frame/tracing` is **not** transitive via `re-frame-10x` (commit `09a9551`).
+
+**Phase 2 deliberately deferred.** The Phase 1 recipe synthesises `(fn-traced [...] body)` macro forms at the REPL. When `re-frame-debux` ships a runtime `wrap-handler!` / `unwrap-handler!` API (queued upstream as `rfd-8g9`), the recipe will switch to that — see *Next actions* below.
+
+### `rfp-bni` — `handler/source` investigation (2026-04-26)
+
+Documented in `docs/handler-source-meta.md` (commit `b8b613b`). Conclusion: `handler-source.sh` reliably hits the `:no-source-meta` path against shadow-cljs builds because re-frame's interceptor-wrapper hides the user's handler-fn from `(meta f)`, regardless of source-map config. The op behaves as designed; the documented graceful-fail is the expected response shape on every real call site today. v0.2 path: opt-in `re-frame-pair.runtime/reg-event-db` macro that captures the call site at registration time (filed as `rfp-rsg`).
+
+---
+
 ## Next actions
 
 ### Near-term (between beta.2 and beta.3)
@@ -142,19 +170,21 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 1. **Tag `v0.1.0-beta.2`** — operator decision; CI green, validation done.
 2. **Phase 5 live verification** — exercise the edit-then-reload cycle end-to-end (`Edit` a fixture handler, `tail-build.sh --probe`, dispatch, observe). The probe protocol is coded and unit-tested, but no real edit→reload cycle has been run.
 3. **Real-world day8 app exercise** — point re-frame-pair at an actual day8 re-frame application (not just the fixture) and run the SKILL.md recipes. Catch anything the fixture's narrow surface doesn't cover.
-4. **Babashka-side unit tests** — `ops.clj` currently has zero tests despite being ~700 LOC of critical glue. Bencode encode/decode roundtrip (property-test via `test.check`), `parse-predicate-args` flag-combination matrix, `read-port`'s candidate-cascade. ~5 hours of work, high-value.
+4. **Babashka-side unit tests — expand coverage.** `tests/ops_smoke.bb` now lands the load-path and pure-helper basics (14 deftests / 30 assertions, gated in CI via `npm run test:ops`). Still missing: bencode encode/decode roundtrip (property-test via `test.check`), `parse-predicate-args` flag-combination matrix, `read-port`'s candidate-cascade. ~3 hours remaining.
 5. **CI: bash-shim E2E** — current smoke job only validates shebangs and `unknown-subcommand` parsing. Add a job that boots the fixture (or a mock nREPL listener), runs `discover-app.sh` + `dispatch.sh --trace`, and asserts edn shape. Catches regressions the unit tests can't.
-6. **SKILL.md doc completeness** — surface `registrar-handler-ref` (used in experiment-loop recipe but undocumented) and `health`/`version-report` (called by discover but unlisted) in the ops tables. Flesh out `README.md` quickstart.
+6. **SKILL.md doc completeness** — surface `registrar-handler-ref` (used in experiment-loop recipe but undocumented) and `health`/`version-report` (called by discover but unlisted) in the ops tables. The README quickstart also still wants flesh; the optional `re-frame-debux` paragraph (commit `09a9551`) is the only post-beta.2 addition.
 
 ### v0.2 / deferred backlog
 
-7. **Headless Playwright E2E rig** — ~6 weeks of work; replaces operator-driven fixture validation with automated browser-driven test. Right tool for full release-gate confidence.
-8. **npm OIDC trusted publisher + `--provenance`** — release.yml currently uses a bare `NODE_AUTH_TOKEN` with no signing. Switch to OIDC (https://docs.npmjs.com/generating-authentication-tokens) and add `--provenance` for verifiable supply-chain.
-9. **Watch streaming-via-`:out` transport** — currently pull-mode at 100ms. Streaming would reduce round-trips for long-running watches; spec §4.4 sketches the mechanism but reachability questions remain.
-10. **Prune `docs/initial-spec.md`** to a design-archive (sections 1–3 + 7–8 only) — §4 ops definitions are now superseded by SKILL.md and runtime.cljs source.
-11. **Move `tests/fixture/public/css/`** to CDN-link or generate at build time — 8.4k lines of bootstrap.css in the repo bloats checkout. Tradeoff: loses offline / air-gapped dev story.
-12. **Inline-rf version path** — `inlined-rf-version-paths` is now an enumeration fallback (rfp-czf G6) but still hard-codes a known list. Probe `js/goog.global.day8.re_frame_10x.inlined_deps.re_frame` keys at runtime as the canonical source.
+7. **Phase 2 `re-frame-debux` integration** (`rfp-rsg` precursor; blocked on upstream `rfd-8g9` shipping `wrap-handler!`/`unwrap-handler!` runtime API). When that lands, the SKILL.md *Trace a handler/sub/fx form-by-form* recipe (commit `09e30ec`) switches from synthesising `(fn-traced [...] body)` macro forms at the REPL to invoking the runtime API. Cleaner; less load-bearing on the macro layer.
+8. **`rfp-rsg` — opt-in `re-frame-pair.runtime/reg-event-db` macro for `handler/source`.** Captures the call site at registration time and side-tables it for the runtime to consult, working around re-frame's interceptor-wrapper hiding `(meta f)` (see `docs/handler-source-meta.md`). v0.2 deliverable.
+9. **Headless Playwright E2E rig** — ~6 weeks of work; replaces operator-driven fixture validation with automated browser-driven test. Right tool for full release-gate confidence.
+10. **npm OIDC trusted publisher + `--provenance`** — release.yml currently uses a bare `NODE_AUTH_TOKEN` with no signing. Switch to OIDC (https://docs.npmjs.com/generating-authentication-tokens) and add `--provenance` for verifiable supply-chain.
+11. **Watch streaming-via-`:out` transport** — currently pull-mode at 100ms. Streaming would reduce round-trips for long-running watches; spec §4.4 sketches the mechanism but reachability questions remain.
+12. **Prune `docs/initial-spec.md`** to a design-archive (sections 1–3 + 7–8 only) — §4 ops definitions are now superseded by SKILL.md and runtime.cljs source.
+13. **Move `tests/fixture/public/css/`** to CDN-link or generate at build time — 8.4k lines of bootstrap.css in the repo bloats checkout. Tradeoff: loses offline / air-gapped dev story.
+14. **Inline-rf version path** — `inlined-rf-version-paths` is now an enumeration fallback (rfp-czf G6) but still hard-codes a known list. Probe `js/goog.global.day8.re_frame_10x.inlined_deps.re_frame` keys at runtime as the canonical source.
 
 ### Tracking
 
-`ci-8rn` (the umbrella city-level bead "drive re-frame-pair to v0.1.0-beta.1") is the only open work bead. Closing it is gated on the beta.1 / beta.2 tag operator decision (item 1 above).
+City-level umbrella bead `ci-8rn` ("drive re-frame-pair to v0.1.0-beta.1") closed 2026-04-26 — beta.1 + beta.2 squash-merged to `main`, all §8a unknowns resolved. Open work beads on the rig: none currently. Queued for future sessions: `rfp-rsg` (v0.2 reg-event-db macro, P3). Cross-rig follow-ups affecting this skill live on the `re-frame-debux` rig as `rfd-8g9` (Tier 2, including the `wrap-handler!`/`unwrap-handler!` API), `rfd-iqz` (toolchain modernisation), and `rfd-2nd` (CD dry-run).
