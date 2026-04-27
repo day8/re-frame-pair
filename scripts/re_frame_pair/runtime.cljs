@@ -582,7 +582,10 @@
        (filter (fn [[_ sub]]
                  (and (some #{:sub/run} (:order sub))
                       (get-in sub [:sub/traits :unchanged?]))))
-       (mapv (fn [[_ sub]] {:query-v (:subscription sub)}))))
+       (mapv (fn [[_ sub]]
+               (let [q (:subscription sub)]
+                 {:query-v          q
+                  :subscribe/source (some-> q meta :re-frame/source)})))))
 
 (defn- renders-from-traces
   "§4.3a :renders. Reagent records each component render as a
@@ -904,7 +907,8 @@
 
 (defn- subs-cache-hit-from-native-traces
   "Walk a trace-stream slice for `:sub/create` entries with
-   `:cached? true` tag; emit one `{:query-v ...}` per unique
+   `:cached? true` tag; emit one `{:query-v ...
+   :subscribe/source ...}` per unique
    query-v. Native analogue of `sub-cache-hits-from-state` — but
    driven off re-frame core's own `:cached?` signal (set in
    `re-frame.subs/subscribe` when `cache-lookup` finds an existing
@@ -916,7 +920,9 @@
        (filter #(true? (-> % :tags :cached?)))
        (keep #(-> % :tags :query-v))
        distinct
-       (mapv (fn [q] {:query-v q}))))
+       (mapv (fn [q]
+               {:query-v          q
+                :subscribe/source (some-> q meta :re-frame/source)}))))
 
 (defn- renders-from-native-traces
   "Walk a trace-stream slice for `:render` entries; emit one render

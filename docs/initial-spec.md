@@ -289,7 +289,8 @@ The full record shape:
                     :only-before ...
                     :only-after ...}
  :subs/ran         [{:query-v [...] :time-ms ...} ...]  ; (2) subs that recomputed
- :subs/cache-hit   [{:query-v [...]} ...]              ; subs dereffed but cached
+ :subs/cache-hit   [{:query-v [...]                    ; subs dereffed but cached
+                     :subscribe/source {:file ... :line ...}} ...]
  :renders          [{:component "my.ns/foo"              ; (3) views that re-rendered
                      :time-ms   ...
                      :re-com?   true                      ; re-com component, if namespace matches

@@ -4,6 +4,12 @@
 ;;; shape changes (10x match-info skeleton, sub-state structure, etc.)
 ;;; only need updating in one place.
 
+(def cart-items-cache-source
+  {:file "src/views/cart_view.cljs" :line 24})
+
+(def cart-items-cache-query
+  (with-meta [:cart/items] {:re-frame/source cart-items-cache-source}))
+
 (def synthetic-match
   "User-event match. Closes at :sync (not :reagent/quiescent), so its
    own sub-state has no :run? entries — render data has to come from
@@ -34,7 +40,7 @@
    :sub-state
    {:reaction-state
     {"rx1" {:subscription [:cart/total]    :order [:sub/run]}
-     "rx2" {:subscription [:cart/items]    :order [:sub/run] :sub/traits {:unchanged? true}}
+     "rx2" {:subscription cart-items-cache-query :order [:sub/run] :sub/traits {:unchanged? true}}
      "rx3" {:subscription [:other/dormant]}}}})
 
 (def synthetic-traces
@@ -101,7 +107,7 @@
    {:id 103 :op-type :sub/run    :child-of 100
     :tags {:query-v [:cart/total] :input-query-vs [[:cart/items]]}}
    {:id 106 :op-type :sub/create :child-of 105
-    :tags {:query-v [:cart/items] :cached? true}}
+    :tags {:query-v cart-items-cache-query :cached? true}}
    {:id 112 :op-type :render :duration 1.4
     :tags {:component-name "re_com.buttons.button" :reaction "rxn-2"}}
    {:id 115 :op-type :render :duration 0.6

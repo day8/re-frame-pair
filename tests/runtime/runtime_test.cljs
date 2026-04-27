@@ -191,8 +191,11 @@
                :input-query-sources nil}]
              (:subs/ran e))))
     (testing "subs/cache-hit — reactions that re-ran but value was
-              :unchanged? (closest signal 10x exposes to a 'cache hit')"
-      (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
+              :unchanged? (closest signal 10x exposes to a 'cache hit');
+              query-v meta surfaces as :subscribe/source"
+      (is (= [{:query-v          [:cart/items]
+               :subscribe/source fixtures/cart-items-cache-source}]
+             (:subs/cache-hit e))))
     (testing "renders — pulled from the full trace stream filtered by
               the match's id range, with munged component names
               demunged to dotted form"
@@ -332,7 +335,9 @@
                :input-query-vs      nil
                :input-query-sources nil}]
              (:subs/ran e)))
-      (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))))
+      (is (= [{:query-v          [:cart/items]
+               :subscribe/source fixtures/cart-items-cache-source}]
+             (:subs/cache-hit e))))))
 
 ;; -----------------------------------------------------------------------------
 ;; coerce-native-epoch — translate a register-epoch-cb-delivered native
@@ -382,8 +387,10 @@
     (testing "subs/cache-hit is sourced from :sub/create traces with
               :cached? true (re-frame.subs's own signal) — closer to
               §4.3a's 'subs dereffed but cached' than 10x's :unchanged?
-              heuristic"
-      (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
+              heuristic; query-v meta surfaces as :subscribe/source"
+      (is (= [{:query-v          [:cart/items]
+               :subscribe/source fixtures/cart-items-cache-source}]
+             (:subs/cache-hit e))))
     (testing "renders are bounded by the next epoch's id (200) — the
               outside-of-range render at id 200 doesn't appear here"
       (is (= 2 (count (:renders e))))
@@ -1483,4 +1490,3 @@
         (let [r (rt/handler-source :sub :test/sub-empty-meta)]
           (is (false? (:ok? r)))
           (is (= :no-source-meta (:reason r))))))))
-

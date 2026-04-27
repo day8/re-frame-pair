@@ -110,7 +110,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 
 - `:debux/code` — vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries from [re-frame-debux](https://github.com/day8/re-frame-debux), written when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`, or when individual forms have been wrapped with `day8.re-frame.tracing/dbg` (rfd-btn). `nil` when debux isn't on the classpath or no wrapping is in place; a vec (possibly empty) when it is. See *"Trace a handler / sub / fx form-by-form"* and *"Trace a single expression at the REPL"* below.
 - `:event/source` — `{:file :line}` of the dispatch call site, populated when the event was dispatched via `re-frame.macros/dispatch` or `re-frame.macros/dispatch-sync` (rf-hsl). The macros capture `*file*` + `(:line (meta &form))` at expansion time and attach them to the event vector as `:re-frame/source` meta. `nil` for events dispatched via the bare `re-frame.core/dispatch` fn or on a re-frame predating those macros. Pair with `handler/source` for "why did this fire / where is the handler defined" — see *"Why did this event fire?"* below.
-- `:subs/ran` entries each carry `:subscribe/source` — `{:file :line}` of the *outer* `(rf.macros/subscribe ...)` call site that established the reaction (the view that asked for it; rf-cna). `nil` for bare-fn subscribes or pre-rf-cna re-frame. Useful for "which view subscribed to X?" — see *"Which view subscribed to X?"* below.
+- `:subs/ran` and `:subs/cache-hit` entries each carry `:subscribe/source` — `{:file :line}` of the *outer* `(rf.macros/subscribe ...)` call site that established the reaction (the view that asked for it; rf-cna). `nil` for bare-fn subscribes or pre-rf-cna re-frame. Useful for "which view subscribed to X?" — see *"Which view subscribed to X?"* below.
 - `:subs/ran` entries each carry `:input-query-sources` — vec parallel to `:input-query-vs` carrying source maps for each input dependency (rf-cna). Each slot reflects where the parent sub handler called `subscribe` to wire that input; `nil` slots for bare-fn inputs.
 
 ### Console / errors
@@ -263,7 +263,27 @@ scripts/eval-cljs.sh '(re-frame-pair.runtime/debux-runtime-api?)'
                                  (assoc-in [:cart :coupon-status] :applied))))'
    ```
 
-   `kind` dispatches the matching `reg-event-db` / `reg-sub` / `reg-fx`, so you don't have to match the registration form yourself. Use `wrap-event-fx!` / `wrap-event-ctx!` for events that need the fx- or ctx-shaped interceptor chain.
+   `kind` dispatches the matching `reg-event-db` / `reg-sub` / `reg-fx`, so you don't have to match the registration form yourself. Use `wrap-event-fx!` / `wrap-event-ctx!` for events that need the fx- or ctx-shaped interceptor chain. `wrap-sub!` and `wrap-fx!` are direct aliases for the `:sub` and `:fx` cases when that reads better.
+
+   For a subscription, copy the computation fn's shape from source: first arg is the input signal value (or vector of input signal values), second arg is the query vector, and the body returns the derived value:
+
+   ```
+   scripts/eval-cljs.sh '(day8.re-frame.tracing.runtime/wrap-sub!
+                           :cart/visible-items
+                           (fn [items [_ filter-id]]
+                             (->> items
+                                  (filter #(= filter-id (:status %)))
+                                  vec)))'
+   ```
+
+   For an fx handler, copy the original single-arg body. The arg is the effect value from the event's effects map:
+
+   ```
+   scripts/eval-cljs.sh '(day8.re-frame.tracing.runtime/wrap-fx!
+                           :local-store/set!
+                           (fn [{:keys [key value]}]
+                             (.setItem js/localStorage (name key) (pr-str value))))'
+   ```
 
 2. **Dispatch with `--trace`:**
 
@@ -279,7 +299,7 @@ scripts/eval-cljs.sh '(re-frame-pair.runtime/debux-runtime-api?)'
    scripts/eval-cljs.sh '(day8.re-frame.tracing.runtime/unwrap-handler! :event :cart/apply-coupon)'
    ```
 
-   Returns `true` if a wrap was found and undone, `false` if `[kind id]` wasn't wrapped (no-op). Always pair wrap with unwrap in the same REPL turn.
+   Returns `true` if a wrap was found and undone, `false` if `[kind id]` wasn't wrapped (no-op). `unwrap-sub!` and `unwrap-fx!` are direct aliases for `(unwrap-handler! :sub id)` and `(unwrap-handler! :fx id)`. Always pair wrap with unwrap in the same REPL turn.
 
 **Procedure (manual fn-traced — fallback for debux < 4ed07c9):**
 
@@ -406,11 +426,11 @@ Walk `:effects/fired` from the epoch as a tree. Follow `:epoch-id` links into ch
 
 Given a component name or `:src`, find the latest epoch whose `:renders` includes it. Reverse from there: the sub inputs that invalidated its outputs, then the event that invalidated the sub inputs.
 
-When multiple views subscribe to the same query-v and you want to know which call site is involved, see *"Which view subscribed to X?"* below — `:subscribe/source` on each `:subs/ran` entry resolves the call site.
+When multiple views subscribe to the same query-v and you want to know which call site is involved, see *"Which view subscribed to X?"* below — `:subscribe/source` on each `:subs/ran` and `:subs/cache-hit` entry resolves the call site.
 
 ### "Which view subscribed to X?"
 
-When the user wants to know who is reading a particular subscription — e.g. *"the same `[:cart/total]` is read by both the header and the panel; which call site fired this re-render?"*. Each `:subs/ran` entry on a coerced epoch carries `:subscribe/source` — `{:file :line}` of the outer `(rf.macros/subscribe ...)` call.
+When the user wants to know who is reading a particular subscription — e.g. *"the same `[:cart/total]` is read by both the header and the panel; which call site fired this re-render?"*. Each `:subs/ran` or `:subs/cache-hit` entry on a coerced epoch carries `:subscribe/source` — `{:file :line}` of the outer `(rf.macros/subscribe ...)` call.
 
 1. **Find live readers of the query.** `subs/live` returns every currently-subscribed query vector; filter to the query of interest:
 
@@ -421,12 +441,13 @@ When the user wants to know who is reading a particular subscription — e.g. *"
 
    This tells you the query is alive but not where it was subscribed from — that lives on the trace.
 
-2. **Read `:subscribe/source` from recent `:subs/ran` entries.** Pull a recent epoch (`trace/last-epoch`, `trace/last-claude-epoch`, or `trace/find-where` for a specific event) and walk its `:subs/ran`:
+2. **Read `:subscribe/source` from recent sub entries.** Pull a recent epoch (`trace/last-epoch`, `trace/last-claude-epoch`, or `trace/find-where` for a specific event) and walk its `:subs/ran` plus `:subs/cache-hit`:
 
    ```
-   scripts/eval-cljs.sh '(->> (:subs/ran (re-frame-pair.runtime/last-epoch))
-                              (filter (fn [s] (= (first (:query-v s)) :cart/total)))
-                              (mapv (juxt :query-v :subscribe/source)))'
+   scripts/eval-cljs.sh '(let [e (re-frame-pair.runtime/last-epoch)]
+                            (->> (concat (:subs/ran e) (:subs/cache-hit e))
+                                 (filter (fn [s] (= (first (:query-v s)) :cart/total)))
+                                 (mapv (juxt :query-v :subscribe/source))))'
    ```
 
    Each match carries the file/line of the view that asked for the reaction.
