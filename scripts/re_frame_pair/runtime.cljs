@@ -744,6 +744,14 @@
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
         :debux/code        (:code tags)
+        ;; Dispatch-site source (file/line) lifted from the event
+        ;; vector's meta. Populated when the event was dispatched via
+        ;; re-frame.macros/dispatch[-sync] (rf-hsl); nil for events
+        ;; dispatched via the bare re-frame.core/dispatch fn or on a
+        ;; re-frame predating those macros. Flattened from meta to a
+        ;; top-level key so it survives the pr-str / cljs-eval boundary
+        ;; back to bash (meta strips by default on edn output).
+        :event/source       (some-> (:event tags) meta :re-frame/source)
         ;; Auto-generated dispatch correlation from re-frame core.
         ;; nil for events
         ;; dispatched on a re-frame predating that commit. The
@@ -983,6 +991,11 @@
         :subs/cache-hit     (subs-cache-hit-from-native-traces in-range)
         :renders            (renders-from-native-traces in-range)
         :debux/code         (-> raw :event-handler :tags :code)
+        ;; Dispatch-site source (file/line) lifted from the event
+        ;; vector's meta — same surface as the legacy 10x path. Nil
+        ;; for events dispatched via the bare dispatch fn. See
+        ;; coerce-epoch above for the rf-hsl rationale.
+        :event/source       (some-> (:event raw) meta :re-frame/source)
         :dispatch-id        (:dispatch-id raw)
         :parent-dispatch-id (:parent-dispatch-id raw)}))))
 

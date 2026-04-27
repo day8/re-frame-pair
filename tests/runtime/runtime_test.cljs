@@ -242,6 +242,30 @@
         e     (rt/coerce-epoch match fixtures/basic-context)]
     (is (= [] (:debux/code e)))))
 
+(deftest coerce-epoch-surfaces-event-source-when-present
+  ;; rf-hsl: re-frame.macros/dispatch attaches {:re-frame/source
+  ;; {:file ... :line ...}} to the event vector's meta at the call
+  ;; site. coerce-epoch should flatten that to a top-level
+  ;; :event/source key so it survives the pr-str / cljs-eval boundary
+  ;; back to bash (meta strips by default on edn output).
+  (let [src   {:file "src/app/click.cljs" :line 73}
+        ev    (with-meta [:cart/apply-coupon "SPRING25"]
+                {:re-frame/source src})
+        match (-> fixtures/synthetic-match
+                  (assoc-in [:match-info 0 :tags :event] ev))
+        e     (rt/coerce-epoch match fixtures/basic-context)]
+    (testing ":event/source surfaces verbatim from event meta"
+      (is (= src (:event/source e))))
+    (testing ":event still contains the original vector value"
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e))))))
+
+(deftest coerce-epoch-event-source-nil-when-absent
+  ;; Bare re-frame.core/dispatch (no macro), or a re-frame predating
+  ;; rf-hsl. Default fixture has no meta on its event — :event/source
+  ;; should be nil, not an exception.
+  (let [e (rt/coerce-epoch fixtures/synthetic-match fixtures/basic-context)]
+    (is (nil? (:event/source e)))))
+
 (deftest coerce-epoch-handles-nil
   (testing "nil input -> nil"
     (is (nil? (rt/coerce-epoch nil)))))
@@ -353,6 +377,24 @@
                         [:event-handler :tags :code] code-payload)
           e   (rt/coerce-native-epoch raw fixtures/native-context)]
       (is (= code-payload (:debux/code e))))))
+
+(deftest coerce-native-epoch-surfaces-event-source-when-present
+  ;; rf-hsl parity for the native-epoch path: assemble-epochs preserves
+  ;; the event vector as-is, so meta survives onto the native epoch's
+  ;; :event field. Same flatten-to-top-level surface as the legacy
+  ;; coerce-epoch path so consumers don't branch on epoch source.
+  (testing ":event/source flattens from event meta on the native epoch"
+    (let [src {:file "src/app/click.cljs" :line 73}
+          ev  (with-meta [:cart/apply-coupon "SPRING25"]
+                {:re-frame/source src})
+          raw (assoc fixtures/synthetic-native-epoch :event ev)
+          e   (rt/coerce-native-epoch raw fixtures/native-context)]
+      (is (= src (:event/source e)))
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e)))))
+  (testing ":event/source nil when no source meta is present"
+    (let [e (rt/coerce-native-epoch fixtures/synthetic-native-epoch
+                                    fixtures/native-context)]
+      (is (nil? (:event/source e))))))
 
 (deftest coerce-native-epoch-latest-epoch-unbounded
   (testing "the latest epoch in the buffer has no upper-id bound — its

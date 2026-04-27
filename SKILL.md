@@ -107,6 +107,8 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 
 Every coerced epoch also carries `:debux/code` — a vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries written by [re-frame-debux](https://github.com/day8/re-frame-debux) when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`, or when individual forms have been wrapped with `day8.re-frame.tracing/dbg` (rfd-btn). `nil` when debux isn't on the classpath or no wrapping is in place; a vec (possibly empty) when it is. See *"Trace a handler / sub / fx form-by-form"* and *"Trace a single expression at the REPL"* below for the two on-demand procedures.
 
+Every coerced epoch also carries `:event/source` — `{:file :line}` of the dispatch call site. Populated when the event was dispatched via `re-frame.macros/dispatch` or `re-frame.macros/dispatch-sync` (rf-hsl), which capture `*file*` + `(:line (meta &form))` at macro-expansion time and attach them to the event vector as `:re-frame/source` meta. `nil` for events dispatched via the bare `re-frame.core/dispatch` fn or on a re-frame predating those macros. Pair with `handler/source` for "why did this fire / where is the handler defined" — see *"Why did this event fire?"* below.
+
 ### Console / errors
 
 A ring buffer of `js/console.{log,warn,error,info,debug}` calls captured by the runtime, tagged with `:who` so you can ask "what did MY dispatch log, vs the user's app, vs which handler threw?". Installed by `health` (idempotent, max 500 entries).
@@ -423,6 +425,25 @@ If the response is `:no-source-meta`, say so and fall back to grepping `'(reg-ev
 ```
 
 Drop-in for re-frame's macros — same arities, same semantics, plus the side-table entry. The fixture's `:counter/inc` handler is the worked example.
+
+### "Why did this event fire?"
+
+Two clicks: the dispatch call site (where the event was queued from), and the handler definition (where its body lives). One epoch read covers both.
+
+1. `trace/last-claude-epoch` (or `trace/last-epoch` / `trace/epoch`) → read `:event/source`. That's the `{:file :line}` of the `(rf.m/dispatch [...])` call site — i.e. the click handler, sub-handler, or top-level call that queued this event.
+2. `handler/source` for the event-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`) — that's the `(reg-event-* :cart/apply-coupon ...)` definition. See *"Where in the code is this handler?"* for the two paths and their reliability tradeoffs.
+
+`:event/source` is `nil` when the event was dispatched via the bare `re-frame.core/dispatch` fn (no macro) or on a re-frame predating rf-hsl. To make it reliable, suggest the user replace `re-frame.core/dispatch` imports with `re-frame.macros/dispatch`:
+
+```clojure
+(ns app.click
+  (:require [re-frame.macros :as rf.m]))
+
+(defn on-click [e]
+  (rf.m/dispatch [:cart/apply-coupon "SPRING25"]))
+```
+
+Drop-in for `re-frame.core/dispatch` — same args, same semantics. Debug-only: the macro emits `(if re-frame.interop/debug-enabled? (... vary-meta wrap ...) (re-frame.core/dispatch ev))`, and Closure's `:advanced` DCE strips the meta-wrap branch in production builds where `goog.DEBUG` is false. Zero production overhead.
 
 ### "Understand this component" / "What is this thing?"
 
