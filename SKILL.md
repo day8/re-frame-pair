@@ -39,7 +39,7 @@ Every operation below eventually becomes a short ClojureScript form evaluated th
 ## Cardinal rule — two modes of changing the app
 
 - **REPL changes** (hot-swap a handler, evaluate a form, reset `app-db`) are **ephemeral**. They survive hot-reloads of unaffected namespaces, but are lost on full page reload. Use them for **probes, experiments, and throwaway fixes**.
-- **Source edits** (using `Edit` / `Write`) are **permanent**. After any source edit, you *must* call `hot-reload/wait` before dispatching or tracing. Otherwise you'll interact with the pre-reload code and get misleading results.
+- **Source edits** (using `Edit` / `Write`) are **permanent**. After any source edit, you *must* run `scripts/tail-build.sh --probe '<form>'` (see *Hot-reload coordination* below) before dispatching or tracing. Otherwise you'll interact with the pre-reload code and get misleading results.
 
 Know which mode you're in and why.
 
