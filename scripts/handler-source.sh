@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # handler-source.sh — file:line of a registered handler.
 #
-# Reads the metadata that shadow-cljs's source-map machinery attaches
-# to compiled fns. For :event handlers, drills into the terminal
-# interceptor's :before fn (the user-written reg-event-{db,fx,ctx}
-# body). Returns :no-source-meta cleanly when the compile mode didn't
-# populate fn metadata.
+# Reads {:file :line} from the meta attached by re-frame's reg-*
+# macros (rf-ysy, commit 15dfc25): every reg-event-{db,fx,ctx} /
+# reg-sub / reg-fx capture *file* + (:line (meta &form)) at expansion
+# time and with-meta the location onto the registered value
+# (interceptor vector for :event, fn for :sub / :fx). Returns
+# :no-source-meta cleanly when re-frame predates rf-ysy or when
+# registration went through reg-*-fn programmatic variants that
+# don't capture &form.
 #
 # Usage:
 #   scripts/handler-source.sh :event :cart/apply-coupon
