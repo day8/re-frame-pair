@@ -83,6 +83,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `subs/live` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-live)'` | Currently-subscribed query vectors |
 | `subs/sample` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-sample [:cart/total])'` | One-shot deref |
 | `handler/source` | `scripts/handler-source.sh :event :cart/apply-coupon` | `{:file :line}` of the handler, read from `(meta (registrar/get-handler kind id))`. Re-frame's reg-* macros (rf-ysy, commit `15dfc25`) attach the call-site meta to the registered value: vectors for `:event`, fns for `:sub` / `:fx`. Returns `:no-source-meta` cleanly on re-frame builds predating rf-ysy or when registration went through `reg-*-fn` (the programmatic-registration variants that don't capture `&form`). |
+| `handler/ref` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/registrar-handler-ref :event :cart/apply-coupon)'` | Opaque hash of the currently-registered handler for kind+id. Stable across reads; **changes when the handler is hot-swapped or the source file is reloaded**. Use as a pre/post-edit comparison (and as the canonical `tail-build.sh --probe` form) to verify a reload landed before re-dispatching. |
 
 ### Write
 
@@ -100,14 +101,17 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/last-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-epoch)'` | Most recent epoch (any origin) |
 | `trace/last-claude-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-claude-epoch)'` | Most recent epoch this session dispatched |
 | `trace/epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/epoch-by-id "<id>")'` | Named epoch |
-| `trace/dispatch-and-settle` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + await the cascade (adaptive quiet-period) + return root and cascaded epochs |
+| `trace/dispatch-and-settle` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + await the cascade (adaptive quiet-period) + return root and cascaded epochs. Implemented via `re-frame.core/dispatch-and-settle` (rf-4mr); falls back to fixed-sleep + `tagged-dispatch-sync!` for re-frame builds predating it. |
 | `trace/recent` | `scripts/trace-window.sh <ms>` | Epochs added in last N ms (pull) |
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
 | `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
 
-Every coerced epoch also carries `:debux/code` — a vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries written by [re-frame-debux](https://github.com/day8/re-frame-debux) when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`, or when individual forms have been wrapped with `day8.re-frame.tracing/dbg` (rfd-btn). `nil` when debux isn't on the classpath or no wrapping is in place; a vec (possibly empty) when it is. See *"Trace a handler / sub / fx form-by-form"* and *"Trace a single expression at the REPL"* below for the two on-demand procedures.
+**Per-epoch fields surfaced from upstream.** Every coerced epoch carries these beyond the §4.3a contract, populated when the corresponding upstream feature is in play:
 
-Every coerced epoch also carries `:event/source` — `{:file :line}` of the dispatch call site. Populated when the event was dispatched via `re-frame.macros/dispatch` or `re-frame.macros/dispatch-sync` (rf-hsl), which capture `*file*` + `(:line (meta &form))` at macro-expansion time and attach them to the event vector as `:re-frame/source` meta. `nil` for events dispatched via the bare `re-frame.core/dispatch` fn or on a re-frame predating those macros. Pair with `handler/source` for "why did this fire / where is the handler defined" — see *"Why did this event fire?"* below.
+- `:debux/code` — vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries from [re-frame-debux](https://github.com/day8/re-frame-debux), written when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`, or when individual forms have been wrapped with `day8.re-frame.tracing/dbg` (rfd-btn). `nil` when debux isn't on the classpath or no wrapping is in place; a vec (possibly empty) when it is. See *"Trace a handler / sub / fx form-by-form"* and *"Trace a single expression at the REPL"* below.
+- `:event/source` — `{:file :line}` of the dispatch call site, populated when the event was dispatched via `re-frame.macros/dispatch` or `re-frame.macros/dispatch-sync` (rf-hsl). The macros capture `*file*` + `(:line (meta &form))` at expansion time and attach them to the event vector as `:re-frame/source` meta. `nil` for events dispatched via the bare `re-frame.core/dispatch` fn or on a re-frame predating those macros. Pair with `handler/source` for "why did this fire / where is the handler defined" — see *"Why did this event fire?"* below.
+- `:subs/ran` entries each carry `:subscribe/source` — `{:file :line}` of the *outer* `(rf.macros/subscribe ...)` call site that established the reaction (the view that asked for it; rf-cna). `nil` for bare-fn subscribes or pre-rf-cna re-frame. Useful for "which view subscribed to X?" — see *"Which view subscribed to X?"* below.
+- `:subs/ran` entries each carry `:input-query-sources` — vec parallel to `:input-query-vs` carrying source maps for each input dependency (rf-cna). Each slot reflects where the parent sub handler called `subscribe` to wire that input; `nil` slots for bare-fn inputs.
 
 ### Console / errors
 
@@ -402,7 +406,36 @@ Walk `:effects/fired` from the epoch as a tree. Follow `:epoch-id` links into ch
 
 Given a component name or `:src`, find the latest epoch whose `:renders` includes it. Reverse from there: the sub inputs that invalidated its outputs, then the event that invalidated the sub inputs.
 
-When multiple views subscribe to the same query-v and you want to know which call site is involved (e.g. the same `[:cart/total]` is read by both the header and the panel), each `:subs/ran` entry carries `:subscribe/source` — the `{:file :line}` of the `(rf.macros/subscribe ...)` call site that established the reaction. Pair this with `:input-query-sources` (vec parallel to `:input-query-vs`) to see where each input dep was subscribed to inside the parent sub handler. Both are populated only when subscribed via `re-frame.macros/subscribe` (rf-cna) — `nil` for bare-fn subscribes. Cache-hit subtlety: when a subscription is shared, `:subscribe/source` reflects the *first* caller's site (re-frame's cache key ignores meta, so subsequent callers reuse the cached reaction with its original meta).
+When multiple views subscribe to the same query-v and you want to know which call site is involved, see *"Which view subscribed to X?"* below — `:subscribe/source` on each `:subs/ran` entry resolves the call site.
+
+### "Which view subscribed to X?"
+
+When the user wants to know who is reading a particular subscription — e.g. *"the same `[:cart/total]` is read by both the header and the panel; which call site fired this re-render?"*. Each `:subs/ran` entry on a coerced epoch carries `:subscribe/source` — `{:file :line}` of the outer `(rf.macros/subscribe ...)` call.
+
+1. **Find live readers of the query.** `subs/live` returns every currently-subscribed query vector; filter to the query of interest:
+
+   ```
+   scripts/eval-cljs.sh '(->> (re-frame-pair.runtime/subs-live)
+                              (filter (fn [q] (= (first q) :cart/total))))'
+   ```
+
+   This tells you the query is alive but not where it was subscribed from — that lives on the trace.
+
+2. **Read `:subscribe/source` from recent `:subs/ran` entries.** Pull a recent epoch (`trace/last-epoch`, `trace/last-claude-epoch`, or `trace/find-where` for a specific event) and walk its `:subs/ran`:
+
+   ```
+   scripts/eval-cljs.sh '(->> (:subs/ran (re-frame-pair.runtime/last-epoch))
+                              (filter (fn [s] (= (first (:query-v s)) :cart/total)))
+                              (mapv (juxt :query-v :subscribe/source)))'
+   ```
+
+   Each match carries the file/line of the view that asked for the reaction.
+
+3. **For composite subs, walk `:input-query-sources`.** When a Layer 3 sub composes Layer 2 inputs, the parent sub handler's call to `subscribe` for each input lands in a vec parallel to `:input-query-vs`. Useful when the question is *"which of this Layer 3's inputs is recomputing?"* and you want the file/line where each input was wired in.
+
+**Cache-hit subtlety.** When a subscription is shared across multiple views, re-frame's cache key ignores meta — so subsequent callers reuse the cached reaction with the *first* caller's `:re-frame/source`. `:subscribe/source` therefore reflects the originating call site, not necessarily every reader. To enumerate every live reader, fall back to `subs/live` + a grep of the codebase for `(rf.m/subscribe [:cart/total])` invocations.
+
+**Prerequisite:** subscribed via `re-frame.macros/subscribe` (rf-cna). `nil` for bare-fn subscribes or pre-rf-cna re-frame.
 
 ### "Where in the code does this come from?"
 
@@ -474,7 +507,7 @@ Canonical procedure:
    - *Handlers / subs / fx:* `(rf/reg-event-db :foo ...)` / `(rf/reg-sub :bar ...)` / `(rf/reg-fx :baz ...)` via `repl/eval`. Registrar picks up the new definition immediately.
    - *Views / helpers (plain `defn`s):* redefine the var via `repl/eval` — e.g. `(defn my-view [] ...)` in the appropriate namespace. Subsequent Reagent re-renders pick up the new fn.
    - *Permanent change:* `Edit` the source file, then `scripts/tail-build.sh --probe '...'` to wait for the reload to land.
-5. **Verify the patch took before re-dispatching.** `registrar/describe :event :foo` (for a handler) should now return a different form/hash than what you captured at step 1. If the patch didn't land, re-dispatching will silently test the old code.
+5. **Verify the patch took before re-dispatching.** Capture `handler/ref :event :foo` before the edit (step 1 / step 4 prerequisite) and again after — the opaque hash is stable across reads but flips when the registered handler is replaced (hot-swap or hot-reload). `registrar/describe` is the *wrong* op for this: its `{:kind :interceptor-ids :source :not-retained}` shape is deterministic across redefs of the same shape, so it would always look unchanged. If the patch didn't land, re-dispatching will silently test the old code.
 6. `trace/dispatch-and-settle [:foo ...]` → observe the new behaviour.
 7. Compare the two epochs. Repeat until satisfied.
 8. If the change was REPL-only and the user wants to keep it, *commit via source edit* — REPL changes are lost on full page reload.
