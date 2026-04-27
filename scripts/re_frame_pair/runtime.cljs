@@ -1460,6 +1460,199 @@
          :hint        "10x has no match carrying this :dispatch-id. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."}))))
 
 ;; ---------------------------------------------------------------------------
+;; dispatch-and-settle! — rf-4mr bridge for the bash shim
+;; ---------------------------------------------------------------------------
+;;
+;; re-frame core's `dispatch-and-settle` (rf-4mr, commit f8f0f59)
+;; returns a Promise (CLJS) / clojure.core/promise (CLJ) that resolves
+;; once the cascade of `:fx [:dispatch ...]` children has settled (an
+;; adaptive quiet-period heuristic over the register-epoch-cb stream).
+;;
+;; The Promise can't round-trip through cljs-eval back to babashka.
+;; `dispatch-and-settle!` here stores the eventual resolution in a
+;; session-local atom keyed by an opaque handle; the bash shim polls
+;; `await-settle <handle>` to read the settled record once it lands.
+;;
+;; Reconstituting from native-epoch-buffer rather than the Promise's
+;; clj->js'd value: re-frame's resolve! walks the result with
+;; `(clj->js v :keyword-fn name)`, which stringifies any keywords
+;; inside (including :event, :coeffects, :effects). Reading from our
+;; native buffer (which `register-epoch-cb` populates in lockstep —
+;; both cbs are called from the same `tracing-cb-debounced` batch)
+;; keeps keywords intact through the round-trip.
+
+(defn- dispatch-and-settle-fn
+  "JS-interop accessor for `re-frame.core/dispatch-and-settle` (rf-4mr,
+   commit f8f0f59). Returns nil when re-frame predates rf-4mr — the JS
+   symbol simply won't exist on that build.
+
+   Same goog.global / aget-path strategy as `register-epoch-cb-fn`:
+   keeps this file compiling against re-frame 1.4.5 (the runtime-test
+   build's pinned dep), which doesn't ship the var."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "core" "dispatch_and_settle"])))
+
+(defn collect-cascade-from-buffer
+  "Collect the cascade rooted at `root-id` from a vec of raw native
+   epochs. Walks `:parent-dispatch-id` chains starting from `root-id`
+   and returns the coerced records.
+
+   `(collect-cascade-from-buffer root-id)` reads the live buffer.
+   `(collect-cascade-from-buffer root-id epochs)` takes raw epochs
+   explicitly — public so tests can exercise the cascade walk against
+   a synthetic buffer without standing up register-epoch-cb.
+
+   Returns:
+     {:root-epoch         <coerced-or-nil>
+      :cascaded-epoch-ids [<id>...]
+      :cascaded-epochs    [<coerced>...]}
+   The root epoch is excluded from `:cascaded-epochs` /
+   `:cascaded-epoch-ids`. Returns nil when `root-id` is nil."
+  ([root-id] (collect-cascade-from-buffer root-id (native-epochs)))
+  ([root-id epochs]
+   (when root-id
+     (let [;; Reachability closure — keep adding any epoch's dispatch-id
+           ;; whose parent is already in the set, until fixed point.
+           ids (loop [acc #{root-id}]
+                 (let [grown (into acc
+                                   (keep #(let [pid (:parent-dispatch-id %)
+                                                id  (:dispatch-id %)]
+                                            (when (and pid (contains? acc pid))
+                                              id))
+                                         epochs))]
+                   (if (= grown acc) acc (recur grown))))
+           root-raw      (some #(when (= root-id (:dispatch-id %)) %) epochs)
+           cascaded-raws (filterv #(and (contains? ids (:dispatch-id %))
+                                        (not= root-id (:dispatch-id %)))
+                                  epochs)]
+       {:root-epoch         (some-> root-raw coerce-native-epoch)
+        :cascaded-epoch-ids (mapv :dispatch-id cascaded-raws)
+        :cascaded-epochs    (mapv coerce-native-epoch cascaded-raws)}))))
+
+(defonce settle-pending
+  ;; handle-uuid -> {:settled? bool ... result fields}. Exposed (no
+  ;; ^:private) so the runtime-test build can reset / inspect without
+  ;; warnings, in line with native-epoch-buffer / claude-dispatch-ids.
+  (atom {}))
+
+(defn dispatch-and-settle!
+  "Wrapper around `re-frame.core/dispatch-and-settle` (rf-4mr) for the
+   bash shim. Dispatches `event-v` synchronously, awaits the cascade
+   of `:fx [:dispatch ...]` children using re-frame core's adaptive
+   quiet-period heuristic, and stores the settled record in a
+   session-local atom keyed by an opaque handle.
+
+   The bash shim polls `await-settle` to recover the resolved record
+   once re-frame's Promise has settled — Promises don't round-trip
+   through cljs-eval. See `await-settle` for the polling protocol.
+
+   `current-who` flips :claude for the duration of the synchronous
+   `dispatch-sync` that runs inside `dispatch-and-settle` (matches
+   tagged-dispatch-sync!'s behavior). The root :dispatch-id is
+   captured immediately after dispatch-sync via `recent-dispatch-id`
+   and accumulated into `claude-dispatch-ids` so `last-claude-epoch`
+   keeps pointing at our most recent dispatch.
+
+   The settled record is reconstituted from the native-epoch-buffer
+   rather than the Promise's clj->js'd value (see the long comment
+   above the section for why).
+
+   `opts` forwards to re-frame.core/dispatch-and-settle. Defaults:
+   :timeout-ms 5000, :settle-window-ms 100, :include-cascaded? true.
+
+   Returns synchronously:
+     {:ok? true :handle <uuid> :event ev :dispatch-id <id> :pending? true}
+     {:ok? false :reason :dispatch-and-settle-unavailable :hint ...}
+     {:ok? false :reason :handler-threw :error ... :event ev}"
+  ([event-v] (dispatch-and-settle! event-v {}))
+  ([event-v opts]
+   (if-let [d-and-s (dispatch-and-settle-fn)]
+     (let [handle (str (random-uuid))]
+       (reset! current-who :claude)
+       (try
+         (let [p                (d-and-s event-v opts)
+               root-dispatch-id (recent-dispatch-id)]
+           (when root-dispatch-id
+             (swap! claude-dispatch-ids conj root-dispatch-id))
+           (swap! settle-pending assoc handle
+                  {:settled?    false
+                   :started-at  (js/Date.now)
+                   :event       event-v
+                   :dispatch-id root-dispatch-id})
+           (-> p
+               (.then (fn [js-result]
+                        (let [raw     (js->clj js-result :keywordize-keys true)
+                              ok?     (boolean (:ok? raw))
+                              cascade (when (and ok? root-dispatch-id)
+                                        (collect-cascade-from-buffer root-dispatch-id))]
+                          (swap! settle-pending update handle merge
+                                 (cond-> {:settled?           true
+                                          :ok?                ok?
+                                          :event              event-v
+                                          :dispatch-id        root-dispatch-id
+                                          :epoch-id           (some-> cascade :root-epoch :id)
+                                          :epoch              (some-> cascade :root-epoch)
+                                          :cascaded-epoch-ids (or (:cascaded-epoch-ids cascade) [])
+                                          :cascaded-epochs    (or (:cascaded-epochs cascade) [])}
+                                   (not ok?) (assoc :reason (:reason raw)))))))
+               (.catch (fn [err]
+                         (swap! settle-pending update handle merge
+                                {:settled? true
+                                 :ok?      false
+                                 :reason   :promise-rejected
+                                 :error    (str err)
+                                 :event    event-v}))))
+           {:ok?         true
+            :handle      handle
+            :event       event-v
+            :dispatch-id root-dispatch-id
+            :pending?    true})
+         (catch :default e
+           (swap! settle-pending dissoc handle)
+           (let [stack (try (.-stack e) (catch :default _ ""))]
+             (append-console-entry!
+              :error
+              [(str "[handler-threw] " (or (ex-message e) (str e)))
+               (str event-v)]
+              stack
+              :handler-error))
+           {:ok?        false
+            :reason     :handler-threw
+            :event      event-v
+            :error      (or (ex-message e) (str e))
+            :error-data (when-let [d (ex-data e)] (pr-str d))})
+         (finally
+           (reset! current-who :app))))
+     {:ok?    false
+      :reason :dispatch-and-settle-unavailable
+      :hint   "re-frame predates rf-4mr (commit f8f0f59) — fall back to tagged-dispatch-sync! + collect-after-dispatch."})))
+
+(defn await-settle
+  "Read the settle-pending atom for `handle`. Used by the bash shim's
+   polling loop to recover the result of a `dispatch-and-settle!`.
+
+   Returns:
+     - settled, success: {:settled? true :ok? true :event ev
+                          :dispatch-id <id> :epoch-id <id>
+                          :epoch <coerced> :cascaded-epoch-ids [...]
+                          :cascaded-epochs [...]}
+     - settled, timeout: {:settled? true :ok? false :reason :timeout
+                          :event ev}
+     - still pending:    {:settled? false :pending? true :handle h}
+     - unknown handle:   {:settled? false :reason :unknown-handle :handle h}
+
+   On a settled response, the handle is removed from the atom — pollers
+   should not call await-settle on the same handle twice."
+  [handle]
+  (if-let [entry (get @settle-pending handle)]
+    (if (:settled? entry)
+      (do (swap! settle-pending dissoc handle)
+          entry)
+      {:settled? false :pending? true :handle handle})
+    {:settled? false :reason :unknown-handle :handle handle}))
+
+;; ---------------------------------------------------------------------------
 ;; re-com awareness
 ;; ---------------------------------------------------------------------------
 

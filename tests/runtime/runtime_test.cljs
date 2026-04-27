@@ -525,6 +525,117 @@
       (is (boolean? (:native-trace-cb? h))))))
 
 ;; -----------------------------------------------------------------------------
+;; rfp-4ew / rf-4mr — dispatch-and-settle bridge for the bash shim.
+;; -----------------------------------------------------------------------------
+;;
+;; The runtime-test build pins re-frame 1.4.5 (predates rf-4mr) so the
+;; full dispatch-and-settle! happy path can't run here — exercised in
+;; tests/fixture under a re-frame :local/root build. Here we cover:
+;;   - feature detection (dispatch-and-settle-fn returns nil → fallback)
+;;   - cascade-walking against synthetic native epochs
+;;   - await-settle's three return shapes (pending / settled / unknown)
+
+(defn- minimal-native-epoch
+  "Bare-bones native epoch with the fields coerce-native-epoch needs.
+   Cheaper than fixtures/synthetic-native-epoch for cascade-walk tests
+   that don't care about effects / sub-runs / renders."
+  [{:keys [id event dispatch-id parent-dispatch-id]}]
+  {:id id
+   :event event
+   :dispatch-id dispatch-id
+   :parent-dispatch-id parent-dispatch-id
+   :app-db/before {} :app-db/after {} :coeffects {} :effects {}
+   :interceptors []
+   :start 0 :end id :duration id})
+
+(deftest collect-cascade-from-buffer-walks-parent-chains
+  (testing "linear cascade: root → child → grandchild — walks the whole chain"
+    (let [epochs [(minimal-native-epoch {:id 1 :event [:root]
+                                          :dispatch-id "ROOT"
+                                          :parent-dispatch-id nil})
+                  (minimal-native-epoch {:id 2 :event [:child]
+                                          :dispatch-id "C1"
+                                          :parent-dispatch-id "ROOT"})
+                  (minimal-native-epoch {:id 3 :event [:grandchild]
+                                          :dispatch-id "C2"
+                                          :parent-dispatch-id "C1"})]
+          {:keys [root-epoch cascaded-epoch-ids cascaded-epochs]}
+          (rt/collect-cascade-from-buffer "ROOT" epochs)]
+      (is (= [:root] (:event root-epoch)))
+      (is (= "ROOT" (:dispatch-id root-epoch)))
+      (is (= ["C1" "C2"] cascaded-epoch-ids))
+      (is (= [[:child] [:grandchild]] (mapv :event cascaded-epochs)))))
+
+  (testing "fan-out: root → two children — both surface in cascaded-epochs"
+    (let [epochs [(minimal-native-epoch {:id 1 :event [:root] :dispatch-id "R"})
+                  (minimal-native-epoch {:id 2 :event [:a] :dispatch-id "A" :parent-dispatch-id "R"})
+                  (minimal-native-epoch {:id 3 :event [:b] :dispatch-id "B" :parent-dispatch-id "R"})]
+          r (rt/collect-cascade-from-buffer "R" epochs)]
+      (is (= #{"A" "B"} (set (:cascaded-epoch-ids r))))))
+
+  (testing "unrelated epochs in the buffer are filtered out"
+    (let [epochs [(minimal-native-epoch {:id 1 :event [:noise] :dispatch-id "N1"})
+                  (minimal-native-epoch {:id 2 :event [:root] :dispatch-id "R"})
+                  (minimal-native-epoch {:id 3 :event [:noise2] :dispatch-id "N2"})
+                  (minimal-native-epoch {:id 4 :event [:my-child]
+                                          :dispatch-id "C" :parent-dispatch-id "R"})]
+          r (rt/collect-cascade-from-buffer "R" epochs)]
+      (is (= ["C"] (:cascaded-epoch-ids r)))
+      (is (= "R" (:dispatch-id (:root-epoch r))))))
+
+  (testing "root not in buffer — :root-epoch nil, no cascade"
+    (let [epochs [(minimal-native-epoch {:id 1 :event [:other] :dispatch-id "X"})]
+          r (rt/collect-cascade-from-buffer "MISSING" epochs)]
+      (is (nil? (:root-epoch r)))
+      (is (= [] (:cascaded-epoch-ids r)))))
+
+  (testing "nil root-id returns nil — caller likely had no dispatch-id captured"
+    (is (nil? (rt/collect-cascade-from-buffer nil [])))))
+
+(deftest await-settle-state-transitions
+  (testing "unknown handle: returns :unknown-handle reason"
+    (reset! rt/settle-pending {})
+    (let [r (rt/await-settle "no-such-handle")]
+      (is (false? (:settled? r)))
+      (is (= :unknown-handle (:reason r)))))
+
+  (testing "pending handle: returns {:settled? false :pending? true}"
+    (reset! rt/settle-pending {"h1" {:settled? false :event [:foo]}})
+    (let [r (rt/await-settle "h1")]
+      (is (false? (:settled? r)))
+      (is (true? (:pending? r))))
+    ;; The atom still holds the entry — pending reads don't clear.
+    (is (contains? @rt/settle-pending "h1")))
+
+  (testing "settled handle: returns the resolution map AND removes the entry"
+    (reset! rt/settle-pending
+            {"h2" {:settled?    true
+                   :ok?         true
+                   :event       [:foo]
+                   :dispatch-id "D"
+                   :epoch-id    42
+                   :cascaded-epoch-ids ["A" "B"]}})
+    (let [r (rt/await-settle "h2")]
+      (is (true? (:settled? r)))
+      (is (true? (:ok? r)))
+      (is (= 42 (:epoch-id r)))
+      (is (= ["A" "B"] (:cascaded-epoch-ids r))))
+    ;; Subsequent calls should report unknown-handle, not the same record.
+    (is (not (contains? @rt/settle-pending "h2")))
+    (is (= :unknown-handle (:reason (rt/await-settle "h2"))))))
+
+(deftest dispatch-and-settle-bang-fallback-without-rf-4mr
+  (testing "when re-frame predates rf-4mr, dispatch-and-settle! reports
+            :dispatch-and-settle-unavailable so the bash shim can fall
+            back to tagged-dispatch-sync! + collect-after-dispatch.
+            The runtime-test build pins re-frame 1.4.5 — exercises the
+            real fallback path, no with-redefs needed."
+    (let [r (rt/dispatch-and-settle! [:test/foo])]
+      (is (false? (:ok? r)))
+      (is (= :dispatch-and-settle-unavailable (:reason r)))
+      (is (string? (:hint r))))))
+
+;; -----------------------------------------------------------------------------
 ;; Time-travel ops — sentinel checks. Without a connected browser
 ;; runtime there is no 10x to dispatch into, so we expect the
 ;; ten-x-missing failure. Real time-travel is exercised by

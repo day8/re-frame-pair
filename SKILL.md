@@ -100,7 +100,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/last-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-epoch)'` | Most recent epoch (any origin) |
 | `trace/last-claude-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-claude-epoch)'` | Most recent epoch this session dispatched |
 | `trace/epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/epoch-by-id "<id>")'` | Named epoch |
-| `trace/dispatch-and-collect` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + wait a frame + return the epoch by id |
+| `trace/dispatch-and-settle` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + await the cascade (adaptive quiet-period) + return root and cascaded epochs |
 | `trace/recent` | `scripts/trace-window.sh <ms>` | Epochs added in last N ms (pull) |
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
 | `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
@@ -307,7 +307,7 @@ This recipe is the on-demand half of the integration described in [`docs/inspira
 
 ### "Explain this dispatch"
 
-Run `trace/dispatch-and-collect` (or read a recent epoch), then narrate the six dominoes:
+Run `trace/dispatch-and-settle` (or read a recent epoch), then narrate the six dominoes:
 
 - Event vector + interceptor chain (by id)
 - Coeffects injected
@@ -369,7 +369,7 @@ Use `dom/fire-click-at-src`. Report the resulting epoch. Useful when you want to
 
 ### "What did this dispatch log?"
 
-Ground console output to a specific dispatch by pairing `console/tail` with `trace/dispatch-and-collect`:
+Ground console output to a specific dispatch by pairing `console/tail` with `trace/dispatch-and-settle`:
 
 1. `scripts/console-tail.sh` once first to read the current `:next-id` — that's your watermark.
 2. Fire the dispatch via `scripts/dispatch.sh --trace '[:foo ...]'`.
@@ -386,7 +386,7 @@ Same starting `app-db`, same event, only the code changes — any difference in 
 
 Canonical procedure:
 
-1. `trace/dispatch-and-collect [:foo ...]` → observe baseline. Capture the epoch id.
+1. `trace/dispatch-and-settle [:foo ...]` → observe baseline. Capture the epoch id.
 2. `undo/status` to see what side effects since the epoch of interest can't be rewound (`:http-xhrio`, navigation, landed `:dispatch-later`); warn user.
 3. `undo/step-back` or `undo/to-epoch <id>` → rewind `app-db`.
 4. **Modify the part of the system you're iterating on.**
@@ -394,7 +394,7 @@ Canonical procedure:
    - *Views / helpers (plain `defn`s):* redefine the var via `repl/eval` — e.g. `(defn my-view [] ...)` in the appropriate namespace. Subsequent Reagent re-renders pick up the new fn.
    - *Permanent change:* `Edit` the source file, then `scripts/tail-build.sh --probe '...'` to wait for the reload to land.
 5. **Verify the patch took before re-dispatching.** `registrar/describe :event :foo` (for a handler) should now return a different form/hash than what you captured at step 1. If the patch didn't land, re-dispatching will silently test the old code.
-6. `trace/dispatch-and-collect [:foo ...]` → observe the new behaviour.
+6. `trace/dispatch-and-settle [:foo ...]` → observe the new behaviour.
 7. Compare the two epochs. Repeat until satisfied.
 8. If the change was REPL-only and the user wants to keep it, *commit via source edit* — REPL changes are lost on full page reload.
 
@@ -424,7 +424,7 @@ Common cases:
 - `:ns-not-loaded` + namespace → re-frame-10x / re-com not loaded; check their deps.
 - `:version-too-old` → report dep + observed vs required version.
 - `:handler-error` inside an epoch → the user's handler threw; point at `:handler/error :stack`.
-- `:timed-out? true` on a dispatch-and-collect → the animation frame never fired (tab backgrounded, debugger paused); ask the user to bring the tab forward.
+- `:timed-out? true` on a dispatch-and-settle → the cascade never settled within :timeout-ms (tab backgrounded, debugger paused, async chain re-firing past the quiet-period); ask the user to bring the tab forward, or bump `:timeout-ms` / `:settle-window-ms`.
 - `:connection :lost` → reconnect by calling `scripts/discover-app.sh` again.
 
 ---

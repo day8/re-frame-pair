@@ -3,8 +3,10 @@
 #
 # Default mode is queued dispatch (`rf/dispatch`) — same path app code uses.
 # --sync forces `rf/dispatch-sync` for deterministic before/after.
-# --trace uses dispatch-and-collect: sync + wait an animation frame + return
-# the resulting epoch by id.
+# --trace uses re-frame.core/dispatch-and-settle (rf-4mr): sync +
+# adaptive quiet-period wait for the full :fx [:dispatch ...] cascade
+# + return root and cascaded epochs. Falls back to dispatch-sync +
+# fixed sleep + collect-after-dispatch when re-frame predates rf-4mr.
 #
 # Usage:
 #   scripts/dispatch.sh '[:cart/apply-coupon "SPRING25"]'
