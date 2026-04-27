@@ -15,11 +15,9 @@ With these capabilities, Claude Code can even iteratively perform experiments by
 
 ## Status
 
-**Beta-1 candidate** — every load-bearing question from the §8a spike has been ground-truthed against current source (see [`STATUS.md`](STATUS.md)). The 10x epoch-buffer accessor, the time-travel adapter, the re-com `:src` parser, the registrar shape, and the subscription cache shape are all wired against the real internals; unit tests exercise the coerce-epoch translation and re-com classification. A minimal end-to-end fixture (`tests/fixture/`) is built and ready to run.
+**Beta** — validated end-to-end against the live fixture (re-frame + re-frame-10x + re-com under shadow-cljs watch). v0.1.0-beta.1 + beta.2 squash-merged to `main`; subsequent capability waves landed on top: the native epoch path (`re-frame/register-epoch-cb`, replacing the 10x-buffer detour for new fixtures), `dispatch-and-settle` for adaptive cascade-aware tracing, `dispatch-with --stub` for record-only fx stubs, `:event/source` and `:subscribe/source` flattened onto coerced epochs, and Phase 2 of the optional `re-frame-debux` integration (runtime `wrap-handler!` / `unwrap-handler!` API). All `§8a` ground-truth questions from the spike are resolved against current source; CI is green; the runtime is unit-tested across 67 deftests / 351 assertions plus a 20-deftest babashka suite. Next tag is operator-pending.
 
-What's **not** yet done: the operator-side dry run. The fixture compiles structurally but hasn't been served from a live shadow-cljs watch in this environment (no JDK at hand). First user with the JDK + npm should `cd tests/fixture && npm install && npx shadow-cljs watch app` and put `discover-app.sh` / `dispatch.sh --trace` through their paces. Tagging beta.1 is gated on that.
-
-Read [`STATUS.md`](STATUS.md) for the per-phase implementation state; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for running from a clone without waiting for an npm release; [`RELEASING.md`](RELEASING.md) for the release flow.
+Read [`STATUS.md`](STATUS.md) for per-phase implementation state and the post-spike additions log; [`docs/initial-spec.md`](docs/initial-spec.md) for the full design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for running from a clone without waiting for an npm release; [`RELEASING.md`](RELEASING.md) for the release flow.
 
 ## Which technical stack?
 
@@ -34,7 +32,7 @@ You don't need to make any changes to your code/project to use it, but you will 
 
 #### Optional: per-form trace via `re-frame-debux`
 
-If you add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) (the artifact published by the `re-frame-debux` repo) to your dev classpath and wrap a handler with `fn-traced` / `defn-traced`, its per-form trace flows through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads. This is **not** transitive via `re-frame-10x` — you must add the dep explicitly. See [`docs/inspirations-debux.md`](docs/inspirations-debux.md) for the integration shape, including a REPL-driven recipe that wraps handlers on demand without source edits.
+If you add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) (the artifact published by the `re-frame-debux` repo) to your dev classpath, the skill can drive it on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. This is **not** transitive via `re-frame-10x` — you must add the dep explicitly. See [`docs/inspirations-debux.md`](docs/inspirations-debux.md) for the integration shape and the REPL-driven recipes.
   
 ## Two modes 
 
@@ -67,6 +65,12 @@ Here's the kinds of conversations you can have with Claude.
 > **You**: I just clicked the "Save" button and nothing happened. Where is that button and why doesn't it work?
 >
 > **Claude**: `src/app/profile/view.cljs:84`. It's a `re-com/button` with `:on-click #(rf/dispatch [:profile/save])`. The click *did* dispatch — trace shows `{:db ...}` returned — but no `:profile/form-dirty?` flip happened, so nothing visible changed. What feedback were you expecting: toast, spinner, redirect?
+
+### Find which call site fired an event
+
+> **You**: My `[:cart/apply-coupon]` handler fired but I have three buttons that could have triggered it. Which one?
+>
+> **Claude**: That dispatch came from `app/cart/header.cljs:42` — the rightmost "Apply" button in the header, not either of the panel buttons. (Reading `:event/source` off the last epoch; works because the call site uses `re-frame.macros/dispatch`, which captures `*file*` + `(:line (meta &form))` at expansion time.)
 
 ### Trace the full cascade of an event
 
@@ -113,6 +117,12 @@ Here's the kinds of conversations you can have with Claude.
 > **You**: When I first enter the Dashboard panel, the global reset button doesn't work. Fix it, then return to the previous state and fire the same event again, iterating until it works.
 >
 > **Claude**: I stepped re-frame-10x's state back to the pre-click epoch (noting: any HTTP effects or navigation that fired earlier are *not* reversed — undo only rewinds `app-db`). The panel-level subscription was wrong; I patched it. Re-ran the event, `app-db` now updates as expected. Want me to put the patch into the source code?
+
+### Probe a side-effecting handler safely
+
+> **You**: I want to iterate on `[:user/login {...}]` but it fires `:http-xhrio` and I don't want to hit the real auth endpoint each time.
+>
+> **Claude**: Substituting `:http-xhrio` and `:navigate` with record-only stubs for this dispatch via `dispatch.sh --trace --stub :http-xhrio --stub :navigate '[:user/login {...}]'`. The handler still receives its coeffects, the cascade still runs, but the captured effect values land in `stubbed-effects-since` instead of being executed. Each iteration's stubs expire when the cascade settles — no global state to restore.
 
 ### Commit a change via source edit
 
@@ -224,7 +234,7 @@ The pieces (design; see *Status* above):
 2. `eval-cljs.sh` sends short ClojureScript forms over nREPL into the browser runtime and returns edn.
 3. `inject-runtime.sh` creates the `re-frame-pair.runtime` namespace in the app on connect, populating it with helpers and epoch-buffer readers. The session sentinel (a UUID) is interned here so full-page-refresh detection is a simple lookup.
 4. `SKILL.md` teaches Claude a verb vocabulary (read / write / trace / watch / hot-reload / undo) mapped onto those forms, plus diagnostic recipes composed from them.
-5. All trace reads come from re-frame-10x's epoch buffer — no second trace callback, one source of truth. Render entries tagged with `:re-com?` (and where possible a layout/input/content category) let Claude apply component-aware diagnostics.
+5. Epoch reads come from re-frame's own `register-epoch-cb` callback (rf-ybv) when available — once a `:event` trace completes, re-frame delivers an assembled epoch record (sub-runs, renders, effects, `app-db` before/after) that the skill drains into a native ring buffer. On older re-frame builds, the skill falls back to reading re-frame-10x's epoch buffer via the public `day8.re-frame-10x.public` ns (rf1-jum), with the legacy inlined-rf walk as a third fallback for 10x JARs predating the public surface. Render entries tagged with `:re-com?` (and where possible a layout/input/content category) let Claude apply component-aware diagnostics.
 
 See [`docs/initial-spec.md`](docs/initial-spec.md) for the full operation catalogue, architecture, error surfaces, versioning, and phased delivery plan.
 
