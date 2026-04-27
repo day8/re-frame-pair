@@ -822,9 +822,14 @@
                                         resolved))))
 
               (and (map? start) (= :dispatch-and-settle-unavailable (:reason start)))
+              ;; --stub on legacy re-frame: route through dispatch-sync-with-stubs! so the override map plants on event meta — otherwise the flag is silently dropped and the real fx fires.
               (let [sync-result (cljs-eval-value
                                   build-id
-                                  (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str))]
+                                  (if (seq stub-fx-ids)
+                                    (format "(re-frame-pair.runtime/dispatch-sync-with-stubs! %s %s)"
+                                            event-str (pr-str stub-fx-ids))
+                                    (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)"
+                                            event-str)))]
                 (if (and (map? sync-result) (:ok? sync-result))
                   (do
                     (Thread/sleep legacy-trace-collect-wait-ms)

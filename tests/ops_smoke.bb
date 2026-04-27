@@ -227,6 +227,109 @@
     (is (= [] (#'ops/parse-stub-fx-ids ["[:ev]" "--trace"])))))
 
 ;; ---------------------------------------------------------------------------
+;; --trace legacy fallback honours --stub.
+;;
+;; When re-frame predates rf-4mr (commit f8f0f59 — dispatch-and-settle), the
+;; --trace path falls back to tagged-dispatch-sync! + collect-after-dispatch.
+;; Pre-fix that fallback ignored --stub entirely: the override never planted
+;; on event meta, the real fx fired, and the response still claimed
+;; :stubbed-fx-ids — silently breaking the safety guarantee. The fallback now
+;; routes through dispatch-sync-with-stubs! when --stub is present, mirroring
+;; the sync? branch.
+;; ---------------------------------------------------------------------------
+
+(deftest dispatch-trace-legacy-fallback-routes-stubs-through-with-stubs
+  (testing "--trace + --stub on a re-frame that lacks dispatch-and-settle
+            invokes dispatch-sync-with-stubs! (not plain tagged-dispatch-sync!)
+            so the override map plants on event meta and :stubbed-fx-ids
+            surfaces back to the agent"
+    (let [eval-forms (atom [])
+          emitted    (atom nil)]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (swap! eval-forms conj form)
+                                           (cond
+                                             (str/includes? form "dispatch-and-settle!")
+                                             {:ok? false :reason :dispatch-and-settle-unavailable}
+
+                                             (str/includes? form "dispatch-sync-with-stubs!")
+                                             {:ok? true :event [:user/login] :dispatch-id "abc"
+                                              :stubbed-fx-ids [:http-xhrio]}
+
+                                             (str/includes? form "collect-after-dispatch")
+                                             {:ok? true :dispatch-id "abc" :epoch-id 1}
+
+                                             :else
+                                             {:ok? true}))
+                    ops/emit             (fn [m] (reset! emitted m))]
+        (#'ops/dispatch-op ["[:user/login]" "--trace" "--stub" ":http-xhrio"])
+        (is (some #(str/includes? % "dispatch-sync-with-stubs!") @eval-forms)
+            "legacy --trace must invoke dispatch-sync-with-stubs! when --stub supplied")
+        (is (not-any? #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch-sync! " %)
+                      @eval-forms)
+            "legacy --trace must NOT invoke plain tagged-dispatch-sync! when --stub supplied")
+        (is (= [:http-xhrio] (:stubbed-fx-ids @emitted))
+            ":stubbed-fx-ids surfaces from dispatch-sync-with-stubs! through the merge")
+        (is (true? (:legacy? @emitted))
+            "legacy? flag still set so the agent sees which branch was taken")))))
+
+(deftest dispatch-trace-legacy-fallback-no-stubs-still-uses-tagged-dispatch-sync
+  (testing "--trace without --stub on a legacy re-frame must keep using
+            tagged-dispatch-sync! (regression guard for the no-stub path)"
+    (let [eval-forms (atom [])]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (swap! eval-forms conj form)
+                                           (cond
+                                             (str/includes? form "dispatch-and-settle!")
+                                             {:ok? false :reason :dispatch-and-settle-unavailable}
+
+                                             (str/includes? form "tagged-dispatch-sync!")
+                                             {:ok? true :event [:user/login] :dispatch-id "abc"}
+
+                                             (str/includes? form "collect-after-dispatch")
+                                             {:ok? true :dispatch-id "abc" :epoch-id 1}
+
+                                             :else
+                                             {:ok? true}))
+                    ops/emit             (fn [_] nil)]
+        (#'ops/dispatch-op ["[:user/login]" "--trace"])
+        (is (some #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch-sync! " %)
+                  @eval-forms)
+            "no --stub: legacy path still uses tagged-dispatch-sync!")
+        (is (not-any? #(str/includes? % "dispatch-sync-with-stubs!") @eval-forms)
+            "no --stub: dispatch-sync-with-stubs! must NOT be invoked")))))
+
+(deftest dispatch-trace-legacy-fallback-rf-ge8-also-unavailable-surfaces-error
+  (testing "--trace + --stub when re-frame predates BOTH rf-4mr and rf-ge8
+            surfaces :reason :dispatch-sync-with-unavailable to the agent
+            rather than silently falling through to plain tagged-dispatch-sync!"
+    (let [emitted (atom nil)]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (cond
+                                             (str/includes? form "dispatch-and-settle!")
+                                             {:ok? false :reason :dispatch-and-settle-unavailable}
+
+                                             (str/includes? form "dispatch-sync-with-stubs!")
+                                             {:ok? false :reason :dispatch-sync-with-unavailable
+                                              :hint "re-frame predates rf-ge8 (commit 2651a30)"}
+
+                                             :else
+                                             {:ok? true}))
+                    ops/emit             (fn [m] (reset! emitted m))]
+        (#'ops/dispatch-op ["[:user/login]" "--trace" "--stub" ":http-xhrio"])
+        (is (= :dispatch-sync-with-unavailable (:reason @emitted))
+            "structured failure propagates rather than silent fall-through")
+        (is (false? (:ok? @emitted))
+            "ok? false preserved so the bash shim treats this as an error")
+        (is (true? (:legacy? @emitted))
+            "legacy? flag preserved on the failure path too")))))
+
+;; ---------------------------------------------------------------------------
 ;; ensure-injected! follows up with a `health` call after a re-ship so the
 ;; native-epoch / native-trace cbs and console-capture wrapper are installed
 ;; in the freshly-shipped runtime. Without this, every op that hit the auto-
