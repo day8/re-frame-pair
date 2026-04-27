@@ -1,11 +1,6 @@
 (ns app.events
   (:require [re-frame.core         :as rf]
             [day8.re-frame.tracing :refer-macros [fn-traced]]
-            ;; rfp-rsg — opt in to re-frame-pair's registration macro
-            ;; so handler-source can return {:file :line} for handlers
-            ;; defined here, working around re-frame's interceptor
-            ;; wrapper hiding (meta f). See docs/handler-source-meta.md.
-            [re-frame-pair.runtime :as rfpr :refer-macros [reg-event-db]]
             [app.db                :as db]))
 
 ;; -----------------------------------------------------------------------------
@@ -29,14 +24,7 @@
 ;; (scripts/re_frame_pair/runtime.cljs), which until now was only
 ;; covered by synthetic-data unit tests. Worked example for the
 ;; "Trace a handler/sub/fx form-by-form" recipe in SKILL.md.
-;;
-;; rfp-rsg — also doubles as the worked example for Path 3: this is
-;; the only handler in the fixture registered through
-;; re-frame-pair.runtime/reg-event-db, so handler-source.sh
-;; :event :counter/inc returns {:file :line :column}. The other
-;; counters/items/coupon handlers stay on rf/reg-event-db to keep
-;; coverage of the :no-source-meta fallback path.
-(rfpr/reg-event-db
+(rf/reg-event-db
  :counter/inc
  (fn-traced [db _]
    (-> db

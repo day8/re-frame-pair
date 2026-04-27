@@ -82,7 +82,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `registrar/describe` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/registrar-describe :event :cart/apply-coupon)'` | Kind + interceptor ids (events only) |
 | `subs/live` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-live)'` | Currently-subscribed query vectors |
 | `subs/sample` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-sample [:cart/total])'` | One-shot deref |
-| `handler/source` | `scripts/handler-source.sh :event :cart/apply-coupon` | `{:file :line :column}` of the handler. Reliable when registered via the opt-in `re-frame-pair.runtime/reg-event-db` etc. (`:source :registration-macro`); falls back to compiled-fn `(meta f)` (`:source :fn-meta`); returns `:no-source-meta` cleanly when neither path produces a hit. See "Where in the code is this handler?" recipe for the opt-in. |
+| `handler/source` | `scripts/handler-source.sh :event :cart/apply-coupon` | `{:file :line}` of the handler, read from `(meta (registrar/get-handler kind id))`. Re-frame's reg-* macros (rf-ysy, commit `15dfc25`) attach the call-site meta to the registered value: vectors for `:event`, fns for `:sub` / `:fx`. Returns `:no-source-meta` cleanly on re-frame builds predating rf-ysy or when registration went through `reg-*-fn` (the programmatic-registration variants that don't capture `&form`). |
 
 ### Write
 
@@ -410,30 +410,18 @@ Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :lin
 
 ### "Where in the code is this handler?"
 
-Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Two paths produce a hit:
+Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Returns `{:ok? true :file ... :line ... :source :fn-meta}` when the handler's call site is reachable.
 
-1. **Registration macro (opt-in, reliable):** if the handler was registered via `re-frame-pair.runtime/reg-event-db` (or `reg-event-fx` / `reg-sub` / `reg-fx`), the call site is captured at compile time and stored in a side-table. Response carries `:source :registration-macro`.
-2. **Compiled-fn meta (best-effort):** otherwise the op reads `(meta f)` on the registered fn (drilling into the terminal interceptor's `:before` for `:event`). Response carries `:source :fn-meta`. This path usually *fails* on real shadow-cljs builds — re-frame's interceptor wrapper closes over the user fn, and `(meta wrapper)` is nil regardless of source-map config (see `docs/handler-source-meta.md`).
+Re-frame's reg-* macros (rf-ysy, commit `15dfc25`) capture `*file*` + `(:line (meta &form))` at expansion time and attach `{:file :line}` as metadata on the registered value via `with-meta` — interceptor chains for `:event`, fns for `:sub` / `:fx`. `(meta (registrar/get-handler kind id))` returns the location directly.
 
-If the response is `:no-source-meta`, say so and fall back to grepping `'(reg-event-'` for the id — don't invent a path. To make `handler/source` reliable, suggest the user opt in:
-
-```clojure
-(ns app.events
-  (:require [re-frame-pair.runtime :as rfpr
-             :refer-macros [reg-event-db reg-event-fx reg-sub reg-fx]]))
-
-(rfpr/reg-event-db :cart/apply-coupon
-  (fn [db [_ code]] ...))
-```
-
-Drop-in for re-frame's macros — same arities, same semantics, plus the side-table entry. The fixture's `:counter/inc` handler is the worked example.
+If the response is `:no-source-meta`, the user is on a re-frame build predating rf-ysy, or the handler was registered via the programmatic `reg-*-fn` variants (`reg-event-db-fn`, etc.) which don't capture `&form`. Say so and fall back to grepping `'(reg-event-'` for the id — don't invent a path.
 
 ### "Why did this event fire?"
 
 Two clicks: the dispatch call site (where the event was queued from), and the handler definition (where its body lives). One epoch read covers both.
 
 1. `trace/last-claude-epoch` (or `trace/last-epoch` / `trace/epoch`) → read `:event/source`. That's the `{:file :line}` of the `(rf.m/dispatch [...])` call site — i.e. the click handler, sub-handler, or top-level call that queued this event.
-2. `handler/source` for the event-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`) — that's the `(reg-event-* :cart/apply-coupon ...)` definition. See *"Where in the code is this handler?"* for the two paths and their reliability tradeoffs.
+2. `handler/source` for the event-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`) — that's the `(reg-event-* :cart/apply-coupon ...)` definition. See *"Where in the code is this handler?"* for the rf-ysy mechanism.
 
 `:event/source` is `nil` when the event was dispatched via the bare `re-frame.core/dispatch` fn (no macro) or on a re-frame predating rf-hsl. To make it reliable, suggest the user replace `re-frame.core/dispatch` imports with `re-frame.macros/dispatch`:
 

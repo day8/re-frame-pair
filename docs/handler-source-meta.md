@@ -2,11 +2,20 @@
 
 > Why `scripts/handler-source.sh` returns `{:ok? false :reason :no-source-meta}` against shadow-cljs builds, and what (if anything) the operator can do about it.
 
-> **Status (rfp-rsg, v0.2):** Path 3 has shipped — see
-> `re-frame-pair.runtime/reg-event-db` etc. (macros in
-> `scripts/re_frame_pair/runtime.clj`). `handler-source` now consults
-> the registration-macro side-table first, and the response carries
-> `:source :registration-macro` when the opt-in is in use.
+> **Status (rfp-hpu):** Superseded by upstream re-frame rf-ysy
+> (commit `15dfc25` in re-frame). `reg-event-db` / `reg-event-fx` /
+> `reg-event-ctx` / `reg-sub` / `reg-fx` are now defmacros that
+> attach `{:file :line}` to the registered value via `with-meta`;
+> `(meta (registrar/get-handler kind id))` returns the location
+> directly. Path 3 (the rfp-rsg local registration-macro side-table
+> in `scripts/re_frame_pair/runtime.clj` + `-record-source!` +
+> `handler-source-table` atom) has been retired — `handler-source`
+> now reads upstream meta straight through. The opt-in is no longer
+> needed; every `(reg-event-db ...)` site captures meta automatically.
+>
+> **Earlier status (rfp-rsg, v0.2):** Path 3 had shipped as a
+> re-frame-pair-side macro layer. Kept in this doc for historical
+> context — see §3 below — but the implementation is gone.
 
 The `handler/source` op (rfp-r5s C, commit `5a4a447`) reads the metadata that ClojureScript's source-map machinery would attach to a registered handler, and returns `{:file :line :column}` if it's there. Against the live fixture and most real apps it consistently returns the documented graceful-fail:
 
