@@ -88,7 +88,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 
 | Op | Invocation | Notes |
 |---|---|---|
-| `dispatch` | `scripts/dispatch.sh '[:cart/apply-coupon "SPRING25"]'` | Queued by default; `--sync` forces `dispatch-sync` |
+| `dispatch` | `scripts/dispatch.sh '[:cart/apply-coupon "SPRING25"]'` | Queued by default; `--sync` forces `dispatch-sync`; `--stub :http-xhrio` (rf-ge8) substitutes a record-only stub for the named fx in the dispatch and its cascade |
 | `reg-event` / `reg-sub` / `reg-fx` | `scripts/eval-cljs.sh '<full reg-* form>'` | Evaluates the registration form; hot-swap happens immediately. Ephemeral. |
 | `app-db/reset` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/app-db-reset! ...)'` | Logged explicitly so the user sees it. Use sparingly. |
 | `repl/eval` | `scripts/eval-cljs.sh '<arbitrary form>'` | Escape hatch. Prefer structured ops first. |
@@ -397,6 +397,23 @@ Canonical procedure:
 6. `trace/dispatch-and-settle [:foo ...]` → observe the new behaviour.
 7. Compare the two epochs. Repeat until satisfied.
 8. If the change was REPL-only and the user wants to keep it, *commit via source edit* — REPL changes are lost on full page reload.
+
+**Side-effecting handlers — stub at the dispatch site.** When step 1 / step 6 would fire `:http-xhrio`, navigation, local-storage etc. that you don't want to actually run during a probe, pass `--stub <fx-id>` to `dispatch.sh` (one flag per fx to substitute):
+
+```
+scripts/dispatch.sh --trace --stub :http-xhrio --stub :navigate '[:user/login {...}]'
+```
+
+Each named fx is replaced with a record-only stub for that single dispatch (and its cascade — children queued via `:fx [:dispatch ...]` inherit the substitution; rf-ge8). The captured effect values land in the session log:
+
+```
+scripts/eval-cljs.sh '(re-frame-pair.runtime/stubbed-effects-since 0)'
+;; → {:ok? true :entries [{:fx-id :http-xhrio :value {...} :ts ...}] :now ...}
+```
+
+The epoch returned by `--trace` includes `:stubbed-fx-ids` so you can verify which substitutions applied. No global state to restore — the override is event-meta, expires when the cascade finishes.
+
+When you need a stub fn that does something other than record-and-drop (e.g. deterministic on-success callback), call `(re-frame-pair.runtime/dispatch-with! [:ev] {:http-xhrio (fn [req] ...)})` directly via `eval-cljs.sh` — fns can't round-trip the bash CLI.
 
 ### "Narrate the next N events"
 

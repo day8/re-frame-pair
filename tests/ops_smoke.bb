@@ -185,5 +185,46 @@
     (is (= :app (#'ops/build-id-from-args ["[:event/foo]" "--build=:app" "--sync"])))
     (is (= :app (#'ops/build-id-from-args ["--sync" "--build=app" "[:foo]"])))))
 
+;; ---------------------------------------------------------------------------
+;; rfp-zml: --stub flag parsing for dispatch-with bridge
+;; ---------------------------------------------------------------------------
+
+(deftest collect-flag-values-multiple
+  (testing "every value following an exact `--stub` token comes back"
+    (is (= [":http-xhrio" ":navigate"]
+           (#'ops/collect-flag-values
+            ["--stub" ":http-xhrio" "--stub" ":navigate" "[:ev]"]
+            "--stub")))))
+
+(deftest collect-flag-values-empty
+  (testing "no flags present → empty vec"
+    (is (= [] (#'ops/collect-flag-values ["[:ev]" "--trace"] "--stub")))))
+
+(deftest collect-flag-values-trailing-bare-flag
+  (testing "trailing `--stub` with no following value is silently dropped
+            (forgiving — surfaces nothing rather than crashing on
+             malformed input)"
+    (is (= [":http-xhrio"]
+           (#'ops/collect-flag-values
+            ["--stub" ":http-xhrio" "--stub"]
+            "--stub")))))
+
+(deftest parse-stub-fx-ids-strips-leading-colon
+  (testing "operator-typed `--stub :http-xhrio` and `--stub http-xhrio`
+            both yield the keyword :http-xhrio (matches build-id-from-args
+            keyword normalisation)"
+    (is (= [:http-xhrio :navigate]
+           (#'ops/parse-stub-fx-ids
+            ["--stub" ":http-xhrio" "--stub" "navigate" "[:ev]"])))))
+
+(deftest parse-stub-fx-ids-namespaced
+  (testing "namespaced fx-ids parse to namespaced keywords"
+    (is (= [:user/login-fx]
+           (#'ops/parse-stub-fx-ids ["--stub" ":user/login-fx"])))))
+
+(deftest parse-stub-fx-ids-empty
+  (testing "no --stub flags → empty vec"
+    (is (= [] (#'ops/parse-stub-fx-ids ["[:ev]" "--trace"])))))
+
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))

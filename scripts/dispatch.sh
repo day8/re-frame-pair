@@ -7,6 +7,12 @@
 # adaptive quiet-period wait for the full :fx [:dispatch ...] cascade
 # + return root and cascaded epochs. Falls back to dispatch-sync +
 # fixed sleep + collect-after-dispatch when re-frame predates rf-4mr.
+# --stub <fx-id> (rf-ge8 / dispatch-with) substitutes a record-only
+# stub for the named fx (and any cascade) so HTTP / navigation /
+# local-storage etc. don't actually fire — the captured effect values
+# land in the session log readable via
+# `(re-frame-pair.runtime/stubbed-effects-since <ts>)`. Repeatable for
+# multiple fx.
 #
 # Usage:
 #   scripts/dispatch.sh '[:cart/apply-coupon "SPRING25"]'

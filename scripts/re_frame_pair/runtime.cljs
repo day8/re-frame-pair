@@ -1459,6 +1459,11 @@
          :dispatch-id dispatch-id
          :hint        "10x has no match carrying this :dispatch-id. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."}))))
 
+;; Forward-declared — defined in the dispatch-with bridge below.
+;; dispatch-and-settle!'s :stub-fx-ids opt builds an overrides map
+;; via this helper before forwarding to re-frame.core/dispatch-and-settle.
+(declare build-stub-overrides)
+
 ;; ---------------------------------------------------------------------------
 ;; dispatch-and-settle! — rf-4mr bridge for the bash shim
 ;; ---------------------------------------------------------------------------
@@ -1560,18 +1565,37 @@
 
    `opts` forwards to re-frame.core/dispatch-and-settle. Defaults:
    :timeout-ms 5000, :settle-window-ms 100, :include-cascaded? true.
+   Two extra opts (consumed here, stripped before forwarding):
+     :stub-fx-ids — vec of fx-id keywords; record-only stubs swap in
+                    via `build-stub-overrides` for the duration of
+                    the cascade. Stubbed effect values land in
+                    `stub-effect-log`.
+     :overrides   — explicit `{fx-id stub-fn}` map (rf-ge8). Wins
+                    over `:stub-fx-ids` if both supplied. Use this
+                    when you need a real stub fn rather than the
+                    record-only behavior.
 
    Returns synchronously:
-     {:ok? true :handle <uuid> :event ev :dispatch-id <id> :pending? true}
+     {:ok? true :handle <uuid> :event ev :dispatch-id <id> :pending? true
+      :stubbed-fx-ids [...]?}
      {:ok? false :reason :dispatch-and-settle-unavailable :hint ...}
      {:ok? false :reason :handler-threw :error ... :event ev}"
   ([event-v] (dispatch-and-settle! event-v {}))
   ([event-v opts]
    (if-let [d-and-s (dispatch-and-settle-fn)]
-     (let [handle (str (random-uuid))]
+     (let [handle      (str (random-uuid))
+           overrides   (or (:overrides opts)
+                           (when-let [ids (seq (:stub-fx-ids opts))]
+                             (build-stub-overrides ids)))
+           settle-opts (dissoc opts :overrides :stub-fx-ids)
+           ;; rf-ge8 reads :re-frame/fx-overrides off event meta inside
+           ;; do-fx-after; meta survives (dispatch-sync event) so the
+           ;; cascade picks it up.
+           event-meta  (cond-> event-v
+                         overrides (vary-meta assoc :re-frame/fx-overrides overrides))]
        (reset! current-who :claude)
        (try
-         (let [p                (d-and-s event-v opts)
+         (let [p                (d-and-s event-meta settle-opts)
                root-dispatch-id (recent-dispatch-id)]
            (when root-dispatch-id
              (swap! claude-dispatch-ids conj root-dispatch-id))
@@ -1603,11 +1627,12 @@
                                  :reason   :promise-rejected
                                  :error    (str err)
                                  :event    event-v}))))
-           {:ok?         true
-            :handle      handle
-            :event       event-v
-            :dispatch-id root-dispatch-id
-            :pending?    true})
+           (cond-> {:ok?         true
+                    :handle      handle
+                    :event       event-v
+                    :dispatch-id root-dispatch-id
+                    :pending?    true}
+             overrides (assoc :stubbed-fx-ids (vec (sort (keys overrides))))))
          (catch :default e
            (swap! settle-pending dissoc handle)
            (let [stack (try (.-stack e) (catch :default _ ""))]
@@ -1651,6 +1676,178 @@
           entry)
       {:settled? false :pending? true :handle handle})
     {:settled? false :reason :unknown-handle :handle handle}))
+
+;; ---------------------------------------------------------------------------
+;; dispatch-with bridge — rf-ge8 (fx-overrides) for safe iteration
+;; ---------------------------------------------------------------------------
+;;
+;; re-frame core's `dispatch-with` (rf-ge8, commit 2651a30) tags an
+;; event with `:re-frame/fx-overrides` meta; `do-fx-after` reads the
+;; meta and binds `*current-overrides*` for that event's fx execution
+;; (and its synchronous cascade — `tag-with-fx-overrides` propagates
+;; the meta to children queued via `:fx [:dispatch ...]`).
+;;
+;; Why this matters for the shim: the experiment-loop recipe in
+;; SKILL.md leans on `undo-step-back` to rewind app-db between probe
+;; dispatches. That works for db state but does nothing for already-
+;; fired side effects (HTTP request landed, URL changed, local-storage
+;; mutated). With dispatch-with the agent stubs the side-effecting fx
+;; for the duration of a single probe — no global state to restore.
+;;
+;; The bash shim drives this via `--stub :http-xhrio` (or several
+;; `--stub` flags). Each named fx-id gets `record-only-stub` slotted
+;; in: the captured effect value lands in `stub-effect-log`, the
+;; original handler doesn't fire. `stubbed-effects-since` reads the
+;; log incrementally; `clear-stubbed-effects!` resets it.
+;;
+;; Custom (non-record-only) stubs that need real fn bodies must use
+;; `dispatch-with!` directly via `eval-cljs.sh` — fns can't round-trip
+;; cljs-eval, so the CLI shorthand is record-only by design.
+
+(defn- dispatch-with-fn
+  "JS-interop accessor for `re-frame.core/dispatch-with` (rf-ge8,
+   commit 2651a30). Returns nil when re-frame predates rf-ge8.
+   Same goog.global / aget-path strategy as dispatch-and-settle-fn."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "core" "dispatch_with"])))
+
+(defn- dispatch-sync-with-fn
+  "JS-interop accessor for `re-frame.core/dispatch-sync-with` (rf-ge8)."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "core" "dispatch_sync_with"])))
+
+(defonce stub-effect-log
+  ;; Vec of {:fx-id kw :value any :ts ms :who kw} entries — every
+  ;; record-only-stub invocation lands here. Exposed (no ^:private)
+  ;; so the runtime-test build can reset / inspect without warnings.
+  (atom []))
+
+(defn record-only-stub
+  "Build a record-only stub for `fx-id`: a 1-arg fn that captures its
+   value into `stub-effect-log` and returns nil. The original fx's
+   side-effect (HTTP, navigation, etc.) is suppressed.
+
+   Public so callers building a custom dispatch-with override map can
+   reuse the same logging strategy for some fx-ids while supplying a
+   real stub for others."
+  [fx-id]
+  (fn [value]
+    (swap! stub-effect-log conj
+           {:fx-id fx-id
+            :value value
+            :ts    (js/Date.now)
+            :who   @current-who})
+    nil))
+
+(defn build-stub-overrides
+  "Convert a vec of fx-id keywords into a `{fx-id record-only-stub}`
+   map suitable for `dispatch-with`. Public for tests."
+  [fx-ids]
+  (into {} (for [k fx-ids] [k (record-only-stub k)])))
+
+(defn stubbed-effects-since
+  "Slice of `stub-effect-log` with `:ts >= since-ts`. Returns
+   `{:ok? true :entries [...] :now <ms>}`. Pass back the `:now` from
+   a previous call as the next `since-ts` for incremental tailing.
+
+   Single-arity reads the entire log."
+  ([] (stubbed-effects-since 0))
+  ([since-ts]
+   {:ok?     true
+    :entries (vec (filter #(>= (:ts %) since-ts) @stub-effect-log))
+    :now     (js/Date.now)}))
+
+(defn clear-stubbed-effects!
+  "Reset the stub-effect-log to empty. `{:ok? true}`."
+  []
+  (reset! stub-effect-log [])
+  {:ok? true})
+
+(defn dispatch-with!
+  "Wrapper around `re-frame.core/dispatch-with` (rf-ge8). Queued
+   dispatch with selected fx handlers temporarily substituted for
+   the duration of THIS event and any synchronous `:fx [:dispatch ...]`
+   cascade.
+
+   `current-who` flips :claude for the synchronous portion; the
+   handler runs out of band, so handler-side console output tags
+   :app (mirror of `tagged-dispatch!`).
+
+   `overrides` is a `{fx-id stub-fn}` map. Use `build-stub-overrides`
+   for record-only stubs.
+
+   :reason :dispatch-with-unavailable when re-frame predates rf-ge8."
+  [event-v overrides]
+  (if-let [d-with (dispatch-with-fn)]
+    (do
+      (reset! current-who :claude)
+      (try
+        (d-with event-v overrides)
+        {:ok?            true
+         :queued?        true
+         :event          event-v
+         :stubbed-fx-ids (vec (sort (keys overrides)))}
+        (finally (reset! current-who :app))))
+    {:ok?    false
+     :reason :dispatch-with-unavailable
+     :hint   "re-frame predates rf-ge8 (commit 2651a30) — upgrade or use a global stub."}))
+
+(defn dispatch-sync-with!
+  "Wrapper around `re-frame.core/dispatch-sync-with` (rf-ge8). Same
+   override semantics as `dispatch-with!` but synchronous: captures
+   the auto-generated `:dispatch-id` from the trace stream so callers
+   can correlate the eventual epoch (matches `tagged-dispatch-sync!`).
+
+   Handler errors are caught and surfaced as
+   `{:ok? false :reason :handler-threw ...}` (same shape as
+   tagged-dispatch-sync!), and a `:handler-error`-tagged entry is
+   appended to `console-log`."
+  [event-v overrides]
+  (if-let [d-sync-with (dispatch-sync-with-fn)]
+    (do
+      (reset! current-who :claude)
+      (try
+        (try
+          (d-sync-with event-v overrides)
+          (let [dispatch-id (recent-dispatch-id)]
+            (when dispatch-id (swap! claude-dispatch-ids conj dispatch-id))
+            {:ok?            true
+             :event          event-v
+             :dispatch-id    dispatch-id
+             :epoch-id       nil
+             :stubbed-fx-ids (vec (sort (keys overrides)))})
+          (catch :default e
+            (let [stack (try (.-stack e) (catch :default _ ""))]
+              (append-console-entry!
+               :error
+               [(str "[handler-threw] " (or (ex-message e) (str e)))
+                (str event-v)]
+               stack
+               :handler-error))
+            {:ok?        false
+             :reason     :handler-threw
+             :event      event-v
+             :error      (or (ex-message e) (str e))
+             :error-data (when-let [d (ex-data e)] (pr-str d))}))
+        (finally (reset! current-who :app))))
+    {:ok?    false
+     :reason :dispatch-sync-with-unavailable
+     :hint   "re-frame predates rf-ge8 (commit 2651a30) — upgrade or use a global stub."}))
+
+(defn dispatch-with-stubs!
+  "Convenience: `dispatch-with!` with record-only stubs for each fx-id
+   in `fx-ids`. The bash shim's `--stub <fx-id>` flag drives this —
+   passing keywords across cljs-eval is straightforward where passing
+   fns is not."
+  [event-v fx-ids]
+  (dispatch-with! event-v (build-stub-overrides fx-ids)))
+
+(defn dispatch-sync-with-stubs!
+  "`dispatch-sync-with!` counterpart of `dispatch-with-stubs!`."
+  [event-v fx-ids]
+  (dispatch-sync-with! event-v (build-stub-overrides fx-ids)))
 
 ;; ---------------------------------------------------------------------------
 ;; re-com awareness

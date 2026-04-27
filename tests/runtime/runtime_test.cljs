@@ -636,6 +636,115 @@
       (is (string? (:hint r))))))
 
 ;; -----------------------------------------------------------------------------
+;; rfp-zml / rf-ge8 — dispatch-with bridge for safe iteration with
+;; record-only stubs. The runtime-test build pins re-frame 1.4.5 so
+;; the real dispatch-with! path can't run; we cover the helpers and
+;; the feature-detect fallback.
+;; -----------------------------------------------------------------------------
+
+(deftest record-only-stub-captures-and-returns-nil
+  (testing "the stub appends a log entry and returns nil — the
+            original fx's side effect is suppressed"
+    (reset! rt/stub-effect-log [])
+    (reset! rt/current-who :app)
+    (let [stub (rt/record-only-stub :http-xhrio)
+          ret  (stub {:method :post :uri "/login"})]
+      (is (nil? ret))
+      (is (= 1 (count @rt/stub-effect-log)))
+      (let [entry (first @rt/stub-effect-log)]
+        (is (= :http-xhrio (:fx-id entry)))
+        (is (= {:method :post :uri "/login"} (:value entry)))
+        (is (number? (:ts entry)))
+        (is (= :app (:who entry))))))
+
+  (testing "stub closes over fx-id — distinct ids show in the log"
+    (reset! rt/stub-effect-log [])
+    ((rt/record-only-stub :navigate) {:to "/dashboard"})
+    ((rt/record-only-stub :http-xhrio) {:method :get :uri "/me"})
+    (is (= [:navigate :http-xhrio] (mapv :fx-id @rt/stub-effect-log))))
+
+  (testing ":who is read at invocation time, not at construction time
+            (so a stub built once and called repeatedly tags whatever
+             current-who is when the stub fires)"
+    (reset! rt/stub-effect-log [])
+    (let [stub (rt/record-only-stub :foo)]
+      (reset! rt/current-who :claude)
+      (stub :v1)
+      (reset! rt/current-who :app)
+      (stub :v2))
+    (is (= [:claude :app] (mapv :who @rt/stub-effect-log)))))
+
+(deftest build-stub-overrides-shape
+  (testing "produces {fx-id stub-fn} with one entry per fx-id"
+    (let [m (rt/build-stub-overrides [:http-xhrio :navigate])]
+      (is (= #{:http-xhrio :navigate} (set (keys m))))
+      (is (every? fn? (vals m)))))
+
+  (testing "empty input → empty map"
+    (is (= {} (rt/build-stub-overrides []))))
+
+  (testing "each stub records into the same log when invoked"
+    (reset! rt/stub-effect-log [])
+    (reset! rt/current-who :claude)
+    (let [m (rt/build-stub-overrides [:a :b])]
+      ((:a m) "hi")
+      ((:b m) {:k 1}))
+    (is (= #{:a :b} (set (map :fx-id @rt/stub-effect-log))))))
+
+(deftest stubbed-effects-since-filters-and-tails
+  (testing "no-arg form returns everything"
+    (reset! rt/stub-effect-log
+            [{:fx-id :a :value 1 :ts 100 :who :claude}
+             {:fx-id :b :value 2 :ts 200 :who :claude}])
+    (let [r (rt/stubbed-effects-since)]
+      (is (true? (:ok? r)))
+      (is (= 2 (count (:entries r))))
+      (is (number? (:now r)))))
+
+  (testing "since-ts filter keeps only entries with :ts >= since-ts
+            (a tailing convention — pass back :now from the previous
+             call to read only what landed since)"
+    (reset! rt/stub-effect-log
+            [{:fx-id :a :value 1 :ts 100 :who :claude}
+             {:fx-id :b :value 2 :ts 200 :who :claude}
+             {:fx-id :c :value 3 :ts 300 :who :claude}])
+    (let [r (rt/stubbed-effects-since 200)]
+      (is (= [:b :c] (mapv :fx-id (:entries r))))))
+
+  (testing "since-ts past the latest entry returns empty"
+    (reset! rt/stub-effect-log
+            [{:fx-id :a :value 1 :ts 100 :who :claude}])
+    (is (empty? (:entries (rt/stubbed-effects-since 999))))))
+
+(deftest clear-stubbed-effects-empties-the-log
+  (reset! rt/stub-effect-log
+          [{:fx-id :a :value 1 :ts 100 :who :claude}])
+  (is (= {:ok? true} (rt/clear-stubbed-effects!)))
+  (is (empty? @rt/stub-effect-log)))
+
+(deftest dispatch-with-bang-fallback-without-rf-ge8
+  (testing "runtime-test (re-frame 1.4.5) → :dispatch-with-unavailable"
+    (let [r (rt/dispatch-with! [:test/foo] {:http-xhrio (fn [_] nil)})]
+      (is (false? (:ok? r)))
+      (is (= :dispatch-with-unavailable (:reason r)))
+      (is (string? (:hint r)))))
+
+  (testing "dispatch-sync-with! same fallback shape"
+    (let [r (rt/dispatch-sync-with! [:test/foo] {:http-xhrio (fn [_] nil)})]
+      (is (false? (:ok? r)))
+      (is (= :dispatch-sync-with-unavailable (:reason r))))))
+
+(deftest dispatch-with-stubs-bang-builds-overrides
+  (testing "dispatch-with-stubs! threads through dispatch-with! — same
+            fallback path under runtime-test (no rf-ge8)"
+    (let [r (rt/dispatch-with-stubs! [:test/foo] [:http-xhrio :navigate])]
+      (is (= :dispatch-with-unavailable (:reason r)))))
+
+  (testing "dispatch-sync-with-stubs! mirrors"
+    (let [r (rt/dispatch-sync-with-stubs! [:test/foo] [:http-xhrio])]
+      (is (= :dispatch-sync-with-unavailable (:reason r))))))
+
+;; -----------------------------------------------------------------------------
 ;; Time-travel ops — sentinel checks. Without a connected browser
 ;; runtime there is no 10x to dispatch into, so we expect the
 ;; ten-x-missing failure. Real time-travel is exercised by

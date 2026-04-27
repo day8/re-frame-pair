@@ -650,6 +650,31 @@
   (let [{events true others false} (group-by #(str/starts-with? % "[") args)]
     [(first events) (concat others (rest events))]))
 
+(defn- collect-flag-values
+  "Return every value following an exact `flag` token. e.g.
+   `(collect-flag-values [\"--stub\" \":http-xhrio\" \"--stub\" \":navigate\"]
+                          \"--stub\")` → `[\":http-xhrio\" \":navigate\"]`.
+
+   Skips trailing `--stub` with no value (forgiving — surfaces nothing
+   rather than crashing). Used for repeatable flags like `--stub`."
+  [args flag]
+  (loop [[a & more] args, acc []]
+    (cond
+      (nil? a)   acc
+      (= a flag) (if-let [v (first more)]
+                   (recur (rest more) (conj acc v))
+                   acc)
+      :else      (recur more acc))))
+
+(defn- parse-stub-fx-ids
+  "Parse `--stub :foo --stub :bar` (or `--stub foo`) into `[:foo :bar]`."
+  [args]
+  (mapv (fn [s]
+          (if (str/starts-with? s ":")
+            (keyword (subs s 1))
+            (keyword s)))
+        (collect-flag-values args "--stub")))
+
 ;; ---------------------------------------------------------------------------
 ;; Tunable timings — keep them named so it's obvious where each comes from
 ;; ---------------------------------------------------------------------------
@@ -751,6 +776,7 @@
     (let [build-id    (build-id-from-args rest-args)
           sync?       (has-flag? rest-args "--sync")
           trace?      (has-flag? rest-args "--trace")
+          stub-fx-ids (parse-stub-fx-ids rest-args)
           reinjected? (ensure-injected! build-id)
           tag-reinj   (fn [m] (cond-> m reinjected? (assoc :reinjected? true)))]
       (try
@@ -760,6 +786,8 @@
           ;; `:fx [:dispatch ...]` children, not just the root epoch.
           ;; The Promise it returns can't round-trip cljs-eval, so the
           ;; runtime stores the resolution behind a handle and we poll.
+          ;; --stub <fx-id> (rf-ge8) routes through the same path with
+          ;; record-only stubs in dispatch-and-settle!'s :stub-fx-ids opt.
           ;;
           ;; Falls back to the legacy `tagged-dispatch-sync!` +
           ;; fixed-sleep + `collect-after-dispatch` flow when re-frame
@@ -767,9 +795,13 @@
           ;; Once every fixture is on a re-frame with dispatch-and-settle,
           ;; the legacy branch can go.
           trace?
-          (let [start (cljs-eval-value
+          (let [opts-form (if (seq stub-fx-ids)
+                            (pr-str {:stub-fx-ids stub-fx-ids})
+                            "{}")
+                start (cljs-eval-value
                         build-id
-                        (format "(re-frame-pair.runtime/dispatch-and-settle! %s)" event-str))]
+                        (format "(re-frame-pair.runtime/dispatch-and-settle! %s %s)"
+                                event-str opts-form))]
             (cond
               (and (map? start) (:ok? start) (:handle start))
               (let [resolved (await-settle-loop build-id (:handle start))]
@@ -796,15 +828,27 @@
               :else
               (emit (tag-reinj (merge {:mode :trace :epoch nil} start)))))
 
+          ;; --sync: dispatch-sync. With --stub, route through
+          ;; dispatch-sync-with-stubs! (rf-ge8) for the same
+          ;; effect-substitution semantics.
           sync?
           (emit (tag-reinj (merge {:mode :sync}
                                   (cljs-eval-value build-id
-                                    (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)" event-str)))))
+                                    (if (seq stub-fx-ids)
+                                      (format "(re-frame-pair.runtime/dispatch-sync-with-stubs! %s %s)"
+                                              event-str (pr-str stub-fx-ids))
+                                      (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)"
+                                              event-str))))))
 
+          ;; queued: rf/dispatch. With --stub, dispatch-with-stubs!.
           :else
           (emit (tag-reinj (merge {:mode :queued}
                                   (cljs-eval-value build-id
-                                    (format "(re-frame-pair.runtime/tagged-dispatch! %s)" event-str))))))
+                                    (if (seq stub-fx-ids)
+                                      (format "(re-frame-pair.runtime/dispatch-with-stubs! %s %s)"
+                                              event-str (pr-str stub-fx-ids))
+                                      (format "(re-frame-pair.runtime/tagged-dispatch! %s)"
+                                              event-str)))))))
         (catch Exception e
           (emit (tag-reinj {:ok? false :reason :dispatch-failed :message (.getMessage e)
                             :ex-data (ex-data e)})))))))
