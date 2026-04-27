@@ -4,9 +4,9 @@ Four surfaces need coverage at different fidelities. See `docs/initial-spec.md` 
 
 ## 1. Runtime unit tests (`tests/runtime/`)
 
-**Status: wired to shadow-cljs `:node-test` build. 37 deftests / 227 assertions / 0 failures. CI runs them per push.**
+**Status: wired to shadow-cljs `:node-test` build. 67 deftests / 351 assertions / 0 failures. CI runs them per push.**
 
-`runtime_test.cljs` covers pure fns in `scripts/re_frame_pair/runtime.cljs` — the re-com classifier (broadened to current re-com layout), the `:src` parser (file:line shape per `re-com.debug.cljs`), the predicate matcher (`epoch-matches?`), the cache-key extractor (`extract-query-vs`), the session-sentinel shape, the `coerce-epoch` translation against synthetic 10x match records (including the `:debux/code` surface from `:tags :code`), `version-below?` semver comparison, and the `undo-*` ten-x-missing failure paths. Synthetic-match helpers live in `tests/runtime/fixtures.cljs` — one place to update when 10x's shape changes. They run via shadow-cljs's `:node-test` target — no browser, no live re-frame app.
+`runtime_test.cljs` covers pure fns in `scripts/re_frame_pair/runtime.cljs` — the re-com classifier (broadened to current re-com layout), the `:src` parser (file:line shape per `re-com.debug.cljs`), the predicate matcher (`epoch-matches?`), the cache-key extractor (`extract-query-vs`), the session-sentinel shape, both `coerce-epoch` and `coerce-native-epoch` translations against synthetic 10x match records / `assemble-epochs` output (including the `:debux/code` surface from `:tags :code`, `:event/source` flattening from event-vec meta, and `:subscribe/source` + `:input-query-sources` flattening on `:subs/ran` entries), the native ring buffers (`native-epoch-buffer` / `native-trace-buffer` ingest + drain, `epoch-by-id` / `last-epoch` / `last-claude-epoch` prefer-native-then-fall-back-to-10x), `collect-cascade-from-buffer` parent-chain walk by `:dispatch-id`, `await-settle` state transitions plus the `dispatch-and-settle!` and `dispatch-with-stubs!` fallback paths for re-frame builds predating rf-4mr / rf-ge8, the fx-stubs log helpers (`record-only-stub` / `build-stub-overrides` / `stubbed-effects-since` / `clear-stubbed-effects!`), `subs-ran-from-native-traces` query-v dedupe, `subs-cache-hit-from-native-traces` `:cached?` filtering, the `dbg-macro-available?` probe, `console-tail-since` id/who filters, `tagged-dispatch-sync!` success and handler-error paths (current-who restoration, synthesised error entries), `app-summary` shape including app-db one-level coercion, `handler-source` across kinds (sub / fx / event with chain-meta / `:no-source-meta` fallback / not-registered / empty-meta-map), `version-below?` semver comparison, and the `undo-*` ten-x-missing failure paths. Synthetic-match helpers live in `tests/runtime/fixtures.cljs` — one place to update when 10x's shape changes. They run via shadow-cljs's `:node-test` target — no browser, no live re-frame app.
 
 **To run:**
 
@@ -19,7 +19,7 @@ CI runs the same target on every push (see `.github/workflows/ci.yml`'s `runtime
 
 ## 1b. Babashka-side smoke tests (`tests/ops_smoke.bb`)
 
-**Status: wired. 14 deftests / 30 assertions / 0 failures. CI runs them per push via `npm run test:ops`.**
+**Status: wired. 20 deftests / 36 assertions / 0 failures. CI runs them per push via `npm run test:ops`.**
 
 Closes the gap that `npm test` (CLJS-only) leaves around `scripts/ops.clj`. Two coverage axes:
 
