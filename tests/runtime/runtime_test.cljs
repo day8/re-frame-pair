@@ -213,12 +213,13 @@
       (is (nil? (:debux/code e))))))
 
 (deftest coerce-epoch-surfaces-debux-code-when-present
-  ;; When a fn-traced-wrapped handler runs, debux's
-  ;; send-trace! appends per-form trace entries onto the :code tag of
-  ;; the current trace event (re-frame-debux/src/day8/re_frame/debux/
-  ;; common/util.cljc:132). coerce-epoch should expose that under
-  ;; :debux/code so consumers can spot it without colliding with our
-  ;; own keys. See docs/inspirations-debux.md §3b.
+  ;; When a fn-traced-wrapped handler runs, debux's send-trace! lands
+  ;; per-form trace entries on the :code tag of *current-trace* — which
+  ;; std_interceptors/db-handler->interceptor binds to the inner
+  ;; :event/handler trace at handler-call time. coerce-epoch should
+  ;; reach into match-info, find that :event/handler entry, and surface
+  ;; its :tags :code under the debux-namespaced :debux/code key. See
+  ;; docs/inspirations-debux.md §3b.
   (let [code-payload [{:form '(let [n (* 2 x)] (assoc db :n n))
                        :result {:n 10}
                        :indent-level 0
@@ -226,10 +227,13 @@
                        :num-seen 0}
                       {:form '(* 2 x) :result 10
                        :indent-level 1 :syntax-order 1 :num-seen 0}]
-        ;; Synthetic match with the :code tag populated alongside
-        ;; :event etc. Mirror the exact shape debux emits.
+        ;; Synthetic match with an :event/handler trace appended to
+        ;; match-info, carrying :code on its tags — mirrors what real
+        ;; 10x match-info looks like for a fn-traced handler run.
         match (-> fixtures/synthetic-match
-                  (assoc-in [:match-info 0 :tags :code] code-payload))
+                  (update :match-info conj
+                          {:id 105 :op-type :event/handler
+                           :tags {:code code-payload}}))
         e     (rt/coerce-epoch match fixtures/basic-context)]
     (testing ":debux/code surfaces verbatim when present"
       (is (= code-payload (:debux/code e))))
@@ -243,9 +247,33 @@
   ;; body). An empty vec should pass through unchanged — distinct from
   ;; nil so consumers can tell "wrapped but silent" from "not wrapped".
   (let [match (-> fixtures/synthetic-match
-                  (assoc-in [:match-info 0 :tags :code] []))
+                  (update :match-info conj
+                          {:id 105 :op-type :event/handler
+                           :tags {:code []}}))
         e     (rt/coerce-epoch match fixtures/basic-context)]
     (is (= [] (:debux/code e)))))
+
+(deftest debux-code-parity-across-coerce-paths
+  (testing "coerce-epoch (legacy 10x) and coerce-native-epoch (rf-ybv
+            native buffer) surface :debux/code identically for
+            equivalent input — both must read from the inner
+            :event/handler trace's :code tag, since debux's merge-trace!
+            lands on *current-trace* (the :event/handler with-trace
+            boundary). Locks both paths against drift on the
+            event/handler-vs-event trace lookup."
+    (let [code-payload [{:form '(inc x) :result 1
+                         :indent-level 0 :syntax-order 0 :num-seen 0}]
+          legacy-match (-> fixtures/synthetic-match
+                           (update :match-info conj
+                                   {:id 105 :op-type :event/handler
+                                    :tags {:code code-payload}}))
+          native-raw   (assoc-in fixtures/synthetic-native-epoch
+                                 [:event-handler :tags :code] code-payload)
+          legacy-e     (rt/coerce-epoch legacy-match fixtures/basic-context)
+          native-e     (rt/coerce-native-epoch native-raw fixtures/native-context)]
+      (is (= code-payload (:debux/code legacy-e)))
+      (is (= code-payload (:debux/code native-e)))
+      (is (= (:debux/code legacy-e) (:debux/code native-e))))))
 
 (deftest coerce-epoch-surfaces-event-source-when-present
   ;; rf-hsl: re-frame.macros/dispatch attaches {:re-frame/source

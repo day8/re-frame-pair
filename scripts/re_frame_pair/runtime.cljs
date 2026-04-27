@@ -687,20 +687,24 @@
    the user has wrapped a handler / sub / fx with
    `day8.re-frame.tracing/fn-traced` (or `defn-traced`). debux's
    `send-trace!` writes through `re-frame.trace/merge-trace!` into the
-   `:code` tag of the current trace event (re-frame-debux/src/day8/
-   re_frame/debux/common/util.cljc:132); we just expose that here under
-   a debux-namespaced key so consumers can spot it without colliding
-   with our own keys. Absent → `nil`. See docs/inspirations-debux.md
-   §3b for the bridge rationale and §3.0 for the on-demand-wrap recipe."
+   `:code` tag of `*current-trace*` (re-frame-debux/src/day8/re_frame/
+   debux/common/util.cljc:132). re-frame's `db-handler->interceptor`
+   wraps user handlers in `(trace/with-trace {:op-type :event/handler})`,
+   so `*current-trace*` at the moment debux emits is the inner
+   `:event/handler` trace — not the outer `:event` trace. Read it from
+   the `:event/handler`-typed entry in `:match-info`; absent → `nil`.
+   See docs/inspirations-debux.md §3b for the bridge rationale and
+   §3.0 for the on-demand-wrap recipe."
   ([raw]
    (coerce-epoch raw {:all-traces  (read-10x-all-traces)
                       :all-matches (when (ten-x-app-db-ratom)
                                      (read-10x-epochs))}))
   ([raw {:keys [all-traces all-matches]}]
    (when raw
-     (let [event-trace (find-trace raw :event)
-           tags        (:tags event-trace)
-           render-src  (resolve-render-source raw all-matches)]
+     (let [event-trace   (find-trace raw :event)
+           tags          (:tags event-trace)
+           handler-trace (find-trace raw :event/handler)
+           render-src    (resolve-render-source raw all-matches)]
        {:id                (match-id raw)
         :t                 (:start event-trace)
         :time-ms           (:duration event-trace)
@@ -720,7 +724,11 @@
         :renders           (when render-src (renders-from-traces render-src all-traces))
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
-        :debux/code        (:code tags)
+        ;; Read from the inner :event/handler trace, not the outer
+        ;; :event trace: debux's merge-trace! lands on *current-trace*,
+        ;; which std_interceptors/db-handler->interceptor binds to the
+        ;; :event/handler with-trace boundary at handler-call time.
+        :debux/code        (-> handler-trace :tags :code)
         ;; Dispatch-site source (file/line) lifted from the event
         ;; vector's meta. Populated when the event was dispatched via
         ;; re-frame.macros/dispatch[-sync] (rf-hsl); nil for events
