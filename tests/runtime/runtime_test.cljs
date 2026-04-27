@@ -273,6 +273,258 @@
       (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))))
 
 ;; -----------------------------------------------------------------------------
+;; coerce-native-epoch — translate a register-epoch-cb-delivered native
+;; epoch (re-frame.trace/assemble-epochs output) into the §4.3a shape.
+;; rfp-zl8 / rf-ybv. Pure fn, takes context explicitly.
+;; -----------------------------------------------------------------------------
+
+(defn- reset-native-buffers!
+  "Reset native-epoch-buffer + native-trace-buffer + cb-installed
+   guards to their defonce starting state. Tests do this before each
+   scenario so order-of-test doesn't carry state."
+  []
+  (reset! rt/native-epoch-buffer {:entries [] :max-size 50})
+  (reset! rt/native-trace-buffer {:entries [] :max-size 5000}))
+
+(deftest coerce-native-epoch-shape
+  (let [e (rt/coerce-native-epoch fixtures/synthetic-native-epoch
+                                  fixtures/native-context)]
+    (testing "id is the native epoch's :id (the :event trace's id)"
+      (is (= 100 (:id e))))
+    (testing "timestamps from the native epoch"
+      (is (= 1700000000000 (:t e)))
+      (is (= 12.5          (:time-ms e))))
+    (testing "event vector pulled through"
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e))))
+    (testing "coeffects + effects pulled through"
+      (is (= {:db {:cart {:items []}}} (:coeffects e)))
+      (is (map? (:effects e))))
+    (testing "interceptor chain — :id keywords only (matches legacy
+              coerce-epoch's projection so consumers don't have to
+              branch on which epoch source produced the record)"
+      (is (= [:coeffects :db-handler] (:interceptor-chain e))))
+    (testing "app-db/diff is computed via clojure.data/diff"
+      (is (= {:cart {:coupon "SPRING25"}} (get-in e [:app-db/diff :only-after])))
+      (is (nil? (get-in e [:app-db/diff :only-before]))))
+    (testing "subs/ran is sourced from :sub/run traces in the id range
+              (NOT the native epoch's :sub-runs vec, which is empty in
+              real code because most :sub/run traces fire from render-
+              time derefs with :child-of nil)"
+      (is (= [{:query-v [:cart/total] :input-query-vs [[:cart/items]]}]
+             (:subs/ran e))))
+    (testing "subs/cache-hit is sourced from :sub/create traces with
+              :cached? true (re-frame.subs's own signal) — closer to
+              §4.3a's 'subs dereffed but cached' than 10x's :unchanged?
+              heuristic"
+      (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
+    (testing "renders are bounded by the next epoch's id (200) — the
+              outside-of-range render at id 200 doesn't appear here"
+      (is (= 2 (count (:renders e))))
+      (let [[btn panel] (:renders e)]
+        (is (= "re-com.buttons.button" (:component btn)))
+        (is (true? (:re-com? btn)))
+        (is (= :input (:re-com/category btn)))
+        (is (= "app.views.cart-panel" (:component panel)))
+        (is (nil? (:re-com? panel)))))
+    (testing "effects/fired flattens :fx and keeps top-level effects"
+      (let [fx-ids (set (map :fx-id (:effects/fired e)))]
+        (is (contains? fx-ids :db))
+        (is (contains? fx-ids :dispatch))
+        (is (contains? fx-ids :http-xhrio))))
+    (testing ":dispatch-id and :parent-dispatch-id pulled through"
+      (is (= "11111111-1111-1111-1111-111111111111" (:dispatch-id e)))
+      (is (nil? (:parent-dispatch-id e))))
+    (testing ":debux/code is nil when :event-handler trace has no :code tag"
+      (is (nil? (:debux/code e))))))
+
+(deftest coerce-native-epoch-handles-nil
+  (testing "nil input -> nil"
+    (is (nil? (rt/coerce-native-epoch nil)))))
+
+(deftest coerce-native-epoch-debux-code-from-event-handler
+  (testing ":debux/code reads from :event-handler trace's :tags
+            (where merge-trace! lands when fn-traced-wrapped handlers
+            run inside the :event/handler with-trace boundary)"
+    (let [code-payload [{:form '(let [n (* 2 x)] (assoc db :n n))
+                         :result {:n 10} :indent-level 0
+                         :syntax-order 0 :num-seen 0}]
+          raw (assoc-in fixtures/synthetic-native-epoch
+                        [:event-handler :tags :code] code-payload)
+          e   (rt/coerce-native-epoch raw fixtures/native-context)]
+      (is (= code-payload (:debux/code e))))))
+
+(deftest coerce-native-epoch-latest-epoch-unbounded
+  (testing "the latest epoch in the buffer has no upper-id bound — its
+            id range runs to the end of the trace stream, so a render at
+            id 200 IS picked up when no successor epoch caps the range"
+    (let [ctx {:traces     fixtures/synthetic-native-traces
+               :all-epochs [fixtures/synthetic-native-epoch]}    ; no successor
+          e   (rt/coerce-native-epoch fixtures/synthetic-native-epoch ctx)]
+      (is (= 3 (count (:renders e)))
+          "all three :render traces fall in the unbounded id range"))))
+
+(deftest subs-ran-from-native-traces-dedupes-by-query-v
+  (testing "multiple :sub/run for the same query-v collapse to the most
+            recent (input-deps don't change between runs of the same
+            sub, so picking latest is correct)"
+    (let [traces [{:id 1 :op-type :sub/run :tags {:query-v [:foo]
+                                                  :input-query-vs [[:bar]]}}
+                  {:id 2 :op-type :sub/run :tags {:query-v [:foo]
+                                                  :input-query-vs [[:bar]]}}
+                  {:id 3 :op-type :sub/run :tags {:query-v [:baz]
+                                                  :input-query-vs []}}]
+          ;; Use a synthetic epoch covering id range [1..10]; coerce
+          ;; through coerce-native-epoch to exercise the full path.
+          raw   {:id 1 :event [:dummy] :start 0 :end 10 :duration 10
+                 :app-db/before {} :app-db/after {} :coeffects {} :effects {}
+                 :interceptors []}
+          ctx   {:traces traces :all-epochs [raw]}
+          ran   (:subs/ran (rt/coerce-native-epoch raw ctx))]
+      (is (= 2 (count ran)))
+      (is (= #{[:foo] [:baz]} (set (map :query-v ran))))
+      (is (= [[:bar]] (:input-query-vs (first (filter #(= [:foo] (:query-v %))
+                                                      ran))))))))
+
+(deftest subs-cache-hit-from-native-traces-only-cached-true
+  (testing ":sub/create with :cached? true is a cache hit; :cached? false
+            is a fresh subscribe (no entry); missing :cached? skips"
+    (let [traces [{:id 1 :op-type :sub/create :tags {:query-v [:hit-1]
+                                                     :cached? true}}
+                  {:id 2 :op-type :sub/create :tags {:query-v [:miss]
+                                                     :cached? false}}
+                  {:id 3 :op-type :sub/create :tags {:query-v [:hit-2]
+                                                     :cached? true}}
+                  {:id 4 :op-type :sub/create :tags {:query-v [:no-tag]}}]
+          raw   {:id 1 :event [:dummy] :start 0 :end 10 :duration 10
+                 :app-db/before {} :app-db/after {} :coeffects {} :effects {}
+                 :interceptors []}
+          ctx   {:traces traces :all-epochs [raw]}
+          hits  (:subs/cache-hit (rt/coerce-native-epoch raw ctx))]
+      (is (= 2 (count hits)))
+      (is (= #{[:hit-1] [:hit-2]} (set (map :query-v hits)))))))
+
+;; -----------------------------------------------------------------------------
+;; Native ring buffers — pure-state checks for the receive-* paths.
+;; The cb registration itself is exercised live by tests/fixture; here
+;; we confirm the buffer-shape contract under direct swap!s.
+;; -----------------------------------------------------------------------------
+
+(deftest native-epoch-buffer-shape
+  (testing "native-epoch-buffer starts as {:entries [] :max-size 50}"
+    (reset-native-buffers!)
+    (is (= []  (:entries @rt/native-epoch-buffer)))
+    (is (= 50  (:max-size @rt/native-epoch-buffer)))
+    (is (= []  (rt/native-epochs)))))
+
+(deftest native-trace-buffer-shape
+  (testing "native-trace-buffer starts as {:entries [] :max-size 5000}"
+    (reset-native-buffers!)
+    (is (= []   (:entries @rt/native-trace-buffer)))
+    (is (= 5000 (:max-size @rt/native-trace-buffer)))
+    (is (= []   (rt/native-traces)))))
+
+(deftest find-native-epoch-by-id-from-buffer
+  (testing "find-native-epoch-by-id walks the live buffer for a match"
+    (reset-native-buffers!)
+    (reset! rt/native-epoch-buffer
+            {:entries [fixtures/synthetic-native-epoch
+                       fixtures/synthetic-native-next-epoch]
+             :max-size 50})
+    (is (= fixtures/synthetic-native-epoch
+           (#'rt/find-native-epoch-by-id 100)))
+    (is (= fixtures/synthetic-native-next-epoch
+           (#'rt/find-native-epoch-by-id 200)))
+    (is (nil? (#'rt/find-native-epoch-by-id 999)))))
+
+(deftest epoch-by-id-prefers-native-buffer
+  (testing "epoch-by-id reads from the native buffer when it carries
+            the requested id; coerced via coerce-native-epoch (vs
+            coerce-epoch which is for the 10x match shape)"
+    (reset-native-buffers!)
+    (reset! rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch]
+             :max-size 50})
+    (reset! rt/native-trace-buffer
+            {:entries  fixtures/synthetic-native-traces
+             :max-size 5000})
+    (let [e (rt/epoch-by-id 100)]
+      (is (some? e))
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e)))
+      (is (= "11111111-1111-1111-1111-111111111111" (:dispatch-id e)))
+      ;; rendered components correlated by id range
+      (is (= 3 (count (:renders e)))))))
+
+(deftest last-epoch-prefers-native-buffer
+  (testing "last-epoch returns the native buffer's tail when populated;
+            no need to consult 10x at all"
+    (reset-native-buffers!)
+    (reset! rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch
+                        fixtures/synthetic-native-next-epoch]
+             :max-size 50})
+    (let [e (rt/last-epoch)]
+      (is (= 200 (:id e))) ; the buffer's tail
+      (is (= [:other/event] (:event e))))))
+
+(deftest last-claude-epoch-prefers-native-buffer
+  (testing "last-claude-epoch matches by :dispatch-id against the
+            native buffer first"
+    (reset-native-buffers!)
+    (reset! rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch
+                        fixtures/synthetic-native-next-epoch]
+             :max-size 50})
+    (reset! rt/claude-dispatch-ids
+            #{"11111111-1111-1111-1111-111111111111"})
+    (let [e (rt/last-claude-epoch)]
+      (is (= 100 (:id e)))
+      (is (= [:cart/apply-coupon "SPRING25"] (:event e)))))
+
+  (testing "no match in native buffer AND 10x not loaded → nil
+            (not a throw — gated on @native-epoch-cb-installed?)"
+    (reset-native-buffers!)
+    (reset! rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch]
+             :max-size 50})
+    (reset! rt/claude-dispatch-ids #{"some-other-dispatch-id"})
+    ;; Pretend the cb is installed so the fallback is gated off when
+    ;; 10x is missing — we want nil, not the legacy throw.
+    (reset! rt/native-epoch-cb-installed? true)
+    (try
+      (is (nil? (rt/last-claude-epoch)))
+      (finally
+        (reset! rt/native-epoch-cb-installed? false)))))
+
+(deftest install-native-epoch-cb-noop-without-register-fn
+  (testing "install-native-epoch-cb! is a silent no-op when re-frame
+            predates rf-ybv (the runtime-test build pins re-frame
+            1.4.5, which doesn't ship register-epoch-cb)"
+    (reset! rt/native-epoch-cb-installed? false)
+    (rt/install-native-epoch-cb!)
+    ;; runtime-test: register-epoch-cb-fn returns nil → no install
+    (is (false? @rt/native-epoch-cb-installed?))))
+
+(deftest install-native-trace-cb-idempotent
+  (testing "install-native-trace-cb! installs once; second call is no-op"
+    (reset! rt/native-trace-cb-installed? false)
+    (rt/install-native-trace-cb!)
+    (is (true? @rt/native-trace-cb-installed?))
+    ;; second call should not re-register; we observe via the guard atom
+    (rt/install-native-trace-cb!)
+    (is (true? @rt/native-trace-cb-installed?))
+    ;; clean up so other tests don't see the registered cb
+    (reset! rt/native-trace-cb-installed? false)
+    (re-frame.trace/remove-trace-cb :re-frame-pair.runtime/re-frame-pair-traces)))
+
+(deftest health-reports-native-cb-flags
+  (testing "health surfaces :native-epoch-cb? and :native-trace-cb?"
+    (let [h (rt/health)]
+      (is (contains? h :native-epoch-cb?))
+      (is (contains? h :native-trace-cb?))
+      (is (boolean? (:native-epoch-cb? h)))
+      (is (boolean? (:native-trace-cb? h))))))
+
+;; -----------------------------------------------------------------------------
 ;; Time-travel ops — sentinel checks. Without a connected browser
 ;; runtime there is no 10x to dispatch into, so we expect the
 ;; ten-x-missing failure. Real time-travel is exercised by

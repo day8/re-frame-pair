@@ -6,8 +6,14 @@
 ;;;; skill's ops call through `eval-cljs.sh`.
 ;;;;
 ;;;; Design invariants (see docs/initial-spec.md):
-;;;;   - No second `register-trace-cb`. All epoch data comes from
-;;;;     re-frame-10x's existing trace infrastructure.
+;;;;   - When re-frame core ships `register-epoch-cb` (rf-ybv,
+;;;;     commit 4a53afb), runtime installs its own epoch-cb +
+;;;;     trace-cb to consume assembled epochs and the trace stream
+;;;;     directly. Falls back to reading 10x's epoch buffer when
+;;;;     re-frame predates rf-ybv. (rfp-zl8 retired the old "no
+;;;;     second register-trace-cb" rule — that was load-bearing on
+;;;;     10x being the trace substrate, which native epoch-cb
+;;;;     supersedes.)
 ;;;;   - The `session-id` sentinel below is re-read on every op. If
 ;;;;     it's gone, a full page refresh happened and the shim
 ;;;;     re-injects this file.
@@ -697,6 +703,237 @@
         :dispatch-id        (:dispatch-id tags)
         :parent-dispatch-id (:parent-dispatch-id tags)}))))
 
+;; ---------------------------------------------------------------------------
+;; Native epoch path (rfp-zl8 / re-frame rf-ybv)
+;; ---------------------------------------------------------------------------
+;;
+;; re-frame core's `register-epoch-cb` (commit 4a53afb) ships assembled
+;; epoch records once per `:event` trace. We drain into a session-local
+;; ring buffer and a sibling trace ring buffer (the latter feeds renders
+;; / sub-runs correlation by id range — they aren't attached to the
+;; native epoch by `:child-of` because they fire outside the synchronous
+;; handler frame).
+;;
+;; Feature detection is via JS interop on `re_frame.trace.register_epoch_cb`
+;; — the symbol doesn't exist when re-frame predates rf-ybv, so a direct
+;; `(re-frame.trace/register-epoch-cb ...)` would fail compile against
+;; the runtime-test build (which pins re-frame 1.4.5 from clojars).
+;; `register-trace-cb` has been part of re-frame for years, so the trace
+;; subscription uses the direct namespace reference.
+
+(defonce native-epoch-buffer
+  (atom {:entries [] :max-size 50}))
+
+(defonce native-trace-buffer
+  (atom {:entries [] :max-size 5000}))
+
+(defonce ^:private native-epoch-cb-installed? (atom false))
+(defonce ^:private native-trace-cb-installed? (atom false))
+
+(defn- receive-native-epochs!
+  "register-epoch-cb callback. Appends each delivered epoch to the
+   ring buffer, keeping the most recent :max-size entries."
+  [epochs]
+  (swap! native-epoch-buffer
+         (fn [{:keys [entries max-size]}]
+           {:entries  (vec (take-last max-size (into entries epochs)))
+            :max-size max-size})))
+
+(defn- receive-native-traces!
+  "register-trace-cb callback. Appends raw traces from each delivery
+   batch to the trace ring buffer."
+  [batch]
+  (swap! native-trace-buffer
+         (fn [{:keys [entries max-size]}]
+           {:entries  (vec (take-last max-size (into entries batch)))
+            :max-size max-size})))
+
+(defn- register-epoch-cb-fn
+  "JS-interop accessor for `re-frame.trace/register-epoch-cb`. Returns
+   nil when re-frame predates rf-ybv (commit 4a53afb) — the JS symbol
+   simply won't exist on that build.
+
+   We look up via `goog.global` rather than referencing the var
+   directly so this file still compiles against re-frame 1.4.5 (the
+   runtime-test build's pinned dep), which doesn't ship the var."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "trace" "register_epoch_cb"])))
+
+(defn install-native-epoch-cb!
+  "Register a `::re-frame-pair` epoch callback if re-frame core ships
+   `register-epoch-cb`. Idempotent. Silent no-op on older re-frame —
+   legacy callers fall back through `read-10x-epochs`."
+  []
+  (when-not @native-epoch-cb-installed?
+    (when-let [register-fn (register-epoch-cb-fn)]
+      (reset! native-epoch-cb-installed? true)
+      (register-fn ::re-frame-pair receive-native-epochs!))))
+
+(defn install-native-trace-cb!
+  "Register a `::re-frame-pair-traces` trace callback to feed the
+   trace ring buffer. Idempotent. Costs one closure invocation per
+   debounce tick, regardless of trace volume."
+  []
+  (when-not @native-trace-cb-installed?
+    (reset! native-trace-cb-installed? true)
+    (re-frame.trace/register-trace-cb ::re-frame-pair-traces
+                                      receive-native-traces!)))
+
+(defn native-epochs
+  "Read-only accessor for the native-epoch-buffer entries
+   (chronological order, oldest first)."
+  []
+  (:entries @native-epoch-buffer))
+
+(defn native-traces
+  "Read-only accessor for the native-trace-buffer entries
+   (chronological order, oldest first)."
+  []
+  (:entries @native-trace-buffer))
+
+(defn- find-native-epoch-by-id
+  "Walk the native-epoch-buffer for the entry with matching :id.
+   Returns nil when not present (older re-frame, aged out, or the
+   epoch was never delivered through the cb because tracing was
+   disabled when it fired)."
+  [id]
+  (some #(when (= id (:id %)) %) (native-epochs)))
+
+(defn- next-native-epoch-id
+  "The :id of the epoch immediately after `epoch` in `all-epochs`,
+   or nil if `epoch` is the latest. `all-epochs` is the buffer in
+   chronological order."
+  [epoch all-epochs]
+  (let [target-id (:id epoch)]
+    (->> all-epochs
+         (drop-while #(<= (:id %) target-id))
+         first
+         :id)))
+
+(defn- traces-in-native-epoch-range
+  "Trace stream slice belonging to `epoch`. Range is
+   [epoch's :id, next-epoch's :id) when a successor exists,
+   otherwise unbounded above. This bounds renders / sub-runs that
+   `assemble-epochs` couldn't attach via `:child-of` (because they
+   fire on a later RAF tick or from a render-time deref outside the
+   event's with-trace boundary)."
+  [epoch all-epochs traces]
+  (let [first-id (:id epoch)
+        next-id  (next-native-epoch-id epoch all-epochs)]
+    (filterv (fn [t] (let [id (:id t)]
+                       (and id (<= first-id id)
+                            (or (nil? next-id) (< id next-id)))))
+             traces)))
+
+(defn- subs-ran-from-native-traces
+  "Walk a trace-stream slice for `:sub/run` entries; emit one
+   `{:query-v ... :input-query-vs ...}` per unique query-v
+   (latest run wins). Native analogue of `sub-runs-from-state`,
+   driven off the trace stream because most `:sub/run` traces fire
+   from render-time derefs (with `:child-of nil`) and so don't make
+   it onto the native epoch's `:sub-runs` vec — that vec only
+   carries direct `:child-of` children of the `:event` trace."
+  [traces]
+  (->> traces
+       (filter #(= :sub/run (:op-type %)))
+       (reduce (fn [m t]
+                 (let [tags (:tags t)]
+                   (if-let [q (:query-v tags)]
+                     (assoc m q (:input-query-vs tags))
+                     m)))
+               {})
+       (mapv (fn [[q input-qvs]]
+               {:query-v q :input-query-vs input-qvs}))))
+
+(defn- subs-cache-hit-from-native-traces
+  "Walk a trace-stream slice for `:sub/create` entries with
+   `:cached? true` tag; emit one `{:query-v ...}` per unique
+   query-v. Native analogue of `sub-cache-hits-from-state` — but
+   driven off re-frame core's own `:cached?` signal (set in
+   `re-frame.subs/subscribe` when `cache-lookup` finds an existing
+   reaction). Matches §4.3a's 'subs dereffed but cached' definition
+   more precisely than 10x's `:unchanged?` heuristic did."
+  [traces]
+  (->> traces
+       (filter #(= :sub/create (:op-type %)))
+       (filter #(true? (-> % :tags :cached?)))
+       (keep #(-> % :tags :query-v))
+       distinct
+       (mapv (fn [q] {:query-v q}))))
+
+(defn- renders-from-native-traces
+  "Walk a trace-stream slice for `:render` entries; emit one render
+   entry per `:render` trace, classified for re-com awareness via
+   `classify-render-entry`. Native analogue of `renders-from-traces`."
+  [traces]
+  (->> traces
+       (filter #(= :render (:op-type %)))
+       (mapv (fn [t]
+               (let [tags (:tags t)
+                     comp (demunge-component-name
+                           (or (:component-name tags) (str (:operation t))))]
+                 {:component comp
+                  :time-ms   (:duration t)
+                  :reaction  (:reaction tags)})))
+       (mapv classify-render-entry)))
+
+(defn coerce-native-epoch
+  "Translate a `register-epoch-cb`-delivered native epoch into the
+   §4.3a shape — the same record shape that `coerce-epoch` produces
+   from a 10x match. Pure; takes the trace stream + sibling epochs
+   explicitly so tests can pass synthetic context.
+
+   The native epoch (output of `re-frame.trace/assemble-epochs`)
+   carries `{:id :event :dispatch-id :parent-dispatch-id
+   :app-db/before :app-db/after :coeffects :effects :interceptors
+   :sub-runs :sub-creates :event-handler :event-do-fx :start :end
+   :duration}`.
+
+   `:subs/ran`, `:subs/cache-hit`, and `:renders` are derived from
+   the trace-stream slice in this epoch's id range, NOT from the
+   native epoch's `:sub-runs` / `:sub-creates` vecs — those only
+   carry direct `:child-of` children of the `:event` trace, which
+   misses render-time sub recomputes and (per `assemble-epochs`'s
+   own docstring) all renders.
+
+   `:debux/code` is read from the `:event-handler` trace's `:tags`
+   (debux's `merge-trace!` lands on `*current-trace*`, which is
+   the `:event/handler` with-trace boundary at the moment a
+   `fn-traced` user handler emits its per-form trace).
+
+   Two arities:
+     (coerce-native-epoch raw)
+       Pulls trace stream + sibling epochs from the live ring buffers.
+     (coerce-native-epoch raw {:keys [traces all-epochs]})
+       Explicit context for tests / batched coercion."
+  ([raw]
+   (coerce-native-epoch raw {:traces     (native-traces)
+                             :all-epochs (native-epochs)}))
+  ([raw {:keys [traces all-epochs]}]
+   (when raw
+     (let [in-range (traces-in-native-epoch-range raw all-epochs traces)
+           [only-before only-after _both] (data/diff (:app-db/before raw)
+                                                    (:app-db/after raw))]
+       {:id                 (:id raw)
+        :t                  (:start raw)
+        :time-ms            (:duration raw)
+        :event              (:event raw)
+        :coeffects          (:coeffects raw)
+        :effects            (:effects raw)
+        :effects/fired      (flatten-fx (:effects raw))
+        :interceptor-chain  (mapv :id (:interceptors raw))
+        :app-db/diff        {:before      (:app-db/before raw)
+                             :after       (:app-db/after raw)
+                             :only-before only-before
+                             :only-after  only-after}
+        :subs/ran           (subs-ran-from-native-traces in-range)
+        :subs/cache-hit     (subs-cache-hit-from-native-traces in-range)
+        :renders            (renders-from-native-traces in-range)
+        :debux/code         (-> raw :event-handler :tags :code)
+        :dispatch-id        (:dispatch-id raw)
+        :parent-dispatch-id (:parent-dispatch-id raw)}))))
+
 (defn debux-runtime-api?
   "True iff `day8.re-frame.tracing.runtime/runtime-api?` is loaded
    in this runtime — i.e. the on-demand instrumentation Phase 2
@@ -757,16 +994,27 @@
     (count (read-10x-epochs))))
 
 (defn epoch-by-id
-  "Return the coerced epoch with matching id, or nil."
+  "Return the coerced epoch with matching id, or nil. Prefers the
+   native-epoch-buffer (rfp-zl8 / rf-ybv); falls back to
+   `read-10x-epochs` when re-frame predates rf-ybv or the epoch has
+   aged out of the native buffer."
   [id]
-  (->> (read-10x-epochs)
-       (some #(when (= id (match-id %)) %))
-       coerce-epoch))
+  (or (when-let [raw (find-native-epoch-by-id id)]
+        (coerce-native-epoch raw))
+      (when (or (ten-x-loaded?)
+                (not @native-epoch-cb-installed?))
+        (->> (read-10x-epochs)
+             (some #(when (= id (match-id %)) %))
+             coerce-epoch))))
 
 (defn last-epoch
-  "Most recently appended epoch, coerced. Nil if buffer is empty."
+  "Most recently appended epoch, coerced. Prefers the native-epoch-
+   buffer; falls back to 10x. Nil if neither has any epochs."
   []
-  (some-> (read-10x-epochs) last coerce-epoch))
+  (or (some-> (native-epochs) last coerce-native-epoch)
+      (when (or (ten-x-loaded?)
+                (not @native-epoch-cb-installed?))
+        (some-> (read-10x-epochs) last coerce-epoch))))
 
 (defn epochs-since
   "Epochs appended *after* the given id. Returns a map:
@@ -1087,18 +1335,29 @@
       (reset! current-who :app))))
 
 (defn last-claude-epoch
-  "Most recent epoch dispatched by the skill in this session.
-   Resolves by walking 10x's buffer (newest-first) for the first
-   epoch whose `:dispatch-id` appears in `claude-dispatch-ids`."
+  "Most recent epoch dispatched by the skill in this session. Resolves
+   by walking the native-epoch-buffer first (newest-first) for the
+   first epoch whose `:dispatch-id` appears in `claude-dispatch-ids`,
+   then falls back to 10x's buffer when re-frame predates rf-ybv or
+   the dispatch-id has aged out of the native buffer."
   []
-  (let [ours @claude-dispatch-ids]
-    (some->> (read-10x-epochs)
-             reverse
-             (some (fn [raw]
-                     (let [evt-trace (find-trace raw :event)
-                           dispatch-id (-> evt-trace :tags :dispatch-id)]
-                       (when (contains? ours dispatch-id) raw))))
-             coerce-epoch)))
+  (let [ours        @claude-dispatch-ids
+        from-native (some->> (native-epochs)
+                             reverse
+                             (some (fn [raw]
+                                     (when (contains? ours (:dispatch-id raw))
+                                       raw)))
+                             coerce-native-epoch)]
+    (or from-native
+        (when (or (ten-x-loaded?)
+                  (not @native-epoch-cb-installed?))
+          (some->> (read-10x-epochs)
+                   reverse
+                   (some (fn [raw]
+                           (let [evt-trace   (find-trace raw :event)
+                                 dispatch-id (-> evt-trace :tags :dispatch-id)]
+                             (when (contains? ours dispatch-id) raw))))
+                   coerce-epoch)))))
 
 (def ^:private trace-debounce-settle-ms
   "How long we wait after dispatch-sync before reading 10x's epoch
@@ -1722,6 +1981,8 @@
   []
   (install-last-click-capture!)
   (install-console-capture!)
+  (install-native-epoch-cb!)
+  (install-native-trace-cb!)
   ;; epoch-count throws when 10x isn't loaded (or when running outside
   ;; the browser, e.g. shadow-cljs's node-test build). Health is meant
   ;; to be a best-effort summary; catch and fall back to nil so the
@@ -1734,6 +1995,8 @@
      :re-com-debug?       (re-com-debug-enabled?)
      :last-click-capture? true
      :console-capture?    true
+     :native-epoch-cb?    @native-epoch-cb-installed?
+     :native-trace-cb?    @native-trace-cb-installed?
      :app-db-initialised? (map? @db/app-db)
      :versions            (version-report)
      :epoch-count         ec
