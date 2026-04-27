@@ -101,6 +101,19 @@ Same shape works for `reg-sub`, `reg-fx`, and plain `defn` view fns
 (redefine the var). View fns lose Reagent component identity on var
 redef so expect a remount; handlers and subs swap invisibly.
 
+**Single-expression variant (rfd-btn).** When the form of interest
+is one expression rather than a whole handler, `(day8.re-frame.tracing/dbg
+form opts?)` instruments just that form. Same `:code` sink — `dbg`
+uses `merge-trace!` exactly like `fn-traced` does, so the trace
+surfaces as `:debux/code` on the epoch. The procedure compresses to:
+re-eval `reg-event-db` with `dbg` wrapping the target expression,
+dispatch, read `:debux/code`, restore the unwrapped registration.
+Outside any active trace, `dbg` falls back to `tap>` (with
+`:debux/dbg true` on the payload) so the same call works at the bare
+REPL. See SKILL.md's "Trace a single expression at the REPL" for
+the full recipe and `re-frame-pair.runtime/dbg-macro-available?` for
+the runtime feature probe (older debux releases don't ship `dbg`).
+
 **Limits:**
 
 - **Classpath.** `day8.re-frame/tracing` (or debux) must be loaded.

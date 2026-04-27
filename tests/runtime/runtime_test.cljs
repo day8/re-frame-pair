@@ -745,6 +745,21 @@
       (is (= :dispatch-sync-with-unavailable (:reason r))))))
 
 ;; -----------------------------------------------------------------------------
+;; rfp-12p / rfd-btn — dbg-macro-available? feature probe.
+;; The runtime-test build doesn't bundle re-frame-debux at all, so the
+;; probe should report false. Mirrors debux-runtime-api?'s shape.
+;; -----------------------------------------------------------------------------
+
+(deftest dbg-macro-available?-probe
+  (testing "returns a boolean"
+    (is (boolean? (rt/dbg-macro-available?))))
+
+  (testing "false in the runtime-test build (no day8.re-frame/tracing
+            on the classpath; the send-trace-or-tap! sink fn isn't
+            present in the goog.global namespace)"
+    (is (false? (rt/dbg-macro-available?)))))
+
+;; -----------------------------------------------------------------------------
 ;; Time-travel ops — sentinel checks. Without a connected browser
 ;; runtime there is no 10x to dispatch into, so we expect the
 ;; ten-x-missing failure. Real time-travel is exercised by

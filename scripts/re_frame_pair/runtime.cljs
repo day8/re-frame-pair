@@ -963,6 +963,26 @@
     (when-let [g (some-> js/goog .-global)]
       (aget-path g ["day8" "re_frame" "tracing" "runtime" "runtime_api_QMARK_"]))))
 
+(defn dbg-macro-available?
+  "True iff re-frame-debux ships rfd-btn (`day8.re-frame.tracing/dbg`)
+   in the currently-loaded build. False when day8.re-frame/tracing
+   isn't on the classpath at all AND when an older release is loaded
+   that ships only fn-traced / dbgn (pre-rfd-btn).
+
+   Probes the runtime sink fn `send-trace-or-tap!` rather than the
+   `dbg` macro itself because macros aren't reachable as JS symbols
+   at runtime — the macro expands at compile time. `send-trace-or-tap!`
+   is the runtime helper every dbg call funnels through, and it lands
+   in the same commit as the macro (rfd-btn), so its presence is a
+   reliable proxy.
+
+   Used by SKILL.md's 'Trace a single expression at the REPL' recipe
+   to surface dbg as an option only on debux releases that ship it."
+  []
+  (boolean
+    (when-let [g (some-> js/goog .-global)]
+      (aget-path g ["day8" "re_frame" "debux" "common" "util" "send_trace_or_tap_BANG_"]))))
+
 (defn latest-epoch-id
   "Id of 10x's newest match, or nil if the buffer is empty / 10x is
    not loaded.

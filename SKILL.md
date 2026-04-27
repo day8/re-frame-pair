@@ -105,7 +105,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
 | `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
 
-Every coerced epoch also carries `:debux/code` — a vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries written by [re-frame-debux](https://github.com/day8/re-frame-debux) when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`. `nil` when debux isn't on the classpath or the handler wasn't wrapped; a vec (possibly empty) when it was. See the *"Trace a handler / sub / fx form-by-form"* recipe below for the on-demand wrap procedure.
+Every coerced epoch also carries `:debux/code` — a vec of `{:form :result :indent-level :syntax-order :num-seen}` per-form trace entries written by [re-frame-debux](https://github.com/day8/re-frame-debux) when a handler / sub / fx has been wrapped with `day8.re-frame.tracing/fn-traced`, or when individual forms have been wrapped with `day8.re-frame.tracing/dbg` (rfd-btn). `nil` when debux isn't on the classpath or no wrapping is in place; a vec (possibly empty) when it is. See *"Trace a handler / sub / fx form-by-form"* and *"Trace a single expression at the REPL"* below for the two on-demand procedures.
 
 ### Console / errors
 
@@ -229,6 +229,11 @@ When the user wants to see what each *expression inside* a handler evaluated to 
 
 **Prerequisite:** `day8.re-frame/tracing` must be on the classpath. If it isn't, ask the user to add it to dev deps; you can't conjure macros that aren't loaded.
 
+**Pick the granularity:**
+
+- **A single expression** — wrap a let-binding RHS, a `->` step, or a one-off call with `dbg`. Lighter than wrapping the whole handler; doesn't require restoring anything. See *"Trace a single expression at the REPL"* below.
+- **A whole handler / sub / fx** — wrap once, dispatch, read every form's value. Use the wrap-handler!/fn-traced procedure on this page.
+
 **Detect which API is available:**
 
 ```
@@ -304,6 +309,55 @@ The runtime API is a thin wrapper over the same fn-traced macro; you can still d
 - **Restore is critical.** A wrapped handler stays wrapped for the rest of the REPL session (until full page reload). Always pair wrap with unwrap (or the manual restore) in the same turn.
 
 This recipe is the on-demand half of the integration described in [`docs/inspirations-debux.md` §3.0](./docs/inspirations-debux.md). The bridge half (surfacing `:code` as `:debux/code` in the epoch) is automatic — see the `Trace` op table.
+
+### "Trace a single expression at the REPL"
+
+When the form you want instrumented is a single expression — a let-binding's RHS, a `->` thread step, an inner `(some-fn args)` — and wrapping the whole handler is overkill. `dbg` (rfd-btn, `day8.re-frame.tracing/dbg`) emits one trace record per evaluation: the quoted form, its result, and any opt extras (`:name` / `:locals` / `:if` / `:tap?`). Inside a re-frame event handler the trace lands on `:tags :code` (same surface as fn-traced — it surfaces as `:debux/code` on the coerced epoch); outside any trace context, it falls back to `tap>`.
+
+**Detect availability:**
+
+```
+scripts/eval-cljs.sh '(re-frame-pair.runtime/dbg-macro-available?)'
+```
+
+`true` → debux ships rfd-btn, the recipe below works. `false` → the host's debux is older (pre-rfd-btn); use the handler-level fn-traced path on this page instead.
+
+**Procedure:**
+
+1. **Identify the form** to instrument. Read the handler's source (`scripts/handler-source.sh :event :foo/bar` to locate, then your editor or the user's source).
+2. **Hot-swap the handler with `dbg` wrapping the form of interest.** Same shape as the manual fn-traced path — `reg-event-db` re-eval'd with the body editor:
+
+   ```
+   scripts/eval-cljs.sh '(re-frame.core/reg-event-db
+                           :cart/apply-coupon
+                           (fn [db [_ code]]
+                             (-> db
+                                 (assoc-in [:cart :coupon]
+                                           (day8.re-frame.tracing/dbg
+                                             (normalize-coupon code)
+                                             {:name "normalize"}))
+                                 (assoc-in [:cart :coupon-status] :applied))))'
+   ```
+3. **Dispatch with `--trace`** and read the resulting epoch's `:debux/code` — the entry whose `:name` is `"normalize"` is your one form's trace; surrounding entries (if the handler also includes other dbg calls) are the others.
+4. **Restore.** Re-eval the original `reg-event-db` form (or ask the user to hot-reload the source file).
+
+**Out-of-trace use:** `dbg` works at the bare REPL too — call it on any expression and the result surfaces via `tap>`:
+
+```
+scripts/eval-cljs.sh '(do (add-tap (fn [v] (.log js/console (pr-str v))))
+                          (day8.re-frame.tracing/dbg (some-pure-calculation 42))
+                          :ok)'
+```
+
+The tap> payload carries `:debux/dbg true` so a custom tap fn can branch on it.
+
+**Why this over fn-traced:** `dbg` has no AST-walk — it instruments exactly the expression you point at, no more. When the user's question is "what did *this specific call* return?" it's faster, lower-noise, and doesn't require pairing with `unwrap-handler!` / re-eval. For "show me every form in this handler," prefer the handler-level recipe above; for "this one let-binding," prefer `dbg`.
+
+**Limits:**
+
+- **`day8.re-frame/tracing` ≥ rfd-btn.** Older debux releases don't ship `dbg`; check `dbg-macro-available?` first.
+- **Hot-swap still required.** `dbg` instruments at macro-expansion time, so the form has to be re-eval'd through the REPL with the `dbg` wrap in place. You can't retroactively `dbg` a form that's already compiled.
+- **`:locals` is caller-supplied.** `dbg` can't introspect `&env` portably across CLJ/CLJS the way `fn-traced` does at function-arg time. If you want locals captured, pass them explicitly: `(dbg form {:locals [['db db] ['x x]]})`.
 
 ### "Explain this dispatch"
 
