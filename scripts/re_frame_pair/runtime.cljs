@@ -264,12 +264,17 @@
 (declare classify-render-entry)
 
 (def ^:private inlined-rf-known-version-paths
-  "Best-known 10x-inlined re-frame version slugs. Tried first so the
-   common case is one aget-path lookup. If none match, we fall back
-   to enumerating whatever child keys live under
-   `day8.re_frame_10x.inlined_deps.re_frame` at runtime — see
-   `ten-x-inlined-rf`. Update this list opportunistically; the
-   fallback handles fresh 10x releases on its own."
+  "Best-known 10x-inlined re-frame version slugs. Used by the
+   `ten-x-inlined-rf` legacy path as a fallback when 10x's
+   `day8.re-frame-10x.public` namespace isn't loaded — see
+   `ten-x-public` for the preferred path. If none match, we fall
+   back further to enumerating whatever child keys live under
+   `day8.re_frame_10x.inlined_deps.re_frame` at runtime.
+
+   rf1-jum landed `day8.re-frame-10x.public` upstream as the stable
+   surface. Once consumers can rely on every supported 10x release
+   carrying it, this vec (and `ten-x-inlined-rf`'s walk) can be
+   deleted entirely. Until then it's the bridge for older 10x JARs."
   ["v1v3v0"])
 
 (defn- aget-path
@@ -289,16 +294,36 @@
     (when o (js/Object.keys o))
     (catch :default _ nil)))
 
+(defn- ten-x-public
+  "The JS object for `day8.re-frame-10x.public` if loaded, else nil.
+   This is rf1-jum's stable surface — preferred over inlined-rf
+   walking because it's intentionally version-pinned (no `v1v3v0`
+   slug to chase) and forward-compatible (capabilities advertised
+   via `(public/version)` and `(public/capabilities)`).
+
+   Detection: presence of `loaded_QMARK_` is the contract. Older
+   10x JARs (pre-rf1-jum) lack the public ns; consumers fall back
+   to `ten-x-inlined-rf` for those builds."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (let [pub (aget-path g ["day8" "re_frame_10x" "public"])]
+      (when (and pub (aget pub "loaded_QMARK_"))
+        pub))))
+
 (defn- ten-x-inlined-rf
-  "The JS object for 10x's inlined `re-frame` package.
+  "Legacy path: the JS object for 10x's inlined `re-frame` package.
+   Used when `ten-x-public` returns nil (older 10x JARs that don't
+   ship rf1-jum's public ns).
 
    Strategy: try the known-version slugs first (cheap, deterministic),
    then fall back to enumerating every child key under
    `day8.re_frame_10x.inlined_deps.re_frame` and picking the first
-   that has a `re_frame.db.app_db` underneath. The fallback means a
-   fresh 10x release with a new slug works without any code change —
-   `read-10x-epochs` no longer throws `:ten-x-missing` just because
-   we shipped before the slug got added to the known list."
+   that has a `re_frame.db.app_db` underneath. The enum fallback
+   means a fresh 10x release with a new slug works without any
+   code change — `read-10x-epochs` no longer throws `:ten-x-missing`
+   just because we shipped before the slug got added to the known
+   list. Once every supported 10x carries `public`, both this fn
+   and `inlined-rf-known-version-paths` can be deleted."
   []
   (when-let [g (some-> js/goog .-global)]
     (let [base (aget-path g ["day8" "re_frame_10x" "inlined_deps" "re_frame"])
@@ -320,17 +345,22 @@
   (some-> (ten-x-inlined-rf) (aget-path ["db" "app_db"])))
 
 (defn- read-10x-all-traces
-  "Full trace stream from 10x's internal app-db at `[:traces :all]`.
-   This is `re-frame.trace`'s raw stream, with every op-type intact:
-   `:event :sub/run :sub/create :sub/dispose :render :raf :raf-end
-   :event/handler` etc. The skeleton stored at `(:match-info match)`
-   only retains the subset that fits 10x's epoch start/end markers
-   (event-run, fsm-trigger, end-of-match, sync) — for renders and
-   sub-runs we have to come back here. Returns [] when 10x isn't
-   loaded so callers can no-op gracefully."
+  "Full trace stream from 10x. This is `re-frame.trace`'s raw stream,
+   with every op-type intact: `:event :sub/run :sub/create
+   :sub/dispose :render :raf :raf-end :event/handler` etc. The
+   skeleton stored at `(:match-info match)` only retains the subset
+   that fits 10x's epoch start/end markers (event-run, fsm-trigger,
+   end-of-match, sync) — for renders and sub-runs we have to come
+   back here. Returns [] when 10x isn't loaded so callers can no-op
+   gracefully.
+
+   rf1-jum: prefers `day8.re-frame-10x.public/all-traces` when
+   loaded; falls back to direct app-db ratom read for older 10x."
   []
-  (or (some-> (ten-x-app-db-ratom) deref :traces :all)
-      []))
+  (if-let [pub (ten-x-public)]
+    (or ((aget pub "all_traces")) [])
+    (or (some-> (ten-x-app-db-ratom) deref :traces :all)
+        [])))
 
 (defn- ten-x-rf-core
   "10x's inlined re-frame.core JS namespace object. Holds .dispatch,
@@ -347,30 +377,43 @@
   (boolean (ten-x-app-db-ratom)))
 
 (defn read-10x-epochs
-  "Raw matches from 10x's epoch buffer in chronological order.
-   Throws ex-info with :reason :ten-x-missing if 10x is not loaded
-   (or its inlined-deps version path isn't recognised).
+  "Matches from 10x's epoch buffer in chronological order. Throws
+   ex-info with `:reason :ten-x-missing` if 10x isn't loaded.
 
-   Each element is a 10x match record:
-     {:match-info <vec-of-raw-traces> :sub-state <map> :timing <map>}
-   Pass through `coerce-epoch` to translate to the §4.3a shape."
+   Each element carries (at minimum) `{:match-info <vec-of-raw-traces>}`.
+   Pass through `coerce-epoch` to translate to the §4.3a shape.
+
+   rf1-jum: when `day8.re-frame-10x.public` is loaded, returns its
+   public-epoch shape `{:id :match-info :sub-state-raw :timings}` —
+   the renamed sub-state / timings keys are the public contract.
+   When it isn't (older 10x), falls back to the legacy inlined-rf
+   path which returns 10x's internal shape
+   `{:match-info :sub-state :timing}`. Both shapes preserve
+   `:match-info`, which is what `coerce-epoch` and `match-id`
+   walk — so callers don't have to branch on which 10x they're
+   talking to."
   []
-  (let [a (ten-x-app-db-ratom)]
-    (when-not a
-      (throw (ex-info "re-frame-10x epoch buffer unreachable"
-                      {:reason :ten-x-missing
-                       :tried-known-paths inlined-rf-known-version-paths
-                       :hint (str "10x is not loaded, or its inlined "
-                                  "re-frame namespace doesn't carry the "
-                                  "expected `re_frame.db.app_db` ratom. "
-                                  "ten-x-inlined-rf already tries every "
-                                  "child key under inlined_deps.re_frame "
-                                  "as a fallback — if you're hitting this, "
-                                  "10x itself probably isn't preloaded.")})))
-    (let [db    @a
-          ids   (get-in db [:epochs :match-ids] [])
-          by-id (get-in db [:epochs :matches-by-id] {})]
-      (mapv #(get by-id %) ids))))
+  (if-let [pub (ten-x-public)]
+    ((aget pub "epochs"))
+    (let [a (ten-x-app-db-ratom)]
+      (when-not a
+        (throw (ex-info "re-frame-10x epoch buffer unreachable"
+                        {:reason :ten-x-missing
+                         :tried-known-paths inlined-rf-known-version-paths
+                         :hint (str "10x is not loaded, or its inlined "
+                                    "re-frame namespace doesn't carry the "
+                                    "expected `re_frame.db.app_db` ratom. "
+                                    "ten-x-inlined-rf already tries every "
+                                    "child key under inlined_deps.re_frame "
+                                    "as a fallback — if you're hitting this, "
+                                    "10x itself probably isn't preloaded. "
+                                    "Note: as of rf1-jum, 10x ships a "
+                                    "`day8.re-frame-10x.public` ns that "
+                                    "is preferred over this path.")})))
+      (let [db    @a
+            ids   (get-in db [:epochs :match-ids] [])
+            by-id (get-in db [:epochs :matches-by-id] {})]
+        (mapv #(get by-id %) ids)))))
 
 (defn- match-id
   "10x's id for a match — the id of the first trace in :match-info."
@@ -647,19 +690,31 @@
   "Id of 10x's newest match, or nil if the buffer is empty / 10x is
    not loaded.
 
-   Cheap path: 10x already keeps an ordered `:match-ids` vec at
+   Cheap path: 10x keeps an ordered `:match-ids` vec at
    `[:epochs :match-ids]` in its app-db; the head of it IS what we
    want. Avoids `read-10x-epochs`'s full per-match map-rebuild —
    significant for `watch-epochs.sh`, which polls this at ~100ms cadence
-   and used to construct a fresh 25-entry coerced-match vec every tick."
+   and used to construct a fresh 25-entry coerced-match vec every tick.
+
+   rf1-jum: prefers `day8.re-frame-10x.public/latest-epoch-id` when
+   loaded (also a single :match-ids head read; just removes the
+   inlined-rf-version-path coupling). Falls back for older 10x."
   []
-  (when-let [a (ten-x-app-db-ratom)]
-    (last (get-in @a [:epochs :match-ids]))))
+  (if-let [pub (ten-x-public)]
+    ((aget pub "latest_epoch_id"))
+    (when-let [a (ten-x-app-db-ratom)]
+      (last (get-in @a [:epochs :match-ids])))))
 
 (defn epoch-count
-  "Total matches in 10x's ring buffer."
+  "Total matches in 10x's ring buffer.
+
+   rf1-jum: prefers the public surface's `epoch-count` (cheap —
+   reads `:match-ids` length). Older 10x falls back to
+   `(count (read-10x-epochs))` which goes through the legacy path."
   []
-  (count (read-10x-epochs)))
+  (if-let [pub (ten-x-public)]
+    ((aget pub "epoch_count"))
+    (count (read-10x-epochs))))
 
 (defn epoch-by-id
   "Return the coerced epoch with matching id, or nil."
