@@ -1,6 +1,22 @@
 # Companion change for re-frame-10x
 
-> Audience: a re-frame-10x maintainer. This document proposes one change to re-frame-10x that re-frame-pair (a Claude Code skill for introspecting re-frame apps) would benefit from. Read [`docs/initial-spec.md`](./initial-spec.md) — particularly Appendix A and §3.2 — for context. **No upstream patch is being proposed yet; this is a survey + design proposal so the change can be discussed and implemented if there's agreement.**
+> Audience: a re-frame-10x maintainer. This document proposes one change to re-frame-10x that re-frame-pair (a Claude Code skill for introspecting re-frame apps) would benefit from. Read [`docs/initial-spec.md`](./initial-spec.md) — particularly Appendix A and §3.2 — for context.
+
+> **Status (2026-04-27).** **Shipped upstream.** re-frame-10x commit
+> `4107f8f` (`rf1-jum`) defines `day8.re-frame-10x.public` — the public
+> namespace this document proposed (matches the placeholder name).
+> Exposes `epochs`, `latest-epoch-id`, `epoch-count`, `loaded?`, plus
+> the navigation event-keyword constants `load-epoch`,
+> `most-recent-epoch`, `reset-event`, `replay-event` and a `dispatch!`
+> bridge fn. Resolves both Q1 (namespace name) and Q2 (Option A — pass
+> event keywords through a controlled `dispatch!`). Followup commit
+> `f24482e` (`rf1-2vt`) added the `::previous` and `::next` navigation
+> events to the public surface. Re-frame-pair consumer landed in commit
+> `4a575ac` (rf1-jum Phase 2) — `runtime.cljs`'s `read-10x-epochs` /
+> `latest-epoch-id` / `epoch-count` / `read-10x-all-traces` prefer the
+> public ns; the legacy `inlined-rf-known-version-paths` walk is
+> fallback only. **The proposal text below is retained as historical
+> record.**
 
 10x's epoch buffer is re-frame-pair's trace substrate (per spec §3.2), but the paths into it (the inlined re-frame version slug, the `[:epochs ...]` keys, the match record shape) are all internal. Promoting a documented `day8.re-frame-10x.public` namespace with stable read and mutation accessors would decouple re-frame-pair from version-probe hacks and internal-path knowledge, and it would let any other tool (error reporters, performance monitors, custom inspectors) build on the same epoch model without forking 10x.
 

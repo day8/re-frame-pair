@@ -604,37 +604,39 @@ See [`docs/companion-re-frame.md`](./companion-re-frame.md), [`docs/companion-re
 
 re-frame-pair can ship against these libraries as they exist today. The following changes to re-frame, re-frame-10x, and re-com would reduce re-frame-pair's code size, stabilise its contract, or unlock new recipes. Ordered by leverage.
 
+> **Implementation status (2026-04-27).** Six of the nine items have shipped upstream and are consumed in re-frame-pair: A2 (re-frame-10x `4107f8f` rf1-jum), A3 (re-com `b3912727`+`961b9215` rc-aeh), A4 (re-frame `4a53afb` rf-ybv), A8 (re-frame `f8f0f59` rf-4mr), A9 (re-frame `2651a30` rf-ge8), and A7 superseded by re-frame `15dfc25` rf-ysy (with-meta on registered handler value rather than retained source forms — same effect for the `handler/source` use case). A1, A5, and A6 remain open. See per-item Status banners in the companion docs and `STATUS.md` *Post-spike additions* for details.
+
 ### Tier 1 — high leverage
 
-**A1. Documented `re-frame.introspect` public namespace.**
+**A1. Documented `re-frame.introspect` public namespace.** *(Open — no upstream movement; re-frame-pair continues to reach into the de-facto-public atoms.)*
 Today re-frame-pair reaches into `re-frame.registrar/kind->id->handler`, `re-frame.subs/query->reaction`, and `re-frame.db/app-db` directly. These work but are not documented API. Promote a small surface — `(list-handlers kind)`, `(live-subs)`, `(current-app-db)`, `(registered? kind id)` — to a named public namespace so re-frame-pair (and future tooling) has a stable contract instead of a coupling to internal atoms.
 
-**A2. Public namespace in re-frame-10x.**
+**A2. Public namespace in re-frame-10x.** *(Shipped — re-frame-10x `4107f8f` rf1-jum; consumer rfp `4a575ac`.)*
 10x's epoch structures are re-frame-pair's trace substrate (§3.2) but are not a public API. Promote the needed fields (epoch id, event vector, interceptor chain, app-db before/after, sub-runs, renders, timings) to a documented namespace — e.g. `day8.re-frame-10x.public` — so re-frame-pair's adapter has a stable contract.
 
-**A3. Carry `:src` in the render trace.**
+**A3. Carry `:src` in the render trace.** *(Shipped — re-com `b3912727` rc-aeh + `961b9215` debug exported-fns fix; rfp consumer in flight as `rc-u1z`.)*
 Today re-com's `:src (at)` metadata lands on the DOM as `data-rc-src` but is not surfaced in the Reagent `:render` trace event. re-frame-pair's v1 adapter therefore joins render entries to `:src` via DOM name-and-recency matching (§4.3b) — approximate. A small re-com change — thread `:src` through to component metadata that the render trace picks up — makes the join exact and removes the DOM detour. Every render entry in an epoch would then carry `{:file :line :column}` end-to-end.
 
-**A4. `register-epoch-cb` alongside `register-trace-cb`.**
+**A4. `register-epoch-cb` alongside `register-trace-cb`.** *(Shipped — re-frame `4a53afb` rf-ybv; consumer rfp `9d4e948` rfp-zl8.)*
 Today, 10x groups raw trace events into per-dispatch *epochs* inside itself. If re-frame emitted epoch-granular callbacks — one call per completed event carrying the assembled sub-runs, renders, effects map, and app-db before/after — 10x (and any future tooling) would simplify dramatically, and *epoch* would become a canonical re-frame concept rather than a 10x construct. Downstream benefit: re-frame-pair could read epochs from re-frame directly, shortening the dependency chain.
 
 ### Tier 2 — useful
 
-**A5. Subscription graph as data.**
+**A5. Subscription graph as data.** *(Open.)*
 `(subs/declared-graph)` returning the static `:<-` edges, with a dynamic overlay of currently-live nodes. Lets Claude reason about the reactive topology without tracing to discover it; enables recipes like "show me everything that would re-run if I changed this sub".
 
-**A6. Dispatch provenance.**
+**A6. Dispatch provenance.** *(Open — adjacent: rf-3p7 item 2 `af024c3` ships auto-generated `:dispatch-id` (different concern from caller-supplied provenance).)*
 `(dispatch ev {:from :re-frame-pair})` with the metadata threaded through to the epoch record, so agent-dispatched events are distinguishable from user-driven ones in traces. (v1 workaround: the skill tags its own dispatches; see §4.3.)
 
-**A7. Retained handler source forms in dev builds.**
+**A7. Retained handler source forms in dev builds.** *(Superseded for the `handler/source` use case — re-frame `15dfc25` rf-ysy attaches `{:file :line}` via `with-meta` instead of retaining source forms; consumer rfp `fd74b8f` rfp-hpu retired the local `rfp-rsg` side-table. The "show the handler form itself" use case remains open at lower priority.)*
 The registrar currently stores only the compiled handler fn. In dev builds, keep the source form alongside. Lets Claude *read* current handler behaviour rather than only overwriting it — better "explain this handler" recipes, safer hot-swap. Required for `registrar/describe` (§4.1) to return a source form.
 
 ### Tier 3 — speculative
 
-**A8. `dispatch-and-settle` returning a promise/channel.**
+**A8. `dispatch-and-settle` returning a promise/channel.** *(Shipped — re-frame `f8f0f59` rf-4mr; consumer rfp `c87529c` rfp-4ew.)*
 Fulfilled when the event *and* its cascade of `:dispatch` / `:dispatch-later` / `:http-xhrio` / etc. all complete. Collapses the one-animation-frame wait and the "did the async effect land?" question into one primitive. "Settle" is hard to define generally — probably scoped to a configurable set of fx handlers.
 
-**A9. Effect substitution for probe dispatches.**
+**A9. Effect substitution for probe dispatches.** *(Shipped — re-frame `2651a30` rf-ge8; consumer rfp `69c570d` rfp-zml.)*
 `dispatch-with` that swaps selected `reg-fx` handlers for no-ops or doubles, so Claude can safely explore event behaviour without triggering real network calls or navigation. Overlaps in spirit with re-frame's existing test utilities; may be achievable by exposing the test-mode machinery at runtime.
 
 ### Notes

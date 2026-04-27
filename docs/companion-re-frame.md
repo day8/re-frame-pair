@@ -10,6 +10,12 @@ Items addressed in this document: **A1**, **A4**, **A6**, **A7**, **A8**, **A9**
 
 ## A1. Documented `re-frame.introspect` public namespace
 
+> **Status (2026-04-27).** **Open.** No `re-frame.introspect` namespace
+> has shipped; re-frame-pair continues to reach into
+> `re-frame.registrar/kind->id->handler`, `re-frame.subs/query->reaction`,
+> and `re-frame.db/app-db` directly. The de-facto contract has held
+> through every recent re-frame release the rig consumes.
+
 **Spec proposal (verbatim from `docs/initial-spec.md` Appendix A):**
 
 > Today re-frame-pair reaches into `re-frame.registrar/kind->id->handler`, `re-frame.subs/query->reaction`, and `re-frame.db/app-db` directly. These work but are not documented API. Promote a small surface — `(list-handlers kind)`, `(live-subs)`, `(current-app-db)`, `(registered? kind id)` — to a named public namespace so re-frame-pair (and future tooling) has a stable contract instead of a coupling to internal atoms.
@@ -111,6 +117,16 @@ A new namespace `re-frame.introspect` (alternatives: `re-frame.public`, or just 
 
 ## A4. `register-epoch-cb` alongside `register-trace-cb`
 
+> **Status (2026-04-27).** **Shipped upstream.** re-frame commit `4a53afb`
+> (`rf-ybv` — register-epoch-cb / remove-epoch-cb / assemble-epochs)
+> ships the epoch-granular callback this section proposed. Consumed in
+> re-frame-pair via commit `9d4e948` (`rfp-zl8`) — `coerce-native-epoch`
+> translates `assemble-epochs` output to the §4.3a record shape; the
+> native epoch + trace ring buffers became the primary source for
+> `epoch-by-id` / `last-epoch` / `last-claude-epoch`. The 10x epoch
+> buffer is now a fallback for re-frame builds predating rf-ybv.
+> Treat the proposal text below as historical record.
+
 **Spec proposal (verbatim):**
 
 > Today, 10x groups raw trace events into per-dispatch *epochs* inside itself. If re-frame emitted epoch-granular callbacks — one call per completed event carrying the assembled sub-runs, renders, effects map, and app-db before/after — 10x (and any future tooling) would simplify dramatically, and *epoch* would become a canonical re-frame concept rather than a 10x construct. Downstream benefit: re-frame-pair could read epochs from re-frame directly, shortening the dependency chain.
@@ -191,9 +207,15 @@ The callback is invoked once per completed event with an assembled epoch record.
 
 ## A6. Dispatch provenance
 
-**Spec proposal (verbatim):**
-
-> `(dispatch ev {:from :re-frame-pair})` with the metadata threaded through to the epoch record, so agent-dispatched events are distinguishable from user-driven ones in traces. (v1 workaround: the skill tags its own dispatches; see §4.3.)
+> **Status (2026-04-27).** **Open.** No upstream dispatch-meta channel
+> exists yet; re-frame-pair continues to tag its own dispatches via
+> `tagged-dispatch-sync!` and the `current-who` ratom. Adjacent shipped
+> work: rf-3p7 item 2 (`af024c3`) gives every dispatch an auto-generated
+> `:dispatch-id`, which lets re-frame-pair correlate epochs to the
+> originating dispatch without the before/after-id walking it used to
+> need (consumed via `rfp-fxv`, commit `18a98db`) — but `:dispatch-id`
+> doesn't carry caller-supplied provenance. The proposal below is
+> still the cleanest upstream form.
 
 ### Why this matters
 
@@ -265,9 +287,19 @@ Either of two equivalent shapes:
 
 ## A7. Retained handler source forms in dev builds
 
-**Spec proposal (verbatim):**
-
-> The registrar currently stores only the compiled handler fn. In dev builds, keep the source form alongside. Lets Claude *read* current handler behaviour rather than only overwriting it — better "explain this handler" recipes, safer hot-swap. Required for `registrar/describe` (§4.1) to return a source form.
+> **Status (2026-04-27).** **Superseded for the `handler/source` use
+> case.** re-frame commit `15dfc25` (`rf-ysy`) ships a different mechanism
+> than this section proposed: instead of retaining source *forms*, the
+> upstream `reg-event-db` / `reg-event-fx` / `reg-event-ctx` / `reg-sub`
+> / `reg-fx` macros now `with-meta` `{:file :line}` onto the registered
+> handler value at expansion time. `(meta (registrar/get-handler kind id))`
+> returns the call-site location — sufficient for the SKILL.md "Where
+> in the code is this handler?" recipe. Consumed in re-frame-pair via
+> `rfp-hpu` (commit `fd74b8f`), which retired the briefly-shipped local
+> `rfp-rsg` side-table. The "show the source form itself" use case A7
+> originally proposed remains open — useful for "explain this handler"
+> recipes that go beyond the file/line jump — but is lower priority now
+> that the location lookup is solved.
 
 ### Why this matters
 
@@ -323,9 +355,19 @@ Capture source forms at the `reg-event-db` / `reg-event-fx` / `reg-sub` / `reg-f
 
 ## A8. `dispatch-and-settle` returning a promise/channel
 
-**Spec proposal (verbatim, Tier 3 — speculative):**
-
-> Fulfilled when the event *and* its cascade of `:dispatch` / `:dispatch-later` / `:http-xhrio` / etc. all complete. Collapses the one-animation-frame wait and the "did the async effect land?" question into one primitive. "Settle" is hard to define generally — probably scoped to a configurable set of fx handlers.
+> **Status (2026-04-27).** **Shipped upstream.** re-frame commit `f8f0f59`
+> (`rf-4mr` — `dispatch-and-settle`) ships the fire-and-await primitive
+> this section proposed. The settle scope is the cascade of
+> `:fx [:dispatch ...]` children with an adaptive quiet-period heuristic,
+> bypassing the "settle definition" open question by deferring to the
+> caller's quiet-period budget. Consumed in re-frame-pair via
+> `rfp-4ew` (commit `c87529c`) — `dispatch.sh --trace` now uses
+> `dispatch-and-settle` with a runtime wrapper that stores the
+> resolution in a session-local atom (Promise can't round-trip
+> cljs-eval) and reconstitutes the settled record from the native
+> epoch buffer. Falls back to fixed-sleep + `tagged-dispatch-sync!`
+> for re-frame builds predating rf-4mr. Treat the proposal text below
+> as historical record.
 
 ### Why this matters
 
@@ -388,9 +430,16 @@ A new fn: `(dispatch-and-settle event opts)`. Returns a Promise (CLJS) or core.a
 
 ## A9. Effect substitution for probe dispatches
 
-**Spec proposal (verbatim, Tier 3 — speculative):**
-
-> `dispatch-with` that swaps selected `reg-fx` handlers for no-ops or doubles, so Claude can safely explore event behaviour without triggering real network calls or navigation. Overlaps in spirit with re-frame's existing test utilities; may be achievable by exposing the test-mode machinery at runtime.
+> **Status (2026-04-27).** **Shipped upstream.** re-frame commit `2651a30`
+> (`rf-ge8` — `dispatch-with` / `dispatch-sync-with`) ships per-dispatch
+> fx-handler substitution via `:re-frame/fx-overrides` event-meta. No
+> global state to restore — the override expires when the cascade
+> finishes. Consumed in re-frame-pair via `rfp-zml` (commit `69c570d`):
+> `dispatch.sh --stub :http-xhrio --stub :navigate` builds the
+> `{fx-id record-only-stub}` map for the common probe case;
+> `stubbed-effects-since` exposes the captured-effect log; SKILL.md's
+> experiment-loop recipe gained a "side-effecting handlers" subsection.
+> Treat the proposal text below as historical record.
 
 ### Why this matters
 

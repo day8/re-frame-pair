@@ -1,6 +1,19 @@
 # Companion change for re-com
 
-> Audience: a re-com maintainer. This document proposes one change to re-com that re-frame-pair (a Claude Code skill for introspecting re-frame apps) would benefit from. Read [`docs/initial-spec.md`](./initial-spec.md) — particularly Appendix A and §4.3b — for context. **No upstream patch is being proposed yet; this is a survey + design proposal so the change can be discussed and implemented if there's agreement.**
+> Audience: a re-com maintainer. This document proposes one change to re-com that re-frame-pair (a Claude Code skill for introspecting re-frame apps) would benefit from. Read [`docs/initial-spec.md`](./initial-spec.md) — particularly Appendix A and §4.3b — for context.
+
+> **Status (2026-04-27).** **Shipped upstream.** re-com commits `b3912727`
+> (rc-aeh — emit `:re-com/render` trace carrying `:src` from `->attr`)
+> and `961b9215` (resolve `:re-com/render` trace via exported fns, not
+> the `finish-trace` macro) ship the `:src`-carrying mechanism this
+> document proposed. The "Open questions" section's load-bearing Q1
+> (does Reagent's render trace surface hiccup metadata?) was answered
+> NEGATIVE, so re-com emits its own `:re-com/render` trace alongside
+> Reagent's `:render`, with `:src` in the tags. Re-frame-pair consumer
+> is in flight on its own bead (`rc-u1z` per the audit dispatch); the
+> SKILL.md *re-com-aware* note will expand to mention the new trace
+> tag once that consumer lands. **The proposal text below is retained
+> as historical record.**
 
 re-com components are mostly form-2 Reagent functions (outer fn returning inner render fn). `:src (at)` lands on the DOM as `data-rc-src` via `re-com.debug/->attr` (`debug.cljs:83`) but is never threaded into component metadata that Reagent's render trace picks up. re-frame-pair's v1 adapter therefore joins render trace entries to source via DOM name-and-recency matching — approximate. A small change would carry `:src` through Reagent's render trace itself, making the join exact and removing the DOM detour.
 
