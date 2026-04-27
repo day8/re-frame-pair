@@ -527,6 +527,8 @@ scripts/eval-cljs.sh '(re-frame-pair.runtime/stubbed-effects-since 0)'
 
 The epoch returned by `--trace` includes `:stubbed-fx-ids` so you can verify which substitutions applied. No global state to restore — the override is event-meta, expires when the cascade finishes.
 
+Each `--stub <fx-id>` is checked against the `:fx` registrar before the dispatch fires. If you typo the id (e.g. `:http-xhr` for `:http-xhrio`) the shim emits `{:ok? false :reason :unregistered-fx :unknown [:http-xhr] :requested [...]}` instead of dispatching — the override would otherwise be dead weight and the real fx would run unguarded. List registered ids with `scripts/eval-cljs.sh '(re-frame-pair.runtime/registrar-list :fx)'`.
+
 When you need a stub fn that does something other than record-and-drop (e.g. deterministic on-success callback), call `(re-frame-pair.runtime/dispatch-with! [:ev] {:http-xhrio (fn [req] ...)})` directly via `eval-cljs.sh` — fns can't round-trip the bash CLI.
 
 ### "Narrate the next N events"

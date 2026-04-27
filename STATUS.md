@@ -16,7 +16,7 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | `scripts/ops.clj` + shell shims | Written — babashka dispatches every op |
 | `.claude-plugin/plugin.json` | Written |
 | `package.json` + GH Actions (CI + release) | Written; CI now runs the runtime-test build per push |
-| `tests/runtime/` unit tests | **67 deftests / 351 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
+| `tests/runtime/` unit tests | **70 deftests / 371 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
 | `tests/ops_smoke.bb` babashka tests | **20 deftests / 36 assertions / 0 failures**; ops.clj load-path + pure-helper coverage, run via `npm run test:ops`, gated in CI |
 | `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app; bundled bootstrap + re-com CSS for self-contained rendering; wired into `re-frame-debux` via `:local/root` (rfp-mkf) so the worked example for the form-by-form trace recipe carries a non-nil `:debux/code` |
 | End-to-end against a live re-frame app | **Verified** — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 predicate filters validated; time-travel rolls userland app-db correctly. v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs #1, #2). |
@@ -119,7 +119,7 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 
 **Unit-tested (`tests/runtime/runtime_test.cljs` + `tests/runtime/fixtures.cljs`, runs via `npm test`):**
 
-- 67 deftests / 351 assertions / 0 failures (CLJS) + 20 deftests / 36 assertions / 0 failures (babashka, `tests/ops_smoke.bb`).
+- 70 deftests / 371 assertions / 0 failures (CLJS) + 20 deftests / 36 assertions / 0 failures (babashka, `tests/ops_smoke.bb`).
 - `re-com?` / `re-com-category` (broadened heuristics).
 - `parse-rc-src` (file:line shape, malformed cases, edge cases).
 - `extract-query-vs` (cache-key map → query-v, duplicates, malformed entries).

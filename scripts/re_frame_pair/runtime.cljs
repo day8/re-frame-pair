@@ -1532,9 +1532,11 @@
          :hint        "10x has no match carrying this :dispatch-id. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."}))))
 
 ;; Forward-declared — defined in the dispatch-with bridge below.
-;; dispatch-and-settle!'s :stub-fx-ids opt builds an overrides map
-;; via this helper before forwarding to re-frame.core/dispatch-and-settle.
-(declare build-stub-overrides)
+;; dispatch-and-settle!'s :stub-fx-ids opt validates each id against
+;; the :fx registrar via `validate-fx-ids`, then builds an overrides
+;; map via `build-stub-overrides` before forwarding to
+;; re-frame.core/dispatch-and-settle.
+(declare build-stub-overrides validate-fx-ids)
 
 ;; ---------------------------------------------------------------------------
 ;; dispatch-and-settle! — bridge for the bash shim
@@ -1654,76 +1656,89 @@
      {:ok? false :reason :handler-threw :error ... :event ev}"
   ([event-v] (dispatch-and-settle! event-v {}))
   ([event-v opts]
-   (if-let [d-and-s (dispatch-and-settle-fn)]
-     (let [handle      (str (random-uuid))
-           overrides   (or (:overrides opts)
-                           (when-let [ids (seq (:stub-fx-ids opts))]
-                             (build-stub-overrides ids)))
-           settle-opts (dissoc opts :overrides :stub-fx-ids)
-           ;; rf-ge8 reads :re-frame/fx-overrides off event meta inside
-           ;; do-fx-after; meta survives (dispatch-sync event) so the
-           ;; cascade picks it up.
-           event-meta  (cond-> event-v
-                         overrides (vary-meta assoc :re-frame/fx-overrides overrides))]
-       (reset! current-who :claude)
-       (try
-         (let [p                (d-and-s event-meta settle-opts)
-               root-dispatch-id (recent-dispatch-id)]
-           (when root-dispatch-id
-             (swap! claude-dispatch-ids conj root-dispatch-id))
-           (swap! settle-pending assoc handle
-                  {:settled?    false
-                   :started-at  (js/Date.now)
-                   :event       event-v
-                   :dispatch-id root-dispatch-id})
-           (-> p
-               (.then (fn [js-result]
-                        (let [raw     (js->clj js-result :keywordize-keys true)
-                              ok?     (boolean (:ok? raw))
-                              cascade (when (and ok? root-dispatch-id)
-                                        (collect-cascade-from-buffer root-dispatch-id))]
-                          (swap! settle-pending update handle merge
-                                 (cond-> {:settled?           true
-                                          :ok?                ok?
-                                          :event              event-v
-                                          :dispatch-id        root-dispatch-id
-                                          :epoch-id           (some-> cascade :root-epoch :id)
-                                          :epoch              (some-> cascade :root-epoch)
-                                          :cascaded-epoch-ids (or (:cascaded-epoch-ids cascade) [])
-                                          :cascaded-epochs    (or (:cascaded-epochs cascade) [])}
-                                   (not ok?) (assoc :reason (:reason raw)))))))
-               (.catch (fn [err]
-                         (swap! settle-pending update handle merge
-                                {:settled? true
-                                 :ok?      false
-                                 :reason   :promise-rejected
-                                 :error    (str err)
-                                 :event    event-v}))))
-           (cond-> {:ok?         true
-                    :handle      handle
-                    :event       event-v
-                    :dispatch-id root-dispatch-id
-                    :pending?    true}
-             overrides (assoc :stubbed-fx-ids (vec (sort (keys overrides))))))
-         (catch :default e
-           (swap! settle-pending dissoc handle)
-           (let [stack (try (.-stack e) (catch :default _ ""))]
-             (append-console-entry!
-              :error
-              [(str "[handler-threw] " (or (ex-message e) (str e)))
-               (str event-v)]
-              stack
-              :handler-error))
-           {:ok?        false
-            :reason     :handler-threw
-            :event      event-v
-            :error      (or (ex-message e) (str e))
-            :error-data (when-let [d (ex-data e)] (pr-str d))})
-         (finally
-           (reset! current-who :app))))
-     {:ok?    false
-      :reason :dispatch-and-settle-unavailable
-      :hint   "re-frame predates rf-4mr (commit f8f0f59) — fall back to tagged-dispatch-sync! + collect-after-dispatch."})))
+   (let [stub-ids   (:stub-fx-ids opts)
+         validation (when (seq stub-ids) (validate-fx-ids stub-ids))]
+     (cond
+       ;; Surface the typoed --stub fx-id as a structured error before
+       ;; the dispatch fires — otherwise the override map is dead weight
+       ;; and the real fx runs unguarded. `:overrides` (a power-user
+       ;; explicit map) is left to the caller to validate.
+       (and validation (not (:ok? validation)))
+       validation
+
+       (nil? (dispatch-and-settle-fn))
+       {:ok?    false
+        :reason :dispatch-and-settle-unavailable
+        :hint   "re-frame predates rf-4mr (commit f8f0f59) — fall back to tagged-dispatch-sync! + collect-after-dispatch."}
+
+       :else
+       (let [d-and-s     (dispatch-and-settle-fn)
+             handle      (str (random-uuid))
+             overrides   (or (:overrides opts)
+                             (when-let [ids (seq stub-ids)]
+                               (build-stub-overrides ids)))
+             settle-opts (dissoc opts :overrides :stub-fx-ids)
+             ;; rf-ge8 reads :re-frame/fx-overrides off event meta inside
+             ;; do-fx-after; meta survives (dispatch-sync event) so the
+             ;; cascade picks it up.
+             event-meta  (cond-> event-v
+                           overrides (vary-meta assoc :re-frame/fx-overrides overrides))]
+         (reset! current-who :claude)
+         (try
+           (let [p                (d-and-s event-meta settle-opts)
+                 root-dispatch-id (recent-dispatch-id)]
+             (when root-dispatch-id
+               (swap! claude-dispatch-ids conj root-dispatch-id))
+             (swap! settle-pending assoc handle
+                    {:settled?    false
+                     :started-at  (js/Date.now)
+                     :event       event-v
+                     :dispatch-id root-dispatch-id})
+             (-> p
+                 (.then (fn [js-result]
+                          (let [raw     (js->clj js-result :keywordize-keys true)
+                                ok?     (boolean (:ok? raw))
+                                cascade (when (and ok? root-dispatch-id)
+                                          (collect-cascade-from-buffer root-dispatch-id))]
+                            (swap! settle-pending update handle merge
+                                   (cond-> {:settled?           true
+                                            :ok?                ok?
+                                            :event              event-v
+                                            :dispatch-id        root-dispatch-id
+                                            :epoch-id           (some-> cascade :root-epoch :id)
+                                            :epoch              (some-> cascade :root-epoch)
+                                            :cascaded-epoch-ids (or (:cascaded-epoch-ids cascade) [])
+                                            :cascaded-epochs    (or (:cascaded-epochs cascade) [])}
+                                     (not ok?) (assoc :reason (:reason raw)))))))
+                 (.catch (fn [err]
+                           (swap! settle-pending update handle merge
+                                  {:settled? true
+                                   :ok?      false
+                                   :reason   :promise-rejected
+                                   :error    (str err)
+                                   :event    event-v}))))
+             (cond-> {:ok?         true
+                      :handle      handle
+                      :event       event-v
+                      :dispatch-id root-dispatch-id
+                      :pending?    true}
+               overrides (assoc :stubbed-fx-ids (vec (sort (keys overrides))))))
+           (catch :default e
+             (swap! settle-pending dissoc handle)
+             (let [stack (try (.-stack e) (catch :default _ ""))]
+               (append-console-entry!
+                :error
+                [(str "[handler-threw] " (or (ex-message e) (str e)))
+                 (str event-v)]
+                stack
+                :handler-error))
+             {:ok?        false
+              :reason     :handler-threw
+              :event      event-v
+              :error      (or (ex-message e) (str e))
+              :error-data (when-let [d (ex-data e)] (pr-str d))})
+           (finally
+             (reset! current-who :app))))))))
 
 (defn await-settle
   "Read the settle-pending atom for `handle`. Used by the bash shim's
@@ -1819,6 +1834,29 @@
   [fx-ids]
   (into {} (for [k fx-ids] [k (record-only-stub k)])))
 
+(defn validate-fx-ids
+  "Verify every fx-id keyword in `fx-ids` names a registered :fx
+   handler. Returns `{:ok? true}` when every id resolves; otherwise
+   `{:ok? false :reason :unregistered-fx :unknown [...] :requested [...]
+   :hint ...}` listing the unrecognised ids alongside the full request.
+
+   Driven by `--stub` callers (`dispatch-with-stubs!` /
+   `dispatch-sync-with-stubs!` / `dispatch-and-settle!`'s `:stub-fx-ids`
+   opt). Without it a typoed fx-id (e.g. `:http-xhr` for `:http-xhrio`)
+   would be planted in the override map but never matched by a real
+   fx-id during do-fx-after, so the real fx fires unguarded — the
+   stubbed-fx-ids vec would still claim the substitution applied. Public
+   for tests."
+  [fx-ids]
+  (let [unknown (filterv #(nil? (registrar/get-handler :fx %)) fx-ids)]
+    (if (seq unknown)
+      {:ok?       false
+       :reason    :unregistered-fx
+       :unknown   unknown
+       :requested (vec fx-ids)
+       :hint      "Unknown fx-id(s) — pass an id registered with reg-fx. Inspect available ids with `(re-frame-pair.runtime/registrar-list :fx)`."}
+      {:ok? true})))
+
 (defn stubbed-effects-since
   "Slice of `stub-effect-log` with `:ts >= since-ts`. Returns
    `{:ok? true :entries [...] :now <ms>}`. Pass back the `:now` from
@@ -1912,14 +1950,26 @@
   "Convenience: `dispatch-with!` with record-only stubs for each fx-id
    in `fx-ids`. The bash shim's `--stub <fx-id>` flag drives this —
    passing keywords across cljs-eval is straightforward where passing
-   fns is not."
+   fns is not.
+
+   `validate-fx-ids` runs first: a typoed fx-id short-circuits with
+   `:reason :unregistered-fx` before re-frame is touched, so the bash
+   shim surfaces the bad input rather than silently letting the real
+   fx fire."
   [event-v fx-ids]
-  (dispatch-with! event-v (build-stub-overrides fx-ids)))
+  (let [v (validate-fx-ids fx-ids)]
+    (if (:ok? v)
+      (dispatch-with! event-v (build-stub-overrides fx-ids))
+      v)))
 
 (defn dispatch-sync-with-stubs!
-  "`dispatch-sync-with!` counterpart of `dispatch-with-stubs!`."
+  "`dispatch-sync-with!` counterpart of `dispatch-with-stubs!`. Same
+   `validate-fx-ids` short-circuit on unregistered fx-ids."
   [event-v fx-ids]
-  (dispatch-sync-with! event-v (build-stub-overrides fx-ids)))
+  (let [v (validate-fx-ids fx-ids)]
+    (if (:ok? v)
+      (dispatch-sync-with! event-v (build-stub-overrides fx-ids))
+      v)))
 
 ;; ---------------------------------------------------------------------------
 ;; re-com awareness

@@ -858,13 +858,70 @@
 
 (deftest dispatch-with-stubs-bang-builds-overrides
   (testing "dispatch-with-stubs! threads through dispatch-with! — same
-            fallback path under runtime-test (no rf-ge8)"
-    (let [r (rt/dispatch-with-stubs! [:test/foo] [:http-xhrio :navigate])]
+            fallback path under runtime-test (no rf-ge8). Use :dispatch
+            (registered by re-frame on load) so validate-fx-ids passes
+            and the wrapper actually reaches dispatch-with!."
+    (let [r (rt/dispatch-with-stubs! [:test/foo] [:dispatch])]
       (is (= :dispatch-with-unavailable (:reason r)))))
 
   (testing "dispatch-sync-with-stubs! mirrors"
-    (let [r (rt/dispatch-sync-with-stubs! [:test/foo] [:http-xhrio])]
+    (let [r (rt/dispatch-sync-with-stubs! [:test/foo] [:dispatch])]
       (is (= :dispatch-sync-with-unavailable (:reason r))))))
+
+(deftest validate-fx-ids-shape
+  (testing "empty input returns ok — nothing to validate"
+    (is (= {:ok? true} (rt/validate-fx-ids []))))
+
+  (testing "every id registered (re-frame ships :dispatch / :db / :fx
+            etc. as builtins) → ok"
+    (is (= {:ok? true} (rt/validate-fx-ids [:dispatch])))
+    (is (= {:ok? true} (rt/validate-fx-ids [:dispatch :db :fx]))))
+
+  (testing "all ids unknown → :reason :unregistered-fx with both
+            :unknown and :requested populated"
+    (let [r (rt/validate-fx-ids [:nope/not-a-thing])]
+      (is (false? (:ok? r)))
+      (is (= :unregistered-fx (:reason r)))
+      (is (= [:nope/not-a-thing] (:unknown r)))
+      (is (= [:nope/not-a-thing] (:requested r)))
+      (is (string? (:hint r)))))
+
+  (testing "mixed input: only the unregistered ids land in :unknown,
+            while :requested mirrors the full input"
+    (let [r (rt/validate-fx-ids [:dispatch :nope/not-a-thing :db])]
+      (is (false? (:ok? r)))
+      (is (= [:nope/not-a-thing] (:unknown r)))
+      (is (= [:dispatch :nope/not-a-thing :db] (:requested r))))))
+
+(deftest dispatch-with-stubs-bang-validates-fx-ids
+  (testing "dispatch-with-stubs! short-circuits on a typoed fx-id —
+            :reason :unregistered-fx wins over the rf-ge8 capability
+            check (validation runs first; the user gets actionable
+            input feedback before re-frame is touched)"
+    (let [r (rt/dispatch-with-stubs! [:test/foo] [:http-xhr])]
+      (is (false? (:ok? r)))
+      (is (= :unregistered-fx (:reason r)))
+      (is (= [:http-xhr] (:unknown r)))))
+
+  (testing "dispatch-sync-with-stubs! mirrors"
+    (let [r (rt/dispatch-sync-with-stubs! [:test/foo] [:http-xhr])]
+      (is (= :unregistered-fx (:reason r)))
+      (is (= [:http-xhr] (:unknown r))))))
+
+(deftest dispatch-and-settle-bang-validates-stub-fx-ids
+  (testing ":stub-fx-ids is validated before the rf-4mr capability
+            check — a typo surfaces as :unregistered-fx instead of
+            :dispatch-and-settle-unavailable so the bash shim can flag
+            the bad input without falling through to legacy mode"
+    (let [r (rt/dispatch-and-settle! [:test/foo] {:stub-fx-ids [:http-xhr]})]
+      (is (false? (:ok? r)))
+      (is (= :unregistered-fx (:reason r)))
+      (is (= [:http-xhr] (:unknown r)))))
+
+  (testing "no :stub-fx-ids → validation skipped, falls through to the
+            unavailable response under runtime-test (no rf-4mr)"
+    (let [r (rt/dispatch-and-settle! [:test/foo])]
+      (is (= :dispatch-and-settle-unavailable (:reason r))))))
 
 ;; -----------------------------------------------------------------------------
 ;; rfp-12p / rfd-btn — dbg-macro-available? feature probe.
