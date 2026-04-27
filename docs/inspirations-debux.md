@@ -5,9 +5,12 @@ day8 fork [re-frame-debux](https://github.com/day8/re-frame-debux) (cloned
 locally at `/home/mike/code/re-frame-debux`), and what — if anything —
 re-frame-pair should take from them.
 
-> **Implementation status (2026-04-26).** Phase 1 of the integration described
-> in §6 has shipped on `main` as bead `rfp-hjj` (commits `3c3c8cd`, `09e30ec`,
-> `29cf2f6`, `3568c11`, plus README mention `09a9551`):
+> **Implementation status (2026-04-27).** All actionable items in this
+> survey have shipped. The doc is retained as the design rationale for
+> the integration; treat the per-section sketches as historical record.
+>
+> **Phase 1 — bridge + recipe + dedupe** (`rfp-hjj`, commits `3c3c8cd`,
+> `09e30ec`, `29cf2f6`, `3568c11`; README mention `09a9551`):
 >
 > - §3b bridge: `coerce-epoch` surfaces `:debux/code` from `:tags :code`
 >   (conditional-free; absent → `nil`).
@@ -16,13 +19,27 @@ re-frame-pair should take from them.
 > - §3c dedupe: `watch-epochs.sh --dedupe-by :event` ships debux's `:once`
 >   semantics for the live-watch path.
 >
-> Phase 2 (§3.0 simplification using `wrap-handler!`/`unwrap-handler!`
-> runtime API) shipped 2026-04-26 in re-frame-debux commit `4ed07c9`
-> (rfd-8g9) and landed in this skill as `rfp-6z2` — the `Trace a
-> handler / sub / fx form-by-form` recipe in `SKILL.md` now branches
-> on `runtime/debux-runtime-api?` and uses the runtime API as the
-> primary path, with the manual `fn-traced` rewrite kept as a
-> fallback for older debux releases.
+> **Phase 2 — `wrap-handler!` / `unwrap-handler!` runtime API**
+> (re-frame-debux `4ed07c9`, rfd-8g9; consumed in re-frame-pair as
+> `rfp-6z2` commit `a285c1d`, then refined to probe upstream's dedicated
+> `runtime-api?` var via `ci-hpg` Phase 2 commit `c498dc7`). The §3.0
+> recipe in `SKILL.md` now branches on `runtime/debux-runtime-api?`,
+> taking the runtime-API path when available and falling back to the
+> manual `fn-traced` rewrite for older debux releases.
+>
+> **§3.0 single-expression variant — `dbg` / `dbgn`** (`rfp-12p`, commit
+> `c81234a`; upstream-side `rfd-btn` provides the macro). SKILL.md gained
+> a separate *Trace a single expression at the REPL* recipe; runtime
+> probe `dbg-macro-available?` mirrors `debux-runtime-api?`'s shape so
+> the detect-and-branch pattern is consistent between both granularities.
+>
+> **§3a fallback (`repl/spy-form` for when debux isn't on the classpath)
+> — deliberately not pursued.** The runtime probes `debux-runtime-api?`
+> / `dbg-macro-available?` plus the existing `repl/eval` escape hatch
+> covers the "no debux loaded" case adequately; the SKILL.md recipes
+> already prompt the user to add `day8.re-frame/tracing` to dev deps if
+> not present. A from-scratch `spy-form` op would duplicate
+> `tagged-dispatch-sync!` plumbing without earning its keep.
 
 ## 1. What debux / re-frame-debux are
 
