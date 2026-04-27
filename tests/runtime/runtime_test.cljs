@@ -178,8 +178,12 @@
       (is (= {:cart {:coupon "SPRING25"}} (get-in e [:app-db/diff :only-after])))
       (is (nil? (get-in e [:app-db/diff :only-before]))))
     (testing "subs/ran — reactions that re-ran AND value changed
-              (read from :sub-state :reaction-state, not :match-info)"
-      (is (= [{:query-v [:cart/total]}] (:subs/ran e))))
+              (read from :sub-state :reaction-state, not :match-info).
+              :input-query-vs is nil here because the synthetic
+              all-traces fixture has no :sub/run traces — under live
+              fixture conditions it carries the dep graph from
+              re-frame's :input-query-vs tag (rfp-fxv / rf-3p7 item 3)."
+      (is (= [{:query-v [:cart/total] :input-query-vs nil}] (:subs/ran e))))
     (testing "subs/cache-hit — reactions that re-ran but value was
               :unchanged? (closest signal 10x exposes to a 'cache hit')"
       (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
@@ -265,7 +269,7 @@
         e   (rt/coerce-epoch fixtures/synthetic-render-burst ctx)]
     (testing "render-burst match self-sources its render data"
       (is (= 2 (count (:renders e))))
-      (is (= [{:query-v [:cart/total]}] (:subs/ran e)))
+      (is (= [{:query-v [:cart/total] :input-query-vs nil}] (:subs/ran e)))
       (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))))
 
 ;; -----------------------------------------------------------------------------

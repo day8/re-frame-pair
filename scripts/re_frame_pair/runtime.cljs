@@ -485,6 +485,29 @@
   [s]
   (when (string? s) (cljs.core/demunge s)))
 
+(defn- sub-input-deps
+  "Map of query-v → :input-query-vs, sourced from `:sub/run` trace
+   tags in the live trace stream. rfp-fxv / rf-3p7 item 3
+   (re-frame commit fa90f70) added `:input-query-vs` alongside
+   `:input-signals` on every `:sub/run`; this map is the lookup
+   table that turns the raw trace stream into a per-sub dep
+   graph for `subs/ran`'s output.
+
+   When a query-v re-runs multiple times (typical), the
+   most-recent run wins — input deps don't change between runs
+   for the same sub. Empty when re-frame predates fa90f70 or
+   all-traces is empty (no enrichment then; consumers see
+   `:input-query-vs` nil per entry)."
+  [all-traces]
+  (->> all-traces
+       (filter #(= :sub/run (:op-type %)))
+       (reduce (fn [m t]
+                 (let [tags (:tags t)]
+                   (if-let [q (:query-v tags)]
+                     (assoc m q (:input-query-vs tags))
+                     m)))
+               {})))
+
 (defn- sub-runs-from-state
   "§4.3a :subs/ran. 10x's `:match-info` doesn't carry `:sub/run` traces
    directly (`metam/parse-traces` strips them when building partitions);
@@ -492,17 +515,24 @@
    `(-> match :sub-state :reaction-state)` records `:run? true` and
    `:order [:sub/run ...]` for each reaction that re-ran during the
    epoch. We pick those whose value *changed* — `:sub/traits
-   :unchanged?` not set — and expose just the user-facing query-v.
+   :unchanged?` not set — and expose the user-facing query-v plus
+   the dep-graph edges from the matching :sub/run trace's
+   `:input-query-vs` tag (rfp-fxv / rf-3p7 item 3 — re-frame commit
+   fa90f70).
 
    `:time-ms` is not stored per-sub at this layer; omit it rather than
    make it up. Total sub time is in :timing :animation-frame-subs if
    needed."
-  [match]
-  (->> (-> match :sub-state :reaction-state)
-       (filter (fn [[_ sub]]
-                 (and (some #{:sub/run} (:order sub))
-                      (not (get-in sub [:sub/traits :unchanged?])))))
-       (mapv (fn [[_ sub]] {:query-v (:subscription sub)}))))
+  [match all-traces]
+  (let [deps (sub-input-deps all-traces)]
+    (->> (-> match :sub-state :reaction-state)
+         (filter (fn [[_ sub]]
+                   (and (some #{:sub/run} (:order sub))
+                        (not (get-in sub [:sub/traits :unchanged?])))))
+         (mapv (fn [[_ sub]]
+                 (let [q (:subscription sub)]
+                   {:query-v        q
+                    :input-query-vs (get deps q)}))))))
 
 (defn- sub-cache-hits-from-state
   "§4.3a :subs/cache-hit. Re-frame doesn't trace genuine cache hits
@@ -650,12 +680,22 @@
         ;; `registrar/describe :event <id>`.
         :interceptor-chain (mapv :id (:interceptors tags))
         :app-db/diff       (diff-app-db event-trace)
-        :subs/ran          (when render-src (sub-runs-from-state render-src))
+        :subs/ran          (when render-src (sub-runs-from-state render-src all-traces))
         :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src))
         :renders           (when render-src (renders-from-traces render-src all-traces))
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
-        :debux/code        (:code tags)}))))
+        :debux/code        (:code tags)
+        ;; rfp-fxv / rf-3p7 item 2 — auto-generated dispatch correlation
+        ;; from re-frame core (commit af024c3). nil for events
+        ;; dispatched on a re-frame predating that commit. The
+        ;; :dispatch-id is unique per `re-frame.events/handle` entry;
+        ;; :parent-dispatch-id is set when the event was queued from
+        ;; within another handler's `:fx [:dispatch ...]`. Powers the
+        ;; "is this MY dispatch or a chained child?" filter that used
+        ;; to require ~80 LOC of before-id/after-id walking.
+        :dispatch-id        (:dispatch-id tags)
+        :parent-dispatch-id (:parent-dispatch-id tags)}))))
 
 (defn debux-runtime-api?
   "True iff `day8.re-frame.tracing.runtime/runtime-api?` is loaded
@@ -927,31 +967,48 @@
       :max-size max-size})))
 
 ;; ---------------------------------------------------------------------------
-;; Claude-dispatch tagging
+;; Claude-dispatch tagging — rfp-fxv collapses the pre-rf-3p7
+;; before-id/after-id correlation onto upstream's auto-generated
+;; :dispatch-id. The session-local set still exists so
+;; last-claude-epoch can answer "the most recent epoch I dispatched"
+;; without the caller threading the id back to us, but it now stores
+;; dispatch-ids (UUIDs) rather than 10x match-ids.
 ;; ---------------------------------------------------------------------------
-;;
-;; Event vectors can't carry metadata through re-frame (handlers
-;; destructure positionally). Instead we track *the epoch ids our
-;; dispatches produced* in a session-local set.
 
-(defonce claude-epoch-ids
+(defonce claude-dispatch-ids
   (atom #{}))
 
-(defn- remember-latest-epoch!
-  "Record the current head-of-buffer id as a Claude-originated epoch."
+(defn- recent-dispatch-id
+  "After a `dispatch-sync`, read `re-frame.trace/traces` for the
+   most recent `:event` trace and return its `:dispatch-id`.
+   `re-frame.trace/traces` is updated synchronously inside
+   `re-frame.events/handle`'s `with-trace` finish-trace (the cb
+   delivery to 10x runs through a ~50ms debounce, but the source
+   atom updates immediately), so this resolves the id we just
+   generated as long as no cb fired between finish-trace and our
+   read — acceptable race in practice (single-threaded JS, the cb
+   is goog.functions/debounce'd 50ms out from the LAST trace).
+
+   nil when re-frame predates rf-3p7 commit af024c3 (no
+   :dispatch-id tag generated)."
   []
-  (when-let [id (latest-epoch-id)]
-    (swap! claude-epoch-ids conj id)
-    id))
+  (->> @re-frame.trace/traces
+       reverse
+       (some (fn [t] (when (= :event (:op-type t))
+                       (-> t :tags :dispatch-id))))))
 
 (defn tagged-dispatch!
-  "Dispatch an event (queued) and record the resulting epoch's id in
-   the Claude-originated set. Returns {:ok? true :epoch-id <id>}.
+  "Dispatch an event (queued) — the handler runs out of band, so the
+   :dispatch-id is generated only when handle eventually fires.
 
    `current-who` is set to `:claude` for the duration of the enqueue
    call; the handler itself runs out of band, so handler-side console
    output tags `:app`. Use `tagged-dispatch-sync!` when you need
-   handler output tagged."
+   handler output tagged.
+
+   Returns {:ok? true :queued? true :event ...}. `:dispatch-id` and
+   `:epoch-id` are nil — dispatch is queued, the epoch appears once
+   the handler runs."
   [event-v]
   (reset! current-who :claude)
   (try
@@ -961,77 +1018,87 @@
   {:ok? true
    :queued? true
    :event event-v
-   ;; Note: id not yet known — dispatch is queued, the epoch appears
-   ;; once the handler runs. Callers that want the id should use
-   ;; `tagged-dispatch-sync!` instead.
-   :epoch-id nil})
+   :epoch-id nil
+   :dispatch-id nil})
 
 (defn tagged-dispatch-sync!
-  "`dispatch-sync` the event and capture the pre-dispatch head id so
-   the caller can resolve the resulting epoch after the trace debounce
-   completes.
+  "`dispatch-sync` the event and read back the auto-generated
+   `:dispatch-id` from re-frame's trace stream so callers can
+   correlate the eventual epoch to this dispatch.
 
-   Why no synchronous epoch resolution: `re-frame.trace`'s callback
-   delivery to 10x runs through a ~50ms debounce. The trace events for
-   this dispatch are emitted synchronously, but 10x's `::receive-new-traces`
-   event (which appends to `:epochs :matches-by-id`) doesn't fire until
-   the debounce flushes. Reading `latest-epoch-id` immediately after
-   `dispatch-sync` may or may not show the new epoch.
+   The :dispatch-id comes from re-frame core (rf-3p7 commit af024c3)
+   — generated at every `re-frame.events/handle` entry, emitted on
+   the `:event` trace's `:tags`. We capture it from
+   `@re-frame.trace/traces` immediately after dispatch-sync returns
+   (the trace is finished synchronously inside `handle`'s
+   `with-trace`).
 
-   Use `dispatch-and-collect` for the full async round-trip — it waits
-   long enough for the debounce + an animation frame, then resolves the
-   epoch and tags it. For raw fire-and-forget callers, the return value
-   includes `:before-id` so they can poll `latest-epoch-id` themselves.
+   The async note on epoch resolution still applies: trace events
+   for this dispatch are emitted synchronously, but 10x's
+   `::receive-new-traces` event (which appends to
+   `:epochs :matches-by-id`) doesn't fire until re-frame.trace's
+   ~50ms cb-delivery debounce flushes. Use `dispatch-and-collect`
+   for the full async round-trip, or call `collect-after-dispatch`
+   with the returned `:dispatch-id` after a bash-side wait.
 
-   Handler errors: re-frame's default error handler logs to console and
-   re-throws the original exception, so a throwing handler would normally
-   propagate out of `dispatch-sync` and back through `cljs-eval` as an
-   nREPL `:err` — which then breaks the bb shim's edn parsing. We catch
-   here and return a structured `:reason :handler-threw` instead, so the
-   experiment-loop recipe (and dispatch.sh's --trace path) sees a clean
-   failure shape."
+   Handler errors: re-frame's default error handler logs to console
+   and re-throws, which would propagate through `cljs-eval` as an
+   nREPL `:err` and break the bb shim's edn parsing. We catch and
+   return a structured `:reason :handler-threw` instead.
+
+   Returns:
+     {:ok? true :event ev :dispatch-id <uuid|nil> :epoch-id nil}
+     {:ok? false :reason :handler-threw :error ... :error-data ...}"
   [event-v]
-  (let [before-id (latest-epoch-id)]
-    (reset! current-who :claude)
+  (reset! current-who :claude)
+  (try
     (try
-      (try
-        (rf/dispatch-sync event-v)
-        {:ok?       true
-         :event     event-v
-         :before-id before-id
-         ;; Resolved by dispatch-and-collect after frame/debounce wait.
-         :epoch-id  nil
-         :note      "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or poll latest-epoch-id."}
-        (catch :default e
-          ;; Surface the throw on the console-log buffer too, tagged
-          ;; :handler-error, so console-tail picks it up alongside
-          ;; the structured response. Stack matters for these.
-          (let [stack (try (.-stack e) (catch :default _ ""))]
-            (append-console-entry!
-             :error
-             [(str "[handler-threw] " (or (ex-message e) (str e)))
-              (str event-v)]
-             stack
-             :handler-error))
-          ;; Stringify ex-data — it can carry JS object refs (interceptor
-          ;; records, ratoms) that don't edn-roundtrip back to the bb shim.
-          {:ok?        false
-           :reason     :handler-threw
-           :event      event-v
-           :before-id  before-id
-           :error      (or (ex-message e) (str e))
-           :error-data (when-let [d (ex-data e)] (pr-str d))}))
-      (finally
-        (reset! current-who :app)))))
+      (rf/dispatch-sync event-v)
+      (let [dispatch-id (recent-dispatch-id)]
+        (when dispatch-id
+          (swap! claude-dispatch-ids conj dispatch-id))
+        {:ok?         true
+         :event       event-v
+         :dispatch-id dispatch-id
+         ;; Resolved by dispatch-and-collect / collect-after-dispatch.
+         :epoch-id    nil
+         :note        (if dispatch-id
+                        "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or collect-after-dispatch with :dispatch-id."
+                        "re-frame predates rf-3p7 (commit af024c3) — :dispatch-id auto-generation not available; correlation by :dispatch-id won't work.")})
+      (catch :default e
+        ;; Surface the throw on the console-log buffer too, tagged
+        ;; :handler-error, so console-tail picks it up alongside
+        ;; the structured response. Stack matters for these.
+        (let [stack (try (.-stack e) (catch :default _ ""))]
+          (append-console-entry!
+           :error
+           [(str "[handler-threw] " (or (ex-message e) (str e)))
+            (str event-v)]
+           stack
+           :handler-error))
+        ;; Stringify ex-data — it can carry JS object refs (interceptor
+        ;; records, ratoms) that don't edn-roundtrip back to the bb shim.
+        {:ok?        false
+         :reason     :handler-threw
+         :event      event-v
+         :error      (or (ex-message e) (str e))
+         :error-data (when-let [d (ex-data e)] (pr-str d))}))
+    (finally
+      (reset! current-who :app))))
 
 (defn last-claude-epoch
-  "Most recent epoch that the skill dispatched in this session."
+  "Most recent epoch dispatched by the skill in this session.
+   Resolves by walking 10x's buffer (newest-first) for the first
+   epoch whose `:dispatch-id` appears in `claude-dispatch-ids`."
   []
-  (let [ours @claude-epoch-ids]
-    (->> (read-10x-epochs)
-         reverse
-         (some (fn [raw] (when (contains? ours (:id raw)) raw)))
-         coerce-epoch)))
+  (let [ours @claude-dispatch-ids]
+    (some->> (read-10x-epochs)
+             reverse
+             (some (fn [raw]
+                     (let [evt-trace (find-trace raw :event)
+                           dispatch-id (-> evt-trace :tags :dispatch-id)]
+                       (when (contains? ours dispatch-id) raw))))
+             coerce-epoch)))
 
 (def ^:private trace-debounce-settle-ms
   "How long we wait after dispatch-sync before reading 10x's epoch
@@ -1041,86 +1108,97 @@
    to flush. 80ms is comfortably past both."
   80)
 
+(defn- find-epoch-by-dispatch-id
+  "Walk 10x's epoch buffer (newest-first; we expect the match within
+   the most-recent few entries after a dispatch-sync) for the epoch
+   whose event-trace carries the given dispatch-id. nil if not yet
+   landed."
+  [dispatch-id matches]
+  (some (fn [m]
+          (when (= dispatch-id (-> (find-trace m :event) :tags :dispatch-id))
+            m))
+        (reverse matches)))
+
+(defn- chained-dispatch-ids
+  "Vec of dispatch-ids whose event-trace carries this dispatch-id as
+   `:parent-dispatch-id` — i.e. children fired via `:fx [:dispatch ...]`
+   from within the parent's handler. Walks `matches` in chronological
+   order so the returned vec preserves dispatch order."
+  [parent-id matches]
+  (->> matches
+       (keep (fn [m]
+               (let [tags (:tags (find-trace m :event))]
+                 (when (= parent-id (:parent-dispatch-id tags))
+                   (:dispatch-id tags)))))
+       vec))
+
 (defn dispatch-and-collect
   "dispatch-sync the event, wait for the trace debounce + a render
    frame so renders land in 10x's match-info, then resolve the epoch
-   produced (and tag it as a Claude-originated epoch).
+   produced via :dispatch-id correlation.
 
-   Returns a JS Promise — the shim awaits. The promise's value is
-   either {:ok? true :epoch-id ... :epoch ...} or a structured
-   {:ok? false :reason ... :event ...} when the epoch never landed."
+   Returns a JS Promise — the shim awaits. Resolves to
+   `{:ok? true :epoch-id ... :epoch ...}` or
+   `{:ok? false :reason ... :event ...}`."
   [event-v]
   (js/Promise.
    (fn [resolve _reject]
-     (let [{:keys [before-id]} (tagged-dispatch-sync! event-v)
+     (let [{:keys [dispatch-id]} (tagged-dispatch-sync! event-v)
            settle (fn settle []
                     (js/requestAnimationFrame
                      (fn []
-                       (let [after-id (latest-epoch-id)]
-                         (if (and after-id (not= before-id after-id))
-                           (do (swap! claude-epoch-ids conj after-id)
-                               (resolve (clj->js
-                                         {:ok?      true
-                                          :epoch-id after-id
-                                          :epoch    (epoch-by-id after-id)})))
+                       (let [matches (read-10x-epochs)
+                             ours-m  (when dispatch-id
+                                       (find-epoch-by-dispatch-id dispatch-id matches))]
+                         (if ours-m
                            (resolve (clj->js
-                                     {:ok?    false
-                                      :reason :no-new-epoch
-                                      :event  event-v
-                                      :before-id before-id
-                                      :after-id  after-id
-                                      :hint   "10x did not append a new match within the debounce + 1 frame. The dispatch fired, but no trace landed — possible causes: trace-enabled? false, handler threw before tracing finished, or browser tab is throttled."}))))))) ]
+                                     {:ok?         true
+                                      :dispatch-id dispatch-id
+                                      :epoch-id    (match-id ours-m)
+                                      :epoch       (coerce-epoch ours-m)}))
+                           (resolve (clj->js
+                                     {:ok?         false
+                                      :reason      :no-new-epoch
+                                      :event       event-v
+                                      :dispatch-id dispatch-id
+                                      :hint        "10x did not append a match for this :dispatch-id within the debounce + 1 frame. Possible causes: trace-enabled? false; handler threw before tracing finished; tab throttled; or re-frame predates rf-3p7 (no :dispatch-id generated)."})))))))]
        (js/setTimeout settle trace-debounce-settle-ms)))))
 
 (defn collect-after-dispatch
   "Companion to `tagged-dispatch-sync!`: after a bash-side wait past
-   the trace-debounce, find the FIRST new epoch (the one we slung,
-   not whatever happens to be at head), tag it as Claude-originated,
-   and return its coerced form. Any further epochs that landed after
-   it (e.g. via `:fx [:dispatch ...]` chaining) are returned as
-   `:chained-epoch-ids` for context.
+   the trace-debounce, resolve the epoch by `:dispatch-id` correlation
+   (rf-3p7 / af024c3 in re-frame core) and return its coerced form
+   plus any chained children fired via `:fx [:dispatch ...]`.
 
-   This is the synchronous equivalent of `dispatch-and-collect`'s
-   post-await branch — split out so the bb shim can drive the wait
-   itself (the JS Promise from `dispatch-and-collect` doesn't survive
-   the cljs-eval round-trip back to babashka).
+   The bash shim drives the wait — `dispatch-and-collect`'s JS
+   Promise doesn't survive the cljs-eval round-trip back to babashka.
 
-   Why first-after, not head: a `reg-event-fx` that returns
-   `:fx [[:dispatch [:other-ev ...]]]` queues a follow-up event. Once
-   the trace-debounce flushes, both the user event and the chained
-   one(s) are in 10x's buffer. Sampling `latest-epoch-id` then would
-   return the chained event's id — wrong: we want the event we slung.
-   Walk the buffer for the first match-id > before-id instead.
-
-   Caller pattern (in ops.clj's --trace path):
-     1. cljs-eval `(tagged-dispatch-sync! ev)` → grab :before-id
+   Caller pattern (ops.clj's --trace path):
+     1. cljs-eval `(tagged-dispatch-sync! ev)` → grab :dispatch-id
      2. Thread/sleep ~80ms (trace-debounce-settle-ms below)
-     3. cljs-eval `(collect-after-dispatch <before-id>)` → epoch + tag
+     3. cljs-eval `(collect-after-dispatch <dispatch-id>)` → epoch
 
    Returns:
-     {:ok? true :epoch-id <id> :epoch <coerced> :chained-epoch-ids [...]}
-     {:ok? false :reason :no-new-epoch :before-id ... :after-id ...}"
-  [before-id]
-  (let [matches  (read-10x-epochs)
-        ;; First match strictly after before-id. If before-id is nil
-        ;; (buffer was empty when we slung), the first match is ours.
-        new-tail (if (nil? before-id)
-                   matches
-                   (drop-while #(<= (match-id %) before-id) matches))
-        ours-match (first new-tail)
-        ours-id    (some-> ours-match match-id)
-        chain-ids  (mapv match-id (rest new-tail))]
-    (if ours-id
-      (do (swap! claude-epoch-ids conj ours-id)
-          (cond-> {:ok?      true
-                   :epoch-id ours-id
-                   :epoch    (coerce-epoch ours-match)}
-            (seq chain-ids) (assoc :chained-epoch-ids chain-ids)))
-      {:ok?       false
-       :reason    :no-new-epoch
-       :before-id before-id
-       :after-id  (some-> matches last match-id)
-       :hint      "10x did not append a new match within the wait window. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."})))
+     {:ok? true :dispatch-id <id> :epoch-id <int> :epoch <coerced>
+      :chained-dispatch-ids [<id> ...]}
+     {:ok? false :reason :no-new-epoch :dispatch-id ... :hint ...}"
+  [dispatch-id]
+  (if (nil? dispatch-id)
+    {:ok? false :reason :no-dispatch-id
+     :hint "Pass the :dispatch-id returned by tagged-dispatch-sync!. nil here usually means re-frame predates rf-3p7 (commit af024c3) and didn't auto-generate one."}
+    (let [matches (read-10x-epochs)
+          ours-m  (find-epoch-by-dispatch-id dispatch-id matches)]
+      (if ours-m
+        (let [chain-ids (chained-dispatch-ids dispatch-id matches)]
+          (cond-> {:ok?         true
+                   :dispatch-id dispatch-id
+                   :epoch-id    (match-id ours-m)
+                   :epoch       (coerce-epoch ours-m)}
+            (seq chain-ids) (assoc :chained-dispatch-ids chain-ids)))
+        {:ok?         false
+         :reason      :no-new-epoch
+         :dispatch-id dispatch-id
+         :hint        "10x has no match carrying this :dispatch-id. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."}))))
 
 ;; ---------------------------------------------------------------------------
 ;; re-com awareness
@@ -1659,7 +1737,7 @@
      :app-db-initialised? (map? @db/app-db)
      :versions            (version-report)
      :epoch-count         ec
-     :claude-epoch-count  (count @claude-epoch-ids)}))
+     :claude-epoch-count  (count @claude-dispatch-ids)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Session-bootstrap summary
