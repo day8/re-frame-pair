@@ -226,5 +226,84 @@
   (testing "no --stub flags → empty vec"
     (is (= [] (#'ops/parse-stub-fx-ids ["[:ev]" "--trace"])))))
 
+;; ---------------------------------------------------------------------------
+;; ensure-injected! follows up with a `health` call after a re-ship so the
+;; native-epoch / native-trace cbs and console-capture wrapper are installed
+;; in the freshly-shipped runtime. Without this, every op that hit the auto-
+;; reinject path post-refresh saw empty native buffers and a missing console
+;; wrapper — :reinjected? true was the only signal, and it's documented as
+;; informational. The fast path (sentinel still present) must NOT invoke
+;; health: it would burn an extra cljs-eval roundtrip per op for no gain.
+;; ---------------------------------------------------------------------------
+
+;; Helper: ensure-injected! slurps the runtime ns source via runtime-cljs-path
+;; before delegating to chunked-inject!. The slurp uses *file* which doesn't
+;; resolve to scripts/ during these tests. Each test below redefs
+;; runtime-cljs-path to point at a known-readable file so slurp succeeds; the
+;; mocked chunked-inject! ignores the contents anyway.
+(def ^:private ^String readable-path
+  (str (System/getProperty "user.dir") "/package.json"))
+
+(deftest ensure-injected-installs-captures-after-reship
+  (testing "on a fresh re-ship (sentinel missing post-refresh), ensure-injected!
+            calls (re-frame-pair.runtime/health) so install-native-epoch-cb!,
+            install-native-trace-cb!, install-console-capture!, and
+            install-last-click-capture! actually run in the new runtime"
+    (let [eval-calls (atom [])]
+      (with-redefs [ops/runtime-already-injected? (fn [_build-id] false)
+                    ops/runtime-cljs-path         (fn [] readable-path)
+                    ops/chunked-inject!           (fn [_build-id _src] [[0 {:value "nil"}]])
+                    ops/cljs-eval-value           (fn [_build-id form-str]
+                                                    (swap! eval-calls conj form-str)
+                                                    {:ok? true})]
+        (let [reinjected? (#'ops/ensure-injected! :app)]
+          (is (true? reinjected?)
+              "fresh inject path returns true so callers can tag :reinjected?")
+          (is (some #(str/includes? % "re-frame-pair.runtime/health") @eval-calls)
+              "health must be called after a re-ship to wire up cbs"))))))
+
+(deftest ensure-injected-skips-health-on-fast-path
+  (testing "when the runtime sentinel is already present (no re-ship needed),
+            ensure-injected! must NOT call health — the cbs from the prior
+            inject are still wired, and an extra cljs-eval roundtrip per op
+            would defeat the fast path"
+    (let [eval-calls (atom [])]
+      (with-redefs [ops/runtime-already-injected? (fn [_build-id] true)
+                    ops/chunked-inject!           (fn [_ _]
+                                                    (throw (ex-info "should not chunk-inject" {})))
+                    ops/cljs-eval-value           (fn [_build-id form-str]
+                                                    (swap! eval-calls conj form-str)
+                                                    nil)]
+        (let [reinjected? (#'ops/ensure-injected! :app)]
+          (is (false? reinjected?) "sentinel present → no re-ship")
+          (is (empty? @eval-calls)
+              "fast path is silent — no health roundtrip"))))))
+
+(deftest ensure-injected-skips-health-when-chunk-fails
+  (testing "when chunked-inject! returns a failure (compile / transport), we
+            die with :inject-failed BEFORE ever calling health — there's no
+            point installing cbs into a partially-shipped ns"
+    (let [eval-calls (atom [])]
+      (with-redefs [ops/runtime-already-injected? (fn [_build-id] false)
+                    ops/runtime-cljs-path         (fn [] readable-path)
+                    ops/chunked-inject!           (fn [_build-id _src]
+                                                    [[0 {:value "ok"}]
+                                                     [1 {:reason :transport-error
+                                                         :stage  :chunk-eval
+                                                         :ex     "boom"
+                                                         :err    "transport"
+                                                         :hint   "test"
+                                                         :chunk-count 2}]])
+                    ops/cljs-eval-value           (fn [_build-id form-str]
+                                                    (swap! eval-calls conj form-str)
+                                                    {:ok? true})
+                    ops/die                       (fn [reason & _]
+                                                    (throw (ex-info "die" {:reason reason})))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"die"
+                              (#'ops/ensure-injected! :app))
+            "die :inject-failed propagates")
+        (is (empty? @eval-calls)
+            "no health call on a failed inject — captures install nothing meaningful")))))
+
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))

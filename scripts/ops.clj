@@ -461,7 +461,17 @@
    boundaries and shipped in pieces sized well under nREPL's transport
    buffer. Each chunk re-asserts the ns. If any chunk fails, dies with
    a structured `:inject-failed` response carrying the offending
-   chunk index, error, and a hint."
+   chunk index, error, and a hint.
+
+   When a re-ship happens, follows up with one `health` call to install
+   the native epoch / trace callbacks, the console-capture wrapper, and
+   the last-click capture listener. Without this follow-up, the runtime
+   ns lands but its capture cbs are never invoked — every post-refresh
+   op that reads `native-epochs` / `native-traces` returns empty, and
+   `console-tail` stops receiving entries. The four installs are guarded
+   by idempotency atoms / window markers, so calling health a second
+   time (e.g. through `inject-runtime!` for `discover`) is a no-op for
+   side effects."
   [build-id]
   (if (runtime-already-injected? build-id)
     false
@@ -476,7 +486,9 @@
                :ex            (:ex fail)
                :err           (:err fail)
                :hint          (:hint fail)))
-        true))))
+        (do
+          (cljs-eval-value build-id "(re-frame-pair.runtime/health)")
+          true)))))
 
 (defn- inject-runtime!
   "Ensure scripts/runtime.cljs is loaded and return the health map.
