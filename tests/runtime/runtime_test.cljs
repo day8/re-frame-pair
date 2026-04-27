@@ -714,6 +714,57 @@
   (testing "nil root-id returns nil — caller likely had no dispatch-id captured"
     (is (nil? (rt/collect-cascade-from-buffer nil [])))))
 
+(defn- minimal-10x-match
+  "Bare-bones 10x match shape with the :event trace fields
+   `chained-dispatch-ids` reads. Only :match-info matters for this
+   helper — a synthetic vec with one :event-typed trace whose tags
+   carry :dispatch-id and :parent-dispatch-id."
+  [{:keys [dispatch-id parent-dispatch-id]}]
+  {:match-info [{:id          dispatch-id
+                 :op-type     :event
+                 :tags        {:dispatch-id        dispatch-id
+                               :parent-dispatch-id parent-dispatch-id}}]})
+
+(deftest chained-dispatch-ids-walks-transitive-cascade
+  (testing "linear cascade: parent → child → grandchild — all descendants
+            surface, not just direct children (legacy --trace path parity
+            with collect-cascade-from-buffer's fixed-point walk)"
+    (let [matches [(minimal-10x-match {:dispatch-id "ROOT"
+                                       :parent-dispatch-id nil})
+                   (minimal-10x-match {:dispatch-id "C1"
+                                       :parent-dispatch-id "ROOT"})
+                   (minimal-10x-match {:dispatch-id "C2"
+                                       :parent-dispatch-id "C1"})]]
+      (is (= ["C1" "C2"] (rt/chained-dispatch-ids "ROOT" matches)))))
+
+  (testing "fan-out + depth: root → two children → one grandchild under each"
+    (let [matches [(minimal-10x-match {:dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "A" :parent-dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "B" :parent-dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "AA" :parent-dispatch-id "A"})
+                   (minimal-10x-match {:dispatch-id "BB" :parent-dispatch-id "B"})]]
+      (is (= #{"A" "B" "AA" "BB"}
+             (set (rt/chained-dispatch-ids "R" matches))))))
+
+  (testing "chronological order is preserved — out-of-order parent in the
+            buffer still surfaces, and the result vec follows match order"
+    (let [matches [(minimal-10x-match {:dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "GC" :parent-dispatch-id "C"})
+                   (minimal-10x-match {:dispatch-id "C"  :parent-dispatch-id "R"})]]
+      (is (= ["GC" "C"] (rt/chained-dispatch-ids "R" matches)))))
+
+  (testing "unrelated epochs in the buffer are filtered out"
+    (let [matches [(minimal-10x-match {:dispatch-id "NOISE-1"})
+                   (minimal-10x-match {:dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "C" :parent-dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "NOISE-2" :parent-dispatch-id "OTHER"})]]
+      (is (= ["C"] (rt/chained-dispatch-ids "R" matches)))))
+
+  (testing "no descendants — empty vec, not nil"
+    (let [matches [(minimal-10x-match {:dispatch-id "R"})
+                   (minimal-10x-match {:dispatch-id "X"})]]
+      (is (= [] (rt/chained-dispatch-ids "R" matches))))))
+
 (deftest await-settle-state-transitions
   (testing "unknown handle: returns :unknown-handle reason"
     (reset! rt/settle-pending {})

@@ -1450,18 +1450,40 @@
             m))
         (reverse matches)))
 
-(defn- chained-dispatch-ids
-  "Vec of dispatch-ids whose event-trace carries this dispatch-id as
-   `:parent-dispatch-id` — i.e. children fired via `:fx [:dispatch ...]`
-   from within the parent's handler. Walks `matches` in chronological
-   order so the returned vec preserves dispatch order."
+(defn chained-dispatch-ids
+  "Vec of dispatch-ids whose event-trace transitively descends from
+   `parent-id` via `:parent-dispatch-id` — direct children, grandchildren,
+   and deeper, fired via `:fx [:dispatch ...]` cascades from within the
+   parent's handler (or one of its descendants'). Walks `matches` in
+   chronological order so the returned vec preserves dispatch order.
+
+   Mirrors the fixed-point closure in `collect-cascade-from-buffer` (the
+   rf-4mr / native-buffer path) so the legacy --trace fallback reports
+   the same cascade depth as the modern dispatch-and-settle! path."
   [parent-id matches]
-  (->> matches
-       (keep (fn [m]
-               (let [tags (:tags (find-trace m :event))]
-                 (when (= parent-id (:parent-dispatch-id tags))
-                   (:dispatch-id tags)))))
-       vec))
+  (let [;; Pre-extract [dispatch-id parent-dispatch-id] pairs in
+        ;; chronological order so the closure loop walks a flat seq
+        ;; instead of re-finding the :event trace inside each match
+        ;; on every iteration.
+        pairs (->> matches
+                   (keep (fn [m]
+                           (let [tags (:tags (find-trace m :event))
+                                 id   (:dispatch-id tags)
+                                 pid  (:parent-dispatch-id tags)]
+                             (when id [id pid]))))
+                   vec)
+        ids   (loop [acc #{parent-id}]
+                (let [grown (into acc
+                                  (keep (fn [[id pid]]
+                                          (when (and pid (contains? acc pid))
+                                            id)))
+                                  pairs)]
+                  (if (= grown acc) acc (recur grown))))]
+    (->> pairs
+         (keep (fn [[id _pid]]
+                 (when (and (not= id parent-id) (contains? ids id))
+                   id)))
+         vec)))
 
 (defn dispatch-and-collect
   "dispatch-sync the event, wait for the trace debounce + a render
