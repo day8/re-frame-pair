@@ -1,7 +1,8 @@
 (ns runtime-test
   (:require [cljs.test :refer [deftest is testing]]
             [fixtures]
-            [re-frame-pair.runtime :as rt]))
+            [re-frame-pair.runtime :as rt
+             :refer-macros [reg-event-db reg-event-fx reg-sub reg-fx]]))
 
 ;;; Unit tests for the pure fns inside re-frame-pair.runtime.
 ;;; Runs via shadow-cljs in node — no browser, no live re-frame app needed.
@@ -1221,3 +1222,119 @@
         (let [r (rt/handler-source :sub :test/sub-empty-meta)]
           (is (false? (:ok? r)))
           (is (= :no-source-meta (:reason r))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; rfp-rsg — registration-macro side-table (Path 3 from
+;;; docs/handler-source-meta.md). Covers the side-table round-trip,
+;;; the lookup-order in handler-source, and the macro behaviour
+;;; (registers AND records the call site).
+;;; ---------------------------------------------------------------------------
+
+(deftest record-source-roundtrip
+  (testing "-record-source! / -lookup-source round-trip a {:file :line :column}"
+    (rt/-record-source! :event :test-rs/foo {:file "x.cljs" :line 12 :column 3})
+    (is (= {:file "x.cljs" :line 12 :column 3}
+           (rt/-lookup-source :event :test-rs/foo)))
+    (is (nil? (rt/-lookup-source :event :test-rs/never-recorded)))))
+
+(deftest handler-source-prefers-sideband-over-meta
+  (testing "sideband entry takes precedence over fn-meta"
+    (rt/-record-source! :sub :test-hs/sub-side
+                        {:file "side.cljs" :line 7 :column 1})
+    (with-registered :sub :test-hs/sub-side
+      (with-meta (fn [_]) {:file "META.cljs" :line 99 :column 9})
+      (fn []
+        (let [r (rt/handler-source :sub :test-hs/sub-side)]
+          (is (true? (:ok? r)))
+          (is (= "side.cljs" (:file r)))
+          (is (= 7           (:line r)))
+          (is (= 1           (:column r)))
+          (is (= :registration-macro (:source r))))))))
+
+(deftest handler-source-event-via-sideband
+  (testing ":event with no meta on the wrapper resolves through the sideband"
+    ;; Mimics re-frame's actual shape: terminal :before is a closure
+    ;; with no source-meta, and the registrar-stored value is an
+    ;; interceptor chain — the case Path 3 was designed for.
+    (rt/-record-source! :event :test-hs/ev-side
+                        {:file "events.cljs" :line 18 :column 1})
+    (let [chain [{:id :coeffects}
+                 {:id :db-handler :before (fn [_db _ev])}]]
+      (with-registered :event :test-hs/ev-side chain
+        (fn []
+          (let [r (rt/handler-source :event :test-hs/ev-side)]
+            (is (true? (:ok? r)))
+            (is (= "events.cljs" (:file r)))
+            (is (= 18            (:line r)))
+            (is (= :registration-macro (:source r)))))))))
+
+(deftest handler-source-falls-back-to-meta-when-no-sideband
+  (testing "no sideband entry → handler-source still uses fn-meta as before"
+    (with-registered :sub :test-hs/sub-fb
+      (with-meta (fn [_]) {:file "fallback.cljs" :line 33})
+      (fn []
+        (let [r (rt/handler-source :sub :test-hs/sub-fb)]
+          (is (true? (:ok? r)))
+          (is (= "fallback.cljs" (:file r)))
+          (is (= 33              (:line r)))
+          (is (= :fn-meta        (:source r))))))))
+
+(deftest handler-source-final-fallback-no-source-meta
+  (testing "no sideband, no useful meta → :no-source-meta cleanly"
+    (with-registered :sub :test-hs/sub-bare
+      (fn [_])
+      (fn []
+        (let [r (rt/handler-source :sub :test-hs/sub-bare)]
+          (is (false? (:ok? r)))
+          (is (= :no-source-meta (:reason r)))
+          (is (not (contains? r :source))))))))
+
+(deftest macro-reg-event-db-records-source-and-registers
+  (testing "rfpr/reg-event-db registers the handler AND records call-site sideband"
+    (try
+      (reg-event-db :test-macro/inc (fn [db _] (update db :n inc)))
+      (let [side (rt/-lookup-source :event :test-macro/inc)]
+        (is (some? side)
+            "macro should populate the sideband table at the call site")
+        (is (string? (:file side)))
+        (is (pos-int? (:line side))
+            "the line of the (reg-event-db ...) form should be captured")
+        (is (some? (re-frame.registrar/get-handler :event :test-macro/inc))
+            "macro should also register through to re-frame.core/reg-event-db"))
+      (let [r (rt/handler-source :event :test-macro/inc)]
+        (is (true? (:ok? r)))
+        (is (= :registration-macro (:source r))))
+      (finally
+        (swap! re-frame.registrar/kind->id->handler
+               update :event dissoc :test-macro/inc)))))
+
+(deftest macro-reg-event-fx-records-source-and-registers
+  (testing "rfpr/reg-event-fx records sideband and registers"
+    (try
+      (reg-event-fx :test-macro/effects
+                    (fn [_cofx _ev] {:db {}}))
+      (is (some? (rt/-lookup-source :event :test-macro/effects)))
+      (is (some? (re-frame.registrar/get-handler :event :test-macro/effects)))
+      (finally
+        (swap! re-frame.registrar/kind->id->handler
+               update :event dissoc :test-macro/effects)))))
+
+(deftest macro-reg-sub-records-source-and-registers
+  (testing "rfpr/reg-sub records sideband and registers"
+    (try
+      (reg-sub :test-macro/n (fn [db _] (:n db)))
+      (is (some? (rt/-lookup-source :sub :test-macro/n)))
+      (is (some? (re-frame.registrar/get-handler :sub :test-macro/n)))
+      (finally
+        (swap! re-frame.registrar/kind->id->handler
+               update :sub dissoc :test-macro/n)))))
+
+(deftest macro-reg-fx-records-source-and-registers
+  (testing "rfpr/reg-fx records sideband and registers"
+    (try
+      (reg-fx :test-macro/log (fn [_payload] nil))
+      (is (some? (rt/-lookup-source :fx :test-macro/log)))
+      (is (some? (re-frame.registrar/get-handler :fx :test-macro/log)))
+      (finally
+        (swap! re-frame.registrar/kind->id->handler
+               update :fx dissoc :test-macro/log)))))

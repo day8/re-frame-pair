@@ -82,7 +82,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `registrar/describe` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/registrar-describe :event :cart/apply-coupon)'` | Kind + interceptor ids (events only) |
 | `subs/live` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-live)'` | Currently-subscribed query vectors |
 | `subs/sample` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-sample [:cart/total])'` | One-shot deref |
-| `handler/source` | `scripts/handler-source.sh :event :cart/apply-coupon` | `{:file :line :column}` of the handler, when source-map meta is present. Returns `:no-source-meta` cleanly when stripped (advanced builds, etc.) |
+| `handler/source` | `scripts/handler-source.sh :event :cart/apply-coupon` | `{:file :line :column}` of the handler. Reliable when registered via the opt-in `re-frame-pair.runtime/reg-event-db` etc. (`:source :registration-macro`); falls back to compiled-fn `(meta f)` (`:source :fn-meta`); returns `:no-source-meta` cleanly when neither path produces a hit. See "Where in the code is this handler?" recipe for the opt-in. |
 
 ### Write
 
@@ -406,7 +406,23 @@ Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :lin
 
 ### "Where in the code is this handler?"
 
-Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Returns `{:file :line :column}` when shadow-cljs's source-map metadata reached the compiled fn. If the response is `:no-source-meta` (typical for advanced-compiled builds), say so and fall back to grepping `'(reg-event-' files for the id — don't invent a path.
+Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Two paths produce a hit:
+
+1. **Registration macro (opt-in, reliable):** if the handler was registered via `re-frame-pair.runtime/reg-event-db` (or `reg-event-fx` / `reg-sub` / `reg-fx`), the call site is captured at compile time and stored in a side-table. Response carries `:source :registration-macro`.
+2. **Compiled-fn meta (best-effort):** otherwise the op reads `(meta f)` on the registered fn (drilling into the terminal interceptor's `:before` for `:event`). Response carries `:source :fn-meta`. This path usually *fails* on real shadow-cljs builds — re-frame's interceptor wrapper closes over the user fn, and `(meta wrapper)` is nil regardless of source-map config (see `docs/handler-source-meta.md`).
+
+If the response is `:no-source-meta`, say so and fall back to grepping `'(reg-event-'` for the id — don't invent a path. To make `handler/source` reliable, suggest the user opt in:
+
+```clojure
+(ns app.events
+  (:require [re-frame-pair.runtime :as rfpr
+             :refer-macros [reg-event-db reg-event-fx reg-sub reg-fx]]))
+
+(rfpr/reg-event-db :cart/apply-coupon
+  (fn [db [_ code]] ...))
+```
+
+Drop-in for re-frame's macros — same arities, same semantics, plus the side-table entry. The fixture's `:counter/inc` handler is the worked example.
 
 ### "Understand this component" / "What is this thing?"
 

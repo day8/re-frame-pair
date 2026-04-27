@@ -2,6 +2,12 @@
 
 > Why `scripts/handler-source.sh` returns `{:ok? false :reason :no-source-meta}` against shadow-cljs builds, and what (if anything) the operator can do about it.
 
+> **Status (rfp-rsg, v0.2):** Path 3 has shipped — see
+> `re-frame-pair.runtime/reg-event-db` etc. (macros in
+> `scripts/re_frame_pair/runtime.clj`). `handler-source` now consults
+> the registration-macro side-table first, and the response carries
+> `:source :registration-macro` when the opt-in is in use.
+
 The `handler/source` op (rfp-r5s C, commit `5a4a447`) reads the metadata that ClojureScript's source-map machinery would attach to a registered handler, and returns `{:file :line :column}` if it's there. Against the live fixture and most real apps it consistently returns the documented graceful-fail:
 
 ```

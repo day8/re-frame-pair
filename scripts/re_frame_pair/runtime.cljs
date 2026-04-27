@@ -193,41 +193,92 @@
     (catch :default e
       {:ok? false :reason :sub-error :message (.-message e)})))
 
+;; ---------------------------------------------------------------------------
+;; Handler-source side-table (rfp-rsg, docs/handler-source-meta.md Path 3)
+;; ---------------------------------------------------------------------------
+;;
+;; re-frame's interceptor wrapper hides the user's handler-fn inside a
+;; closure (db-handler->interceptor in re_frame/std_interceptors.cljc),
+;; so `(meta (:before terminal-interceptor))` returns nil even with full
+;; source-map preservation — the captured value isn't reachable through
+;; the registrar. `handler-source` therefore returns :no-source-meta on
+;; every real shadow-cljs build.
+;;
+;; The fix is opt-in: users replace `re-frame.core/reg-event-db` etc.
+;; with `re-frame-pair.runtime/reg-event-db` (macro defined in the
+;; sibling .clj). The macro captures (meta &form) at compile time and
+;; emits a call to `-record-source!` that stashes {:file :line :column}
+;; in the atom below. `handler-source` consults the side-table first,
+;; then falls back to (meta f), then to the documented :no-source-meta.
+
+(defonce ^:private handler-source-table
+  ;; {kind {id {:file :line :column}}}
+  (atom {}))
+
+(defn -record-source!
+  "Record the source location of a registration call. Called by the
+   `re-frame-pair.runtime` macros (reg-event-db, reg-event-fx, reg-sub,
+   reg-fx). The leading dash signals 'internal, but reachable' — users
+   opt in via the macros, not by calling this directly."
+  [kind id loc]
+  (swap! handler-source-table assoc-in [kind id] loc)
+  nil)
+
+(defn -lookup-source
+  "Return the recorded {:file :line :column} for a [kind id], or nil
+   if the registration didn't go through a re-frame-pair.runtime macro."
+  [kind id]
+  (get-in @handler-source-table [kind id]))
+
 (defn handler-source
-  "Source location of a registered handler, read from the metadata
-   that ClojureScript's source-map machinery attaches to compiled
-   fns. For `:event` handlers, drills into the terminal interceptor's
-   `:before` (which is the fn the user wrote in
-   `reg-event-{db,fx,ctx}`); other kinds use the stored value
-   directly.
+  "Source location of a registered handler.
+
+   Lookup order:
+   1. `re-frame-pair.runtime` registration macro side-table (opt-in;
+      reliable across all CLJS compile modes).
+   2. ClojureScript source-map metadata on the stored fn (whatever
+      `(meta f)` returns; for :event drills into the terminal
+      interceptor's `:before`).
+   3. `:no-source-meta` if neither produces a hit.
 
    Returns:
-     {:ok? true :kind ... :id ... :file ... :line ... :column ...}
+     {:ok? true :kind ... :id ... :file ... :line ... :column ... :source ...}
+       where :source is :registration-macro or :fn-meta
    or
      {:ok? false :reason :not-registered :kind ... :id ...}
      {:ok? false :reason :no-source-meta :kind ... :id ...}
 
-   `:no-source-meta` is common: not every CLJS compile mode populates
-   fn metadata. shadow-cljs dev builds with source-maps usually do;
-   advanced-compiled production builds typically don't. When the meta
-   is missing we surface the fact cleanly rather than guessing — tell
-   the user to grep for the handler id if you need the location.
+   Why :no-source-meta is common without the opt-in: re-frame stores
+   the user's handler inside an interceptor-wrapper closure
+   (re_frame.std_interceptors), so even with full source-map
+   preservation `(meta (:before terminal))` is nil. See
+   docs/handler-source-meta.md for the diagnosis. Switch the relevant
+   `reg-event-db` calls to `re-frame-pair.runtime/reg-event-db` (etc.)
+   to land in branch 1.
 
-   This is the v1 hack; A7 in Appendix A proposes that re-frame
-   retain source forms in dev so a richer `(handler-source)` can also
-   return the form itself."
+   A7 in Appendix A proposes that re-frame itself retain source forms
+   in dev — if/when that lands upstream, the macro layer becomes
+   redundant and a richer `(handler-source)` can also return the form."
   [kind id]
-  (let [stored (registrar/get-handler kind id)
-        ;; For :event the registered value is an interceptor chain;
-        ;; the user fn is the terminal interceptor's :before.
-        f      (cond
-                 (nil? stored)   nil
-                 (= kind :event) (some-> stored last :before)
-                 :else           stored)
-        m      (when f (meta f))]
+  (let [stored   (registrar/get-handler kind id)
+        sideband (-lookup-source kind id)
+        f        (cond
+                   (nil? stored)   nil
+                   (= kind :event) (some-> stored last :before)
+                   :else           stored)
+        m        (when f (meta f))]
     (cond
       (nil? stored)
       {:ok? false :reason :not-registered :kind kind :id id}
+
+      (and sideband (or (:file sideband) (:line sideband)))
+      {:ok?    true
+       :kind   kind
+       :id     id
+       :file   (:file sideband)
+       :line   (:line sideband)
+       :column (:column sideband)
+       :source :registration-macro}
 
       (and m (or (:file m) (:line m)))
       {:ok?    true
@@ -235,7 +286,8 @@
        :id     id
        :file   (:file m)
        :line   (:line m)
-       :column (:column m)}
+       :column (:column m)
+       :source :fn-meta}
 
       :else
       {:ok? false :reason :no-source-meta :kind kind :id id})))
