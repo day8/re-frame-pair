@@ -744,8 +744,8 @@
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
         :debux/code        (:code tags)
-        ;; rfp-fxv / rf-3p7 item 2 — auto-generated dispatch correlation
-        ;; from re-frame core (commit af024c3). nil for events
+        ;; Auto-generated dispatch correlation from re-frame core.
+        ;; nil for events
         ;; dispatched on a re-frame predating that commit. The
         ;; :dispatch-id is unique per `re-frame.events/handle` entry;
         ;; :parent-dispatch-id is set when the event was queued from
@@ -1287,12 +1287,11 @@
       :max-size max-size})))
 
 ;; ---------------------------------------------------------------------------
-;; Claude-dispatch tagging — rfp-fxv collapses the pre-rf-3p7
-;; before-id/after-id correlation onto upstream's auto-generated
-;; :dispatch-id. The session-local set still exists so
-;; last-claude-epoch can answer "the most recent epoch I dispatched"
-;; without the caller threading the id back to us, but it now stores
-;; dispatch-ids (UUIDs) rather than 10x match-ids.
+;; Claude-dispatch tagging — session-local set of upstream's
+;; auto-generated :dispatch-ids for events we (vs. the user) fired.
+;; Lets last-claude-epoch answer "the most recent epoch I dispatched"
+;; without the caller threading the id back to us. Stores dispatch-ids
+;; (UUIDs) rather than 10x match-ids.
 ;; ---------------------------------------------------------------------------
 
 (defonce claude-dispatch-ids
@@ -1537,7 +1536,7 @@
 (declare build-stub-overrides)
 
 ;; ---------------------------------------------------------------------------
-;; dispatch-and-settle! — rf-4mr bridge for the bash shim
+;; dispatch-and-settle! — bridge for the bash shim
 ;; ---------------------------------------------------------------------------
 ;;
 ;; re-frame core's `dispatch-and-settle` (rf-4mr, commit f8f0f59)
@@ -1750,7 +1749,7 @@
     {:settled? false :reason :unknown-handle :handle handle}))
 
 ;; ---------------------------------------------------------------------------
-;; dispatch-with bridge — rf-ge8 (fx-overrides) for safe iteration
+;; dispatch-with bridge — fx-overrides for safe iteration
 ;; ---------------------------------------------------------------------------
 ;;
 ;; re-frame core's `dispatch-with` (rf-ge8, commit 2651a30) tags an

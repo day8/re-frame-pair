@@ -208,7 +208,7 @@
       (is (nil? (:debux/code e))))))
 
 (deftest coerce-epoch-surfaces-debux-code-when-present
-  ;; rfp-hjj item 1: when a fn-traced-wrapped handler runs, debux's
+  ;; When a fn-traced-wrapped handler runs, debux's
   ;; send-trace! appends per-form trace entries onto the :code tag of
   ;; the current trace event (re-frame-debux/src/day8/re_frame/debux/
   ;; common/util.cljc:132). coerce-epoch should expose that under
