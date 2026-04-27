@@ -287,6 +287,8 @@ scripts/eval-cljs.sh '(re-frame-pair.runtime/debux-runtime-api?)'
 
 2. **Dispatch with `--trace`:**
 
+   Use the path that actually runs the wrapped code: dispatch the event itself for `:event`, dispatch the event that returns the effect for `:fx`, and dispatch or render the path that derefs the subscription for `:sub`.
+
    ```
    scripts/dispatch.sh --trace '[:cart/apply-coupon "SPRING25"]'
    ```
