@@ -544,25 +544,35 @@
   (when (string? s) (cljs.core/demunge s)))
 
 (defn- sub-input-deps
-  "Map of query-v → :input-query-vs, sourced from `:sub/run` trace
-   tags in the live trace stream. rfp-fxv / rf-3p7 item 3
-   (re-frame commit fa90f70) added `:input-query-vs` alongside
-   `:input-signals` on every `:sub/run`; this map is the lookup
-   table that turns the raw trace stream into a per-sub dep
-   graph for `subs/ran`'s output.
+  "Map of query-v → `{:input-query-vs ... :input-query-sources ...}`,
+   sourced from `:sub/run` trace tags in the live trace stream.
+   rfp-fxv / rf-3p7 item 3 (re-frame commit fa90f70) added
+   `:input-query-vs` alongside `:input-signals` on every `:sub/run`;
+   rf-cna's subscribe macro additionally attaches
+   `:re-frame/source {:file :line}` to each input query-v's meta when
+   the user wrote `(rf.macros/subscribe ...)` inside the parent sub
+   handler. We surface those source maps as a sibling
+   `:input-query-sources` vec parallel to `:input-query-vs`.
 
    When a query-v re-runs multiple times (typical), the
    most-recent run wins — input deps don't change between runs
    for the same sub. Empty when re-frame predates fa90f70 or
    all-traces is empty (no enrichment then; consumers see
-   `:input-query-vs` nil per entry)."
+   `:input-query-vs` nil per entry). `:input-query-sources` is a
+   vec the same length as `:input-query-vs` with `nil` slots for
+   inputs subscribed via the bare `re-frame.core/subscribe` fn."
   [all-traces]
   (->> all-traces
        (filter #(= :sub/run (:op-type %)))
        (reduce (fn [m t]
                  (let [tags (:tags t)]
                    (if-let [q (:query-v tags)]
-                     (assoc m q (:input-query-vs tags))
+                     (let [inputs (:input-query-vs tags)]
+                       (assoc m q
+                              {:input-query-vs      inputs
+                               :input-query-sources (when inputs
+                                                      (mapv #(some-> % meta :re-frame/source)
+                                                            inputs))}))
                      m)))
                {})))
 
@@ -588,9 +598,21 @@
                    (and (some #{:sub/run} (:order sub))
                         (not (get-in sub [:sub/traits :unchanged?])))))
          (mapv (fn [[_ sub]]
-                 (let [q (:subscription sub)]
-                   {:query-v        q
-                    :input-query-vs (get deps q)}))))))
+                 (let [q    (:subscription sub)
+                       info (get deps q)]
+                   {:query-v             q
+                    ;; Outer subscribe call site (rf-cna). Meta on the
+                    ;; query-v stored in 10x's reaction-state — survives
+                    ;; if 10x preserved meta when capturing the
+                    ;; subscription (subs that hit cache reflect the
+                    ;; first caller's source). Nil when subscribed via
+                    ;; the bare re-frame.core/subscribe fn.
+                    :subscribe/source    (some-> q meta :re-frame/source)
+                    :input-query-vs      (:input-query-vs info)
+                    ;; Per-input subscribe call sites (rf-cna). Vec
+                    ;; parallel to :input-query-vs; nil entries when
+                    ;; that input was subscribed via the bare fn.
+                    :input-query-sources (:input-query-sources info)}))))))
 
 (defn- sub-cache-hits-from-state
   "§4.3a :subs/cache-hit. Re-frame doesn't trace genuine cache hits
@@ -888,12 +910,18 @@
 
 (defn- subs-ran-from-native-traces
   "Walk a trace-stream slice for `:sub/run` entries; emit one
-   `{:query-v ... :input-query-vs ...}` per unique query-v
-   (latest run wins). Native analogue of `sub-runs-from-state`,
-   driven off the trace stream because most `:sub/run` traces fire
-   from render-time derefs (with `:child-of nil`) and so don't make
-   it onto the native epoch's `:sub-runs` vec — that vec only
-   carries direct `:child-of` children of the `:event` trace."
+   `{:query-v ... :subscribe/source ... :input-query-vs ...
+   :input-query-sources ...}` per unique query-v (latest run wins).
+   Native analogue of `sub-runs-from-state`, driven off the trace
+   stream because most `:sub/run` traces fire from render-time
+   derefs (with `:child-of nil`) and so don't make it onto the
+   native epoch's `:sub-runs` vec — that vec only carries direct
+   `:child-of` children of the `:event` trace.
+
+   `:subscribe/source` and `:input-query-sources` are populated
+   from `:re-frame/source` meta on the query vectors (rf-cna).
+   Nil when the corresponding subscribe call used the bare
+   `re-frame.core/subscribe` fn or re-frame predates rf-cna."
   [traces]
   (->> traces
        (filter #(= :sub/run (:op-type %)))
@@ -904,7 +932,12 @@
                      m)))
                {})
        (mapv (fn [[q input-qvs]]
-               {:query-v q :input-query-vs input-qvs}))))
+               {:query-v             q
+                :subscribe/source    (some-> q meta :re-frame/source)
+                :input-query-vs      input-qvs
+                :input-query-sources (when input-qvs
+                                       (mapv #(some-> % meta :re-frame/source)
+                                             input-qvs))}))))
 
 (defn- subs-cache-hit-from-native-traces
   "Walk a trace-stream slice for `:sub/create` entries with

@@ -402,6 +402,8 @@ Walk `:effects/fired` from the epoch as a tree. Follow `:epoch-id` links into ch
 
 Given a component name or `:src`, find the latest epoch whose `:renders` includes it. Reverse from there: the sub inputs that invalidated its outputs, then the event that invalidated the sub inputs.
 
+When multiple views subscribe to the same query-v and you want to know which call site is involved (e.g. the same `[:cart/total]` is read by both the header and the panel), each `:subs/ran` entry carries `:subscribe/source` — the `{:file :line}` of the `(rf.macros/subscribe ...)` call site that established the reaction. Pair this with `:input-query-sources` (vec parallel to `:input-query-vs`) to see where each input dep was subscribed to inside the parent sub handler. Both are populated only when subscribed via `re-frame.macros/subscribe` (rf-cna) — `nil` for bare-fn subscribes. Cache-hit subtlety: when a subscription is shared, `:subscribe/source` reflects the *first* caller's site (re-frame's cache key ignores meta, so subsequent callers reuse the cached reaction with its original meta).
+
 ### "Where in the code does this come from?"
 
 Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :line}`. If `:src` is nil, report which prerequisite is missing (re-com debug off, or this specific call site wasn't passed `:src (at)`).

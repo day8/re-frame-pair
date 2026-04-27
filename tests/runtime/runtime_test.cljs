@@ -183,8 +183,14 @@
               :input-query-vs is nil here because the synthetic
               all-traces fixture has no :sub/run traces — under live
               fixture conditions it carries the dep graph from
-              re-frame's :input-query-vs tag (rfp-fxv / rf-3p7 item 3)."
-      (is (= [{:query-v [:cart/total] :input-query-vs nil}] (:subs/ran e))))
+              re-frame's :input-query-vs tag (rfp-fxv / rf-3p7 item 3).
+              :subscribe/source + :input-query-sources nil because the
+              synthetic query-v carries no :re-frame/source meta (rf-cna)."
+      (is (= [{:query-v             [:cart/total]
+               :subscribe/source    nil
+               :input-query-vs      nil
+               :input-query-sources nil}]
+             (:subs/ran e))))
     (testing "subs/cache-hit — reactions that re-ran but value was
               :unchanged? (closest signal 10x exposes to a 'cache hit')"
       (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))
@@ -294,7 +300,11 @@
         e   (rt/coerce-epoch fixtures/synthetic-render-burst ctx)]
     (testing "render-burst match self-sources its render data"
       (is (= 2 (count (:renders e))))
-      (is (= [{:query-v [:cart/total] :input-query-vs nil}] (:subs/ran e)))
+      (is (= [{:query-v             [:cart/total]
+               :subscribe/source    nil
+               :input-query-vs      nil
+               :input-query-sources nil}]
+             (:subs/ran e)))
       (is (= [{:query-v [:cart/items]}] (:subs/cache-hit e))))))
 
 ;; -----------------------------------------------------------------------------
@@ -334,8 +344,13 @@
     (testing "subs/ran is sourced from :sub/run traces in the id range
               (NOT the native epoch's :sub-runs vec, which is empty in
               real code because most :sub/run traces fire from render-
-              time derefs with :child-of nil)"
-      (is (= [{:query-v [:cart/total] :input-query-vs [[:cart/items]]}]
+              time derefs with :child-of nil). :subscribe/source +
+              :input-query-sources nil here because the synthetic
+              query vectors carry no :re-frame/source meta (rf-cna)."
+      (is (= [{:query-v             [:cart/total]
+               :subscribe/source    nil
+               :input-query-vs      [[:cart/items]]
+               :input-query-sources [nil]}]
              (:subs/ran e))))
     (testing "subs/cache-hit is sourced from :sub/create traces with
               :cached? true (re-frame.subs's own signal) — closer to
@@ -377,6 +392,71 @@
                         [:event-handler :tags :code] code-payload)
           e   (rt/coerce-native-epoch raw fixtures/native-context)]
       (is (= code-payload (:debux/code e))))))
+
+(deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
+  ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source
+  ;; {:file ... :line ...}} to the query-v's meta at the call site.
+  ;; subs-ran-from-native-traces (and the legacy 10x sub-runs-from-state)
+  ;; should lift that to :subscribe/source on each entry, plus a
+  ;; sibling :input-query-sources vec parallel to :input-query-vs.
+  (testing "native-trace path: query-v meta surfaces as :subscribe/source;
+            each input query-v's meta surfaces in :input-query-sources"
+    (let [outer-src {:file "src/views/cart_view.cljs" :line 42}
+          input-src {:file "src/subs/cart.cljs" :line 17}
+          outer-q   (with-meta [:cart/total] {:re-frame/source outer-src})
+          input-q   (with-meta [:cart/items] {:re-frame/source input-src})
+          traces    [{:id 1 :op-type :sub/run
+                      :tags {:query-v outer-q :input-query-vs [input-q]}}]
+          raw       {:id 1 :event [:dummy] :start 0 :end 10 :duration 10
+                     :app-db/before {} :app-db/after {} :coeffects {} :effects {}
+                     :interceptors []}
+          ctx       {:traces traces :all-epochs [raw]}
+          [entry]   (:subs/ran (rt/coerce-native-epoch raw ctx))]
+      (is (= [:cart/total]   (:query-v entry)))
+      (is (= outer-src       (:subscribe/source entry)))
+      (is (= [[:cart/items]] (:input-query-vs entry)))
+      (is (= [input-src]     (:input-query-sources entry)))))
+  (testing "legacy 10x path: query-v meta on (:subscription sub) surfaces
+            as :subscribe/source; input meta from :sub/run trace tags
+            surfaces in :input-query-sources"
+    (let [outer-src   {:file "src/views/cart_view.cljs" :line 42}
+          input-src   {:file "src/subs/cart.cljs" :line 17}
+          outer-q     (with-meta [:cart/total] {:re-frame/source outer-src})
+          input-q     (with-meta [:cart/items] {:re-frame/source input-src})
+          render-burst {:match-info
+                        [{:id 120 :op-type :event :tags {}}
+                         {:id 130 :op-type :reagent/quiescent}]
+                        :sub-state
+                        {:reaction-state
+                         {"rx1" {:subscription outer-q :order [:sub/run]}}}}
+          all-traces  [{:id 122 :op-type :sub/run
+                        :tags {:query-v outer-q :input-query-vs [input-q]}}]
+          ctx         {:all-traces  all-traces
+                       :all-matches [fixtures/synthetic-match render-burst]}
+          [entry]     (:subs/ran (rt/coerce-epoch fixtures/synthetic-match ctx))]
+      (is (= [:cart/total]   (:query-v entry)))
+      (is (= outer-src       (:subscribe/source entry)))
+      (is (= [[:cart/items]] (:input-query-vs entry)))
+      (is (= [input-src]     (:input-query-sources entry))))))
+
+(deftest subs-ran-input-query-sources-mixed-meta
+  ;; Some inputs subscribed via rf.macros/subscribe, others via the
+  ;; bare re-frame.core/subscribe fn. Source vec should carry nil
+  ;; in slots for bare-subscribed inputs — same length as
+  ;; :input-query-vs so consumers can zip them positionally.
+  (testing "nil entries in :input-query-sources for bare-subscribed inputs"
+    (let [src1     {:file "subs/a.cljs" :line 10}
+          tagged   (with-meta [:dep/a] {:re-frame/source src1})
+          bare     [:dep/b]
+          traces   [{:id 1 :op-type :sub/run
+                     :tags {:query-v [:foo] :input-query-vs [tagged bare]}}]
+          raw      {:id 1 :event [:dummy] :start 0 :end 10 :duration 10
+                    :app-db/before {} :app-db/after {} :coeffects {} :effects {}
+                    :interceptors []}
+          ctx      {:traces traces :all-epochs [raw]}
+          [entry]  (:subs/ran (rt/coerce-native-epoch raw ctx))]
+      (is (= [src1 nil] (:input-query-sources entry))
+          "vec parallel to :input-query-vs; nil for bare-subscribed inputs"))))
 
 (deftest coerce-native-epoch-surfaces-event-source-when-present
   ;; rf-hsl parity for the native-epoch path: assemble-epochs preserves
