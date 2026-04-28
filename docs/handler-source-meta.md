@@ -15,16 +15,18 @@
 >
 > **Earlier status (rfp-rsg, v0.2):** Path 3 had shipped as a
 > re-frame-pair-side macro layer. Kept in this doc for historical
-> context — see §3 below — but the implementation is gone.
+> context — see the Path 3 section below — but the implementation is gone.
 
-The `handler/source` op (rfp-r5s C, commit `5a4a447`) reads the metadata that ClojureScript's source-map machinery would attach to a registered handler, and returns `{:file :line :column}` if it's there. Against the live fixture and most real apps it consistently returns the documented graceful-fail:
+The original `handler/source` op (rfp-r5s C, commit `5a4a447`) read the metadata that ClojureScript's source-map machinery would attach to a registered handler, and returned `{:file :line :column}` if it was there. Against the live fixture and most real apps at the time, it consistently returned the documented graceful-fail:
 
 ```
 scripts/handler-source.sh :event :counter/inc
 => {:ok? false :reason :no-source-meta :kind :event :id :counter/inc}
 ```
 
-This document is the rfp-bni follow-up. Bottom line: the symptom is **structural**, not a config oversight. No build flag can fix it. Path 3 (a registration macro that captures call-site meta) is the only reliable solution and is recommended for v0.2.
+This document is the rfp-bni follow-up. Historical bottom line: the symptom was **structural**, not a config oversight. No build flag could fix it. Path 3 (a registration macro that captures call-site meta) was the recommended local workaround for v0.2.
+
+That recommendation is now superseded. Upstream re-frame rf-ysy implemented the essential call-site capture in the registration APIs themselves, so `handler/source` reads upstream metadata directly. Path 3 remains below only as historical design rationale for the retired rfp-rsg implementation.
 
 ---
 
@@ -117,9 +119,19 @@ Why this fails in practice for handler-source's use case:
 
 A spike on this would take days and produce a heuristic that works on toy fixtures and breaks on real apps.
 
-## Path 3 — registration macro that captures call-site meta
+## What actually happened — rf-ysy
 
-**Verdict: this is the path. Recommended for v0.2.**
+Upstream re-frame changed `reg-event-db`, `reg-event-fx`, `reg-event-ctx`, `reg-sub`, and `reg-fx` into macros that attach `{:file :line}` metadata to the registered value. `handler/source` can now resolve the location with:
+
+```clojure
+(meta (re-frame.registrar/get-handler kind id))
+```
+
+That makes the local side-table unnecessary. There is no longer an opt-in migration to `re-frame-pair.runtime/reg-event-db`, no `handler-source-table` to consult, and no `scripts/re_frame_pair/runtime.clj` layer to maintain.
+
+## Path 3 — registration macro that captures call-site meta (historical)
+
+**Historical verdict (rfp-rsg):** this was the recommended v0.2 path and briefly shipped as a local macro layer. It is no longer the current direction because rf-ysy moved the needed metadata capture upstream.
 
 A re-com-style `(at)` macro at the call site captures `{:file :line}` at compile time. A wrapper for each `reg-event-*` / `reg-sub` / `reg-fx` accepts the captured location alongside the id and stores it in a side-table the runtime owns:
 
@@ -142,30 +154,30 @@ Or, more invasively, a macro that wraps `re-frame.core/reg-event-db` and inserts
          {:file "app/events.cljs" :line 18}))
 ```
 
-`handler-source` would then check the side-table first and fall back to `(meta f)` if the user is using the bare re-frame macros.
+The retired `handler-source` implementation checked the side-table first and fell back to `(meta f)` if the user was using the bare re-frame APIs.
 
-**Tradeoffs:**
+**Historical tradeoffs:**
 
 - Pros: 100% reliable across compile modes; no shadow-cljs internals dependency; identical mental model to re-com's `:src (at)` so users already familiar with the pattern adapt instantly.
 - Cons: opt-in (users have to migrate their reg-event-db calls); duplicates re-frame's macros (we have to keep up with reg-event-* signature changes); requires a CLJS macro file (re-frame-pair currently ships only runtime forms — adds a build-time concern).
 
-**Effort:** ~80 LOC (macro file + side-table + handler-source rewire + SKILL.md recipe + 4-5 deftests). Half a day.
+**Original effort estimate:** ~80 LOC (macro file + side-table + handler-source rewire + SKILL.md recipe + 4-5 deftests). Half a day.
 
-## Cross-reference: Appendix A item A7
+## Cross-reference: Appendix A item A7 (superseded by rf-ysy)
 
-`docs/companion-re-frame.md` § A7 proposes that re-frame retain handler source forms in dev builds, gated by `debug-enabled?`. If A7 lands upstream, handler-source becomes trivial — `(meta handler-fn)` returns `{:file :line :source-form}` end-to-end without needing Path 3's macro layer. **Path 3 is the workaround until A7 lands; the two are not exclusive.**
+`docs/companion-re-frame.md` § A7 proposes that re-frame retain handler source forms in dev builds, gated by `debug-enabled?`. rf-ysy did not land exactly as A7: it does not retain full source forms. It did land the part `handler/source` needs, though: call-site metadata on registered handlers. That makes Path 3 obsolete by mechanism even though A7's fuller `:source-form` idea remains a possible future enhancement.
 
-## Recommendation
+## Recommendation (current)
 
-1. **Now (v0.1):** keep handler-source as-is. It returns `:no-source-meta` cleanly with a hint; the agent can fall back to grep. Document the limitation in `SKILL.md` (already done in the `handler/source` row).
-2. **v0.2:** ship Path 3 (registration macro + side-table). One commit, reasonable surface area, makes the op useful for any operator who opts in.
-3. **Long term:** support A7 if/when re-frame ships it.
+1. **Current behavior:** keep `handler/source` on the upstream rf-ysy path: read `(meta (registrar/get-handler kind id))` and return the registered `{:file :line}` directly.
+2. **Do not revive Path 3:** the rfp-rsg macro layer and side-table are historical. They add opt-in surface area that upstream re-frame no longer requires.
+3. **Future enhancement:** if re-frame later ships fuller A7-style source-form retention, extend `handler/source` to expose that extra data without reintroducing the local registration wrapper.
 
 ## Operator-facing wording for SKILL.md
 
-A short note can land in the existing `handler/source` row to set expectations honestly:
+The `handler/source` row should describe the current rf-ysy behavior, not the retired v0.2 plan:
 
-> Source-map meta is on `defn` vars, not anonymous fn values. re-frame stores fn values in the registrar, and the user's handler is captured in re-frame's interceptor-wrapper closure — so even with full source-map preservation, `handler/source` cannot reach it. Returns `:no-source-meta` cleanly when this happens. v0.2 will add an opt-in registration macro (`re-frame-pair.runtime/reg-event-db` etc.) that captures the call site at compile time and surfaces it through `handler/source`.
+> `handler/source` reads `{:file :line}` metadata from the registered re-frame handler via `(meta (registrar/get-handler kind id))`. Upstream re-frame rf-ysy attaches that metadata automatically in the registration macros, so no re-frame-pair opt-in registration wrapper is needed.
 
 ---
 
@@ -198,4 +210,4 @@ $ scripts/handler-source.sh :fx :db
 {:ok? false, :reason :no-source-meta, :kind :fx, :id :db}
 ```
 
-Conclusion: the op behaves as designed, the no-source-meta path is what users will hit, and the only reliable upgrade is Path 3 (registration macro) for v0.2 — or A7 upstream.
+Historical conclusion: the original op behaved as designed, the no-source-meta path was what users hit, and the only reliable local upgrade was Path 3. Current conclusion: rf-ysy provided the needed upstream metadata capture, so Path 3 is retired and `handler/source` should stay on the upstream-meta path.
