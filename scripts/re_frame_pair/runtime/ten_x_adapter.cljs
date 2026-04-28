@@ -363,7 +363,7 @@
                      m)))
                {})))
 
-(defn- sub-runs-from-state
+(defn- subs-ran-from-10x-state
   "§4.3a :subs/ran. 10x's `:match-info` doesn't carry `:sub/run` traces
    directly (`metam/parse-traces` strips them when building partitions);
    instead the post-epoch reaction state at
@@ -416,7 +416,7 @@
    :subscribe/source (some-> q meta :re-frame/source)
    :cache-hit/reason reason})
 
-(defn- unchanged-sub-runs-from-state
+(defn- unchanged-subs-ran-from-10x-state
   [match]
   (->> (-> match :sub-state :reaction-state)
        (filter (fn [[_ sub]]
@@ -436,7 +436,7 @@
          distinct
          (mapv #(sub-cache-hit-entry % :sub/create-cached)))))
 
-(defn- sub-cache-hits-from-state
+(defn- subs-cache-hit-from-10x-state
   "§4.3a :subs/cache-hit. Two signals land here:
 
    * `:sub/run` reactions whose final value was `=` to their prior value
@@ -448,10 +448,10 @@
    `:cache-hit/reason` keeps those cases distinguishable for consumers
    that need the sharper diagnostic."
   [match all-traces]
-  (vec (concat (unchanged-sub-runs-from-state match)
+  (vec (concat (unchanged-subs-ran-from-10x-state match)
                (cached-sub-creates-from-traces match all-traces))))
 
-(defn- renders-from-traces
+(defn- renders-from-10x-state
   "§4.3a :renders. Reagent records each component render as a
    `:op-type :render` trace with `:tags :component-name` (munged form,
    e.g. `re_com.box.h_box`). These are in the full trace stream, not
@@ -626,9 +626,9 @@
         ;; `registrar/describe :event <id>`.
         :interceptor-chain (mapv :id (:interceptors tags))
         :app-db/diff       (diff-app-db event-trace)
-        :subs/ran          (when render-src (sub-runs-from-state render-src all-traces))
-        :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src all-traces))
-        :renders           (when render-src (renders-from-traces render-src all-traces))
+        :subs/ran          (when render-src (subs-ran-from-10x-state render-src all-traces))
+        :subs/cache-hit    (when render-src (subs-cache-hit-from-10x-state render-src all-traces))
+        :renders           (when render-src (renders-from-10x-state render-src all-traces))
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
         ;; Read from the inner :event/handler trace, not the outer

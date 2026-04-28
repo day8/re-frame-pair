@@ -732,7 +732,7 @@
 (deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
   ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source
   ;; {:file ... :line ...}} to the query-v's meta at the call site.
-  ;; sub-runs-from-state (now shared by both paths via the match-shape
+  ;; subs-ran-from-10x-state (now shared by both paths via the match-shape
   ;; convergence) should lift that to :subscribe/source on each entry,
   ;; plus a sibling :input-query-sources vec parallel to :input-query-vs.
   (testing "native-trace path: query-v meta surfaces as :subscribe/source;
@@ -2500,7 +2500,7 @@
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (is (= [] (rt/epochs-in-last-ms 50))))))
 
-(deftest sub-runs-from-state-scopes-input-deps-to-match-id-range
+(deftest subs-ran-from-10x-state-scopes-input-deps-to-match-id-range
   ;; Cross-epoch leakage regression. The legacy 10x path joined sub-state
   ;; reactions to :sub/run trace tags via sub-input-deps, which keyed by
   ;; query-v VALUE across the *entire* trace stream. So when the same
