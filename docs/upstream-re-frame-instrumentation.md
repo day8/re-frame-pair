@@ -1,5 +1,16 @@
 # Upstream re-frame instrumentation — gaps from a re-frame-pair view
 
+> **Status (2026-04-28): largely SUPERSEDED.** re-frame now exposes
+> a single `re-frame.tooling` re-export namespace covering the §3.x
+> tooling surface (dispatch overrides, trace callbacks, schema
+> validation, live subscription cache, registrar, version). Tooling
+> consumers can `(:require [re-frame.tooling :as rft])` to discover
+> the supported surface, instead of grepping across `re-frame.core`
+> / `re-frame.trace` / `re-frame.subs` / `re-frame.registrar`. This
+> doc remains as design archaeology — the gaps below motivated the
+> primitives that `re-frame.tooling` re-exports today; per-section
+> Status annotations record where each landed.
+
 A survey of where re-frame's existing instrumentation surface (the
 `re-frame.trace` channel, the registrar, the version surface) leaves
 re-frame-pair reaching into private shapes or graceful-failing — and
@@ -303,9 +314,11 @@ users who don't `unwrap`/`trim-v`; load-bearing for those who do.
 
 ### 3.8. (L) No reaction → query-v reverse map at runtime
 
-> **Status (2026-04-27).** Shipped upstream as
-> `re-frame.subs/query-v-for-reaction`, re-exported at
-> `re-frame.core/query-v-for-reaction` (rf-yyo, commit `84d3bf0`).
+> **Status (2026-04-28).** Shipped upstream as
+> `re-frame.subs/query-v-for-reaction` and
+> `re-frame.subs/live-query-vs`. Both re-exported at
+> `re-frame.core/<sym>` and surfaced on `re-frame.tooling/<sym>` for
+> tooling consumers (rf-yyo `84d3bf0` + the live-query-vs follow-up).
 > An object-identity-keyed reverse map is maintained alongside
 > `query->reaction`; entries are inserted on `cache-and-return` and
 > removed on dispose. Consumer-side adoption is still TODO:
