@@ -42,16 +42,16 @@ Recommended approach: [`bats`](https://bats-core.readthedocs.io/) or a simple ba
 
 ## 3. End-to-end in-browser (`tests/e2e/`)
 
-**Status: not yet written.** §8a spike resolved 2026-04-25 (epoch-buffer accessor identified, `data-rc-src` format pinned, transport choice settled — see STATUS.md *Spike findings*); operator-driven validation of the recipes against the live fixture has stood in for an automated rig so far. Headless Playwright is tracked in STATUS.md *v0.2 / deferred backlog* item 9.
+**Status: Automated rig: not yet written; operator-driven validation against `tests/fixture/` covers most of the surface — see STATUS.md *Verified end-to-end against the live fixture* list. Remaining gap: real-edit-then-reload-then-probe cycle (STATUS.md *Near-term* item 2).** §8a spike resolved 2026-04-25 (epoch-buffer accessor identified, `data-rc-src` format pinned, transport choice settled — see STATUS.md *Spike findings*). Headless Playwright is tracked in STATUS.md *v0.2 / deferred backlog* item 9.
 
-Drives a headless Chrome via [playwright](https://playwright.dev/) against the fixture. Exercises:
+Drives a headless Chrome via [playwright](https://playwright.dev/) against the fixture. Exercises (status against operator-driven fixture validation per STATUS.md):
 
-- `watch-epochs.sh` streaming (or falling back to pull-mode reliably)
-- `tail-build.sh` probe-based confirmation after a live source edit
-- `dom/source-at`, `dom/find-by-src`, `dom/fire-click-at-src` against a rendered `:src`-annotated re-com component
-- Full page refresh → re-injection via session-sentinel miss
+- ✓ verified-by-operator: `watch-epochs.sh` pull-mode + all 5 predicate filters (streaming-via-`:out` deferred to v0.2)
+- □ pending: `tail-build.sh` probe-based confirmation after a live source edit — the only §3 recipe still operator-pending (STATUS.md *Near-term* item 2)
+- ✓ verified-by-operator: `dom/source-at`, `dom/find-by-src`, `dom/fire-click-at-src` against rendered `:src`-annotated re-com components
+- ✓ verified-by-operator: full page refresh → re-injection via session-sentinel miss (`:reinjected? true` flag on the response)
 
-This is where uncertainty about 10x internals, re-com's `data-rc-src` format, and the live-watch transport gets flushed out. Each test is a concrete artefact of a verified claim.
+The §8a uncertainty about 10x internals, re-com's `data-rc-src` format, and the live-watch transport is already flushed out (spike + operator validation); what an automated rig adds is closing the edit→reload→probe gap and gating per-push instead of nightly. Each test will be a concrete artefact of a verified claim.
 
 ## 4. Skill-prompt regression (`tests/prompts/`)
 
@@ -79,12 +79,12 @@ Release gates on all four passing.
 
 ### Known coverage gap — probe-based reload
 
-`hot-reload/wait`'s probe-based confirmation (§4.5) is *safety-critical* — Claude uses it to gate dispatches after a source edit, and a false positive means Claude interacts with stale code. Yet the only way to genuinely exercise it requires a real browser + real shadow-cljs + real edit + real compile pipeline — i.e. the E2E surface, which runs nightly and on `main`, not per-push.
+`tail-build.sh --probe`'s probe-based confirmation (§4.5) is *safety-critical* — Claude uses it to gate dispatches after a source edit, and a false positive means Claude interacts with stale code. Yet the only way to genuinely exercise it requires a real browser + real shadow-cljs + real edit + real compile pipeline — i.e. the E2E surface, which runs nightly and on `main`, not per-push.
 
 Mitigation until we can run E2E per-push:
 
 - **Unit-test the probe-selection heuristics** in `scripts/runtime.cljs` (which probe to pick for a `reg-*` edit vs. a view edit vs. no-good-probe-available). Cheap; catches drift in the selection logic without needing a browser.
-- **Soft-confirmation signalling**: when no probe is available, `hot-reload/wait` returns `:soft? true`; Claude is instructed in SKILL.md to surface this to the user rather than trust it as a hard landing confirmation.
+- **Soft-confirmation signalling**: when no probe is available, `tail-build.sh --probe` returns `:soft? true`; Claude is instructed in SKILL.md to surface this to the user rather than trust it as a hard landing confirmation.
 - **Never force release on a broken probe path** — the release workflow currently does not gate on probe-reload E2E because that fixture isn't wired. Cut the first `v0.1.0-beta.1` only after an E2E run covering this path has passed.
 
 ## What's explicitly **not** tested yet
