@@ -330,6 +330,118 @@
             "legacy? flag preserved on the failure path too")))))
 
 ;; ---------------------------------------------------------------------------
+;; --sync and --queued (default) branches in dispatch-op.
+;;
+;; The pre-existing tests cover only the --trace branch (and its legacy
+;; fallback). The other two branches in dispatch-op are equally load-bearing:
+;;   --sync  — used by the SKILL.md *Recover from a click* and *Subscribe
+;;             traceback* recipes.
+;;   queued  — the default path (no flag) and the most common dispatch
+;;             entry point.
+;;
+;; A regression that swapped the cljs-eval form selection (e.g. a queued
+;; dispatch that silently routed through dispatch-sync-with-stubs!, or a
+;; --stub on the queued path that fell through to plain tagged-dispatch!
+;; and dropped the override) would silently de-sync caller assumptions.
+;; These tests pin the branch selection and the {:mode :sync|:queued ...}
+;; emit shape using the same with-redefs pattern as the --trace tests.
+;; ---------------------------------------------------------------------------
+
+(deftest dispatch-sync-routes-stubs-through-dispatch-sync-with-stubs
+  (testing "--sync + --stub :http-xhrio invokes dispatch-sync-with-stubs!
+            (and NOT plain tagged-dispatch-sync!), and emits {:mode :sync
+            :stubbed-fx-ids [:http-xhrio] ...}"
+    (let [eval-forms (atom [])
+          emitted    (atom nil)]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (swap! eval-forms conj form)
+                                           {:ok? true :event [:user/login] :dispatch-id "abc"
+                                            :stubbed-fx-ids [:http-xhrio]})
+                    ops/emit             (fn [m] (reset! emitted m))]
+        (#'ops/dispatch-op ["[:user/login]" "--sync" "--stub" ":http-xhrio"])
+        (is (some #(str/includes? % "dispatch-sync-with-stubs!") @eval-forms)
+            "--sync + --stub must invoke dispatch-sync-with-stubs!")
+        (is (not-any? #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch-sync! " %)
+                      @eval-forms)
+            "--sync + --stub must NOT invoke plain tagged-dispatch-sync!")
+        (is (= :sync (:mode @emitted))
+            ":mode :sync stamped into the emit payload")
+        (is (= [:http-xhrio] (:stubbed-fx-ids @emitted))
+            ":stubbed-fx-ids surfaces from dispatch-sync-with-stubs! through the merge")))))
+
+(deftest dispatch-sync-no-stubs-uses-tagged-dispatch-sync
+  (testing "--sync without --stub invokes tagged-dispatch-sync! (and NOT
+            dispatch-sync-with-stubs!), and emits {:mode :sync ...}"
+    (let [eval-forms (atom [])
+          emitted    (atom nil)]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (swap! eval-forms conj form)
+                                           {:ok? true :event [:user/login] :dispatch-id "abc"})
+                    ops/emit             (fn [m] (reset! emitted m))]
+        (#'ops/dispatch-op ["[:user/login]" "--sync"])
+        (is (some #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch-sync! " %)
+                  @eval-forms)
+            "--sync without --stub must invoke tagged-dispatch-sync!")
+        (is (not-any? #(str/includes? % "dispatch-sync-with-stubs!") @eval-forms)
+            "--sync without --stub must NOT invoke dispatch-sync-with-stubs!")
+        (is (= :sync (:mode @emitted))
+            ":mode :sync stamped into the emit payload")))))
+
+(deftest dispatch-queued-stubs-and-no-stubs
+  (testing "queued + --stub :http-xhrio invokes dispatch-with-stubs! (the
+            non-sync variant) and emits {:mode :queued :stubbed-fx-ids ...}"
+    (let [eval-forms (atom [])
+          emitted    (atom nil)]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (swap! eval-forms conj form)
+                                           {:ok? true :event [:user/login] :dispatch-id "abc"
+                                            :stubbed-fx-ids [:http-xhrio]})
+                    ops/emit             (fn [m] (reset! emitted m))]
+        (#'ops/dispatch-op ["[:user/login]" "--stub" ":http-xhrio"])
+        (is (some #(re-find #"\(re-frame-pair\.runtime/dispatch-with-stubs! " %)
+                  @eval-forms)
+            "queued + --stub must invoke dispatch-with-stubs!")
+        ;; dispatch-sync-with-stubs! contains the substring dispatch-with-stubs!,
+        ;; so the assertion above can't use plain str/includes? — and likewise
+        ;; we explicitly guard that we did NOT route through the sync variant.
+        (is (not-any? #(str/includes? % "dispatch-sync-with-stubs!") @eval-forms)
+            "queued + --stub must NOT invoke dispatch-sync-with-stubs!")
+        (is (not-any? #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch! " %)
+                      @eval-forms)
+            "queued + --stub must NOT invoke plain tagged-dispatch!")
+        (is (= :queued (:mode @emitted))
+            ":mode :queued stamped into the emit payload")
+        (is (= [:http-xhrio] (:stubbed-fx-ids @emitted))
+            ":stubbed-fx-ids surfaces from dispatch-with-stubs! through the merge"))))
+  (testing "queued without --stub invokes tagged-dispatch! (and NOT
+            dispatch-with-stubs! or any sync variant), and emits {:mode :queued ...}"
+    (let [eval-forms (atom [])
+          emitted    (atom nil)]
+      (with-redefs [ops/ensure-port!     (fn [] nil)
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [_build-id form]
+                                           (swap! eval-forms conj form)
+                                           {:ok? true :event [:user/login] :dispatch-id "abc"})
+                    ops/emit             (fn [m] (reset! emitted m))]
+        (#'ops/dispatch-op ["[:user/login]"])
+        (is (some #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch! " %)
+                  @eval-forms)
+            "queued without --stub must invoke tagged-dispatch!")
+        (is (not-any? #(str/includes? % "dispatch-with-stubs!") @eval-forms)
+            "queued without --stub must NOT invoke dispatch-with-stubs! (or its sync sibling)")
+        (is (not-any? #(re-find #"\(re-frame-pair\.runtime/tagged-dispatch-sync! " %)
+                      @eval-forms)
+            "queued without --stub must NOT invoke tagged-dispatch-sync!")
+        (is (= :queued (:mode @emitted))
+            ":mode :queued stamped into the emit payload")))))
+
+;; ---------------------------------------------------------------------------
 ;; ensure-injected! follows up with a `health` call after a re-ship so the
 ;; native-epoch / native-trace cbs and console-capture wrapper are installed
 ;; in the freshly-shipped runtime. Without this, every op that hit the auto-
