@@ -174,7 +174,9 @@
 (def console-log             console/console-log)
 (def current-who             console/current-who)
 (def append-console-entry!   console/append-console-entry!)
-(def install-console-capture! console/install-console-capture!)
+(def install-console-capture!  console/install-console-capture!)
+(def install-rf-error-handler! console/install-rf-error-handler!)
+(def rf-error-handler-installed? console/rf-error-handler-installed?)
 (def console-capture-installed? console/console-capture-installed?)
 (def console-tail-since      console/console-tail-since)
 
@@ -288,6 +290,7 @@
    (install-native-epoch-cb!)
    (when capture?
      (install-console-capture!)
+     (install-rf-error-handler!)
      (install-native-trace-cb!))
    ;; epoch-count throws when 10x isn't loaded (or when running outside
    ;; the browser, e.g. shadow-cljs's node-test build). Health is meant
@@ -301,6 +304,7 @@
       :re-com-debug?       (re-com-debug-enabled?)
       :last-click-capture? true
       :console-capture?    (console-capture-installed?)
+      :rf-error-handler?   (rf-error-handler-installed?)
       :native-epoch-cb?    @native-epoch-cb-installed?
       :native-trace-cb?    @native-trace-cb-installed?
       :app-db-initialised? (map? @db/app-db)

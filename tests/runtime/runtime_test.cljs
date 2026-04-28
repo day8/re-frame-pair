@@ -1194,15 +1194,42 @@
 (deftest health-can-skip-capture-installs
   (testing "discover --no-capture can avoid console and native trace overhead"
     (let [installed (atom [])]
-      (with-redefs [rt/install-last-click-capture! (fn [] (swap! installed conj :last-click))
-                    rt/install-native-epoch-cb!   (fn [] (swap! installed conj :native-epoch))
-                    rt/install-console-capture!   (fn [] (swap! installed conj :console))
-                    rt/install-native-trace-cb!   (fn [] (swap! installed conj :native-trace))
-                    rt/console-capture-installed? (fn [] false)]
+      (with-redefs [rt/install-last-click-capture!  (fn [] (swap! installed conj :last-click))
+                    rt/install-native-epoch-cb!    (fn [] (swap! installed conj :native-epoch))
+                    rt/install-console-capture!    (fn [] (swap! installed conj :console))
+                    rt/install-rf-error-handler!   (fn [] (swap! installed conj :rf-error-handler))
+                    rt/install-native-trace-cb!    (fn [] (swap! installed conj :native-trace))
+                    rt/console-capture-installed?  (fn [] false)
+                    rt/rf-error-handler-installed? (fn [] false)]
         (let [h (rt/health {:capture? false})]
-          (is (= [:last-click :native-epoch] @installed))
+          (is (= [:last-click :native-epoch] @installed)
+              "rf-error-handler install is gated on :capture? — skipped for discover-only sessions")
           (is (false? (:console-capture? h)))
+          (is (false? (:rf-error-handler? h)))
           (is (false? (:native-trace-cb? h))))))))
+
+(deftest health-installs-rf-error-handler-bridge
+  (testing "with :capture? true (default), health installs the re-frame
+            event-error-handler bridge so browser-side handler throws
+            land in console-tail with :who :handler-error — alongside
+            the console wrapper, the native trace cb, and the click
+            capture listener"
+    (let [installed (atom [])]
+      (with-redefs [rt/install-last-click-capture!  (fn [] (swap! installed conj :last-click))
+                    rt/install-native-epoch-cb!    (fn [] (swap! installed conj :native-epoch))
+                    rt/install-console-capture!    (fn [] (swap! installed conj :console))
+                    rt/install-rf-error-handler!   (fn [] (swap! installed conj :rf-error-handler))
+                    rt/install-native-trace-cb!    (fn [] (swap! installed conj :native-trace))
+                    rt/console-capture-installed?  (fn [] true)
+                    rt/rf-error-handler-installed? (fn [] true)]
+        (let [h (rt/health)]
+          (is (= [:last-click :native-epoch :console :rf-error-handler :native-trace]
+                 @installed)
+              "rf-error-handler install fires AFTER console-capture so the
+               bridge can reach the wrapped js/console.error if it ever
+               needs to forward via the wrapped path")
+          (is (true? (:console-capture? h)))
+          (is (true? (:rf-error-handler? h))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Upstream rf-4mr — dispatch-and-settle bridge for the bash shim.
