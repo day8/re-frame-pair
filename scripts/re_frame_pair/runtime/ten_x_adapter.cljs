@@ -398,21 +398,48 @@
    the skeleton :match-info. Filter by the match's id range, demunge,
    and annotate for re-com.
 
-   Single pass: build the render entry and run `classify-render-entry`
-   in one mapv so we don't allocate an intermediate vec just to hand
-   it to the next mapv."
+   When re-com (rc-aeh) ships, every component routing through
+   `re-com.debug/->attr` emits a sibling `:re-com/render` trace
+   carrying `{:src {:file :line}}` on its tags. Reagent's `:render`
+   trace tags only carry `:component-name`, so without this sibling
+   the render entry has no source attribution. We pre-pass the slice
+   to build a per-component-name :src map, then attach `:src` to the
+   matching render entries. Pre-rc-aeh re-com (and any non-re-com
+   render) carries no `:re-com/render` sibling — :src stays nil.
+
+   Single pass over the :render traces: build the render entry and
+   run `classify-render-entry` in one mapv so we don't allocate an
+   intermediate vec just to hand it to the next mapv."
   [match all-traces]
   (when-let [[first-id last-id] (match-trace-ids match)]
-    (->> (traces-in-id-range all-traces first-id last-id)
-         (filter #(= :render (:op-type %)))
-         (mapv (fn [t]
-                 (let [tags (:tags t)
-                       comp (demunge-component-name
-                              (or (:component-name tags) (str (:operation t))))]
-                   (re-com/classify-render-entry
-                     {:component comp
-                      :time-ms   (:duration t)
-                      :reaction  (:reaction tags)})))))))
+    (let [slice         (traces-in-id-range all-traces first-id last-id)
+          src-by-component
+          ;; Component-name → :src from :re-com/render entries in the
+          ;; slice. Multiple renders of the same component in one epoch
+          ;; collapse to the latest :src — fine for the recipe since
+          ;; the same component instance has a single source site.
+          (->> slice
+               (filter #(= :re-com/render (:op-type %)))
+               (reduce (fn [m t]
+                         (let [tags (:tags t)
+                               comp (demunge-component-name
+                                      (or (:component-name tags)
+                                          (str (:operation t))))
+                               src  (:src tags)]
+                           (cond-> m src (assoc comp src))))
+                       {}))]
+      (->> slice
+           (filter #(= :render (:op-type %)))
+           (mapv (fn [t]
+                   (let [tags  (:tags t)
+                         comp  (demunge-component-name
+                                 (or (:component-name tags) (str (:operation t))))
+                         src   (get src-by-component comp)
+                         entry {:component comp
+                                :time-ms   (:duration t)
+                                :reaction  (:reaction tags)}]
+                     (re-com/classify-render-entry
+                       (cond-> entry src (assoc :src src))))))))))
 
 (defn- has-render-burst?
   "True if the match's :match-info contains a `:reagent/quiescent`
