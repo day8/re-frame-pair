@@ -1257,9 +1257,11 @@
       (is (= [] (rt/chained-dispatch-ids "R" matches))))))
 
 (deftest await-settle-state-transitions
-  (testing "unknown handle: returns :unknown-handle reason"
+  (testing "unknown handle: returns :ok? false :unknown-handle reason"
     (let [r (rt/await-settle "no-such-handle")]
       (is (false? (:settled? r)))
+      (is (false? (:ok? r))
+          ":ok? must be present and false so callers gating on :ok? classify it as a failure")
       (is (= :unknown-handle (:reason r)))))
 
   (testing "pending handle: returns {:settled? false :pending? true}"
@@ -1948,6 +1950,22 @@
      (fn [db _ev] db))
     (rt/tagged-dispatch-sync! [:test/no-op])
     (is (= :app (runtime-atom-value #'rt/current-who)))))
+
+(deftest tagged-dispatch-bang-queued-shape-carries-structural-note
+  (testing "tagged-dispatch! returns :note alongside :dispatch-id nil so callers
+            don't conflate the queued-path structural nil with tagged-dispatch-sync!'s
+            'predates rf-3p7' nil"
+    (re-frame.core/reg-event-db
+     :test/queued-no-op
+     (fn [db _ev] db))
+    (let [r (rt/tagged-dispatch! [:test/queued-no-op])]
+      (is (true?  (:ok? r)))
+      (is (true?  (:queued? r)))
+      (is (nil?   (:dispatch-id r)))
+      (is (nil?   (:epoch-id r)))
+      (is (string? (:note r)))
+      (is (re-find #"(?i)queued" (:note r))
+          ":note must mention the queued-path so callers can self-document"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests for rfp-r5s B: app/summary

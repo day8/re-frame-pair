@@ -1599,9 +1599,16 @@
    output tags `:app`. Use `tagged-dispatch-sync!` when you need
    handler output tagged.
 
-   Returns {:ok? true :queued? true :event ...}. `:dispatch-id` and
-   `:epoch-id` are nil — dispatch is queued, the epoch appears once
-   the handler runs."
+   Returns:
+     {:ok? true :queued? true :event ev :dispatch-id nil :epoch-id nil
+      :note <string>}
+
+   `:dispatch-id` and `:epoch-id` are structurally nil on the queued
+   path — the handler runs out of band, so neither id is available at
+   enqueue time, regardless of re-frame version. The `:note` makes the
+   structural nil explicit so callers don't conflate it with the
+   tagged-dispatch-sync! 'predates rf-3p7' nil. Use tagged-dispatch-sync!
+   if you need :dispatch-id correlation back to an epoch."
   [event-v]
   (reset! current-who :claude)
   (try
@@ -1612,7 +1619,8 @@
    :queued? true
    :event event-v
    :epoch-id nil
-   :dispatch-id nil})
+   :dispatch-id nil
+   :note "Queued dispatch — :dispatch-id and :epoch-id are structurally nil at enqueue time (handler runs out of band). Use tagged-dispatch-sync! if you need :dispatch-id correlation."})
 
 (defn tagged-dispatch-sync!
   "`dispatch-sync` the event and read back the auto-generated
@@ -1630,9 +1638,9 @@
    for this dispatch are emitted synchronously, but 10x's
    `::receive-new-traces` event (which appends to
    `:epochs :matches-by-id`) doesn't fire until re-frame.trace's
-   ~50ms cb-delivery debounce flushes. Use `dispatch-and-collect`
-   for the full async round-trip, or call `collect-after-dispatch`
-   with the returned `:dispatch-id` after a bash-side wait.
+   ~50ms cb-delivery debounce flushes. Call `collect-after-dispatch`
+   with the returned `:dispatch-id` after a bash-side wait past the
+   trace-debounce.
 
    Handler errors: re-frame's default error handler logs to console
    and re-throws, which would propagate through `cljs-eval` as an
@@ -1653,10 +1661,10 @@
         {:ok?         true
          :event       event-v
          :dispatch-id dispatch-id
-         ;; Resolved by dispatch-and-collect / collect-after-dispatch.
+         ;; Resolved by collect-after-dispatch.
          :epoch-id    nil
          :note        (if dispatch-id
-                        "10x's epoch lands after the trace-debounce (~50ms); resolve via dispatch-and-collect or collect-after-dispatch with :dispatch-id."
+                        "10x's epoch lands after the trace-debounce (~50ms); resolve via collect-after-dispatch with :dispatch-id."
                         "re-frame predates rf-3p7 (commit af024c3) — :dispatch-id auto-generation not available; correlation by :dispatch-id won't work.")})
       (catch :default e
         ;; Surface the throw on the console-log buffer too, tagged
@@ -1758,46 +1766,15 @@
                    id)))
          vec)))
 
-(defn dispatch-and-collect
-  "dispatch-sync the event, wait for the trace debounce + a render
-   frame so renders land in 10x's match-info, then resolve the epoch
-   produced via :dispatch-id correlation.
-
-   Returns a JS Promise — the shim awaits. Resolves to
-   `{:ok? true :epoch-id ... :epoch ...}` or
-   `{:ok? false :reason ... :event ...}`."
-  [event-v]
-  (js/Promise.
-   (fn [resolve _reject]
-     (let [{:keys [dispatch-id]} (tagged-dispatch-sync! event-v)
-           settle (fn settle []
-                    (js/requestAnimationFrame
-                     (fn []
-                       (let [matches (read-10x-epochs)
-                             ours-m  (when dispatch-id
-                                       (find-epoch-by-dispatch-id dispatch-id matches))]
-                         (if ours-m
-                           (resolve (clj->js
-                                     {:ok?         true
-                                      :dispatch-id dispatch-id
-                                      :epoch-id    (match-id ours-m)
-                                      :epoch       (coerce-epoch ours-m)}))
-                           (resolve (clj->js
-                                     {:ok?         false
-                                      :reason      :no-new-epoch
-                                      :event       event-v
-                                      :dispatch-id dispatch-id
-                                      :hint        "10x did not append a match for this :dispatch-id within the debounce + 1 frame. Possible causes: trace-enabled? false; handler threw before tracing finished; tab throttled; or re-frame predates rf-3p7 (no :dispatch-id generated)."})))))))]
-       (js/setTimeout settle trace-debounce-settle-ms)))))
-
 (defn collect-after-dispatch
   "Companion to `tagged-dispatch-sync!`: after a bash-side wait past
    the trace-debounce, resolve the epoch by `:dispatch-id` correlation
    (rf-3p7 / af024c3 in re-frame core) and return its coerced form
    plus any chained children fired via `:fx [:dispatch ...]`.
 
-   The bash shim drives the wait — `dispatch-and-collect`'s JS
-   Promise doesn't survive the cljs-eval round-trip back to babashka.
+   The bash shim drives the wait — `dispatch-and-collect` (the cljs-only
+   Promise variant below) doesn't survive the cljs-eval round-trip back
+   to babashka.
 
    Caller pattern (ops.clj's --trace path):
      1. cljs-eval `(tagged-dispatch-sync! ev)` → grab :dispatch-id
@@ -1825,6 +1802,54 @@
          :reason      :no-new-epoch
          :dispatch-id dispatch-id
          :hint        "10x has no match carrying this :dispatch-id. trace-enabled? may be false, the handler may have thrown before tracing finished, or the tab may be throttled."}))))
+
+;; ---------------------------------------------------------------------------
+;; CLJS-only API — Promise-returning helpers
+;; ---------------------------------------------------------------------------
+;;
+;; The fns below are callable from CLJS only. Their JS Promise return
+;; values can't round-trip through cljs-eval back to babashka, so the
+;; bash shim never invokes them — bash flows go through the synchronous
+;; tagged-dispatch-sync! + collect-after-dispatch pair (or the
+;; dispatch-and-settle! handle/poll bridge for cascaded settles). Keep
+;; this section walled off so the public/bash-callable surface stays
+;; obvious to skim.
+
+(defn dispatch-and-collect
+  "dispatch-sync the event, wait for the trace debounce + a render
+   frame so renders land in 10x's match-info, then resolve the epoch
+   produced via :dispatch-id correlation.
+
+   CLJS-only — the JS Promise return doesn't survive cljs-eval. Bash
+   callers use `tagged-dispatch-sync!` + `collect-after-dispatch`
+   instead, or `dispatch-and-settle!` for the cascaded variant.
+
+   Returns a JS Promise. Resolves to
+   `{:ok? true :epoch-id ... :epoch ...}` or
+   `{:ok? false :reason ... :event ...}`."
+  [event-v]
+  (js/Promise.
+   (fn [resolve _reject]
+     (let [{:keys [dispatch-id]} (tagged-dispatch-sync! event-v)
+           settle (fn settle []
+                    (js/requestAnimationFrame
+                     (fn []
+                       (let [matches (read-10x-epochs)
+                             ours-m  (when dispatch-id
+                                       (find-epoch-by-dispatch-id dispatch-id matches))]
+                         (if ours-m
+                           (resolve (clj->js
+                                     {:ok?         true
+                                      :dispatch-id dispatch-id
+                                      :epoch-id    (match-id ours-m)
+                                      :epoch       (coerce-epoch ours-m)}))
+                           (resolve (clj->js
+                                     {:ok?         false
+                                      :reason      :no-new-epoch
+                                      :event       event-v
+                                      :dispatch-id dispatch-id
+                                      :hint        "10x did not append a match for this :dispatch-id within the debounce + 1 frame. Possible causes: trace-enabled? false; handler threw before tracing finished; tab throttled; or re-frame predates rf-3p7 (no :dispatch-id generated)."})))))))]
+       (js/setTimeout settle trace-debounce-settle-ms)))))
 
 ;; Forward-declared — defined in the dispatch-with bridge below.
 ;; dispatch-and-settle!'s :stub-fx-ids opt validates each id against
@@ -2045,7 +2070,13 @@
      - settled, timeout: {:settled? true :ok? false :reason :timeout
                           :event ev}
      - still pending:    {:settled? false :pending? true :handle h}
-     - unknown handle:   {:settled? false :reason :unknown-handle :handle h}
+     - unknown handle:   {:settled? false :ok? false :reason :unknown-handle :handle h}
+
+   `:ok?` is omitted on the still-pending shape because pending isn't an
+   error — bash-side polling reads `:settled? r` to decide whether to
+   keep polling. The unknown-handle shape carries `:ok? false` so callers
+   that gate on `:ok?` correctly classify it as a failure rather than
+   conflating with success-but-no-keys.
 
    On a settled response, the handle is removed from the atom — pollers
    should not call await-settle on the same handle twice."
@@ -2055,7 +2086,7 @@
       (do (swap! settle-pending dissoc handle)
           entry)
       {:settled? false :pending? true :handle handle})
-    {:settled? false :reason :unknown-handle :handle handle}))
+    {:settled? false :ok? false :reason :unknown-handle :handle handle}))
 
 ;; ---------------------------------------------------------------------------
 ;; dispatch-with bridge — fx-overrides for safe iteration
