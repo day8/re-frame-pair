@@ -704,9 +704,9 @@
 (deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
   ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source
   ;; {:file ... :line ...}} to the query-v's meta at the call site.
-  ;; subs-ran-from-native-traces (and the legacy 10x sub-runs-from-state)
-  ;; should lift that to :subscribe/source on each entry, plus a
-  ;; sibling :input-query-sources vec parallel to :input-query-vs.
+  ;; sub-runs-from-state (now shared by both paths via the match-shape
+  ;; convergence) should lift that to :subscribe/source on each entry,
+  ;; plus a sibling :input-query-sources vec parallel to :input-query-vs.
   (testing "native-trace path: query-v meta surfaces as :subscribe/source;
             each input query-v's meta surfaces in :input-query-sources"
     (let [outer-src {:file "src/views/cart_view.cljs" :line 42}
@@ -794,7 +794,7 @@
       (is (= 3 (count (:renders e)))
           "all three :render traces fall in the unbounded id range"))))
 
-(deftest subs-ran-from-native-traces-dedupes-by-query-v
+(deftest coerce-native-epoch-subs-ran-dedupes-by-query-v
   (testing "multiple :sub/run for the same query-v collapse to the most
             recent (input-deps don't change between runs of the same
             sub, so picking latest is correct)"
@@ -816,7 +816,7 @@
       (is (= [[:bar]] (:input-query-vs (first (filter #(= [:foo] (:query-v %))
                                                       ran))))))))
 
-(deftest subs-cache-hit-from-native-traces-only-cached-true
+(deftest coerce-native-epoch-subs-cache-hit-only-cached-true
   (testing ":sub/create with :cached? true is a cache hit; :cached? false
             is a fresh subscribe (no entry); missing :cached? skips"
     (let [traces [{:id 1 :op-type :sub/create :tags {:query-v [:hit-1]
