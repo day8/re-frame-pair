@@ -71,10 +71,11 @@ jobs:
           distribution: "temurin"
           java-version: "21"
 
-      - name: Install Clojure CLI
+      - name: Install Clojure CLI and Babashka
         uses: DeLaGuardo/setup-clojure@bc7570e912b028bbcc22f457adec7fdf98e2f4ed # 12.5
         with:
           cli: "latest"
+          bb: "latest"
 
       - name: Cache deps.edn deps
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
