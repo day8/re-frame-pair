@@ -236,6 +236,11 @@
    "ten_x_adapter.cljs"
    ;; native-epoch depends on ten-x-adapter (aget-path, coerce-epoch).
    "native_epoch.cljs"
+   ;; dispatch depends on console (current-who, append-console-entry!),
+   ;; native-epoch (native-epochs/-traces, coerce-native-epoch), and
+   ;; ten-x-adapter (aget-path, ten-x-loaded?, read-10x-epochs,
+   ;; find-trace, coerce-epoch, match-id). Goes after all three.
+   "dispatch.cljs"
    ;; epochs depends on native-epoch + ten-x-adapter (epoch ladder).
    "epochs.cljs"
    ;; dom depends on epochs (latest-epoch-id for click-fire).
