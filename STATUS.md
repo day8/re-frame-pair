@@ -16,8 +16,8 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | `scripts/ops.clj` + shell shims | Written — babashka dispatches every op |
 | `.claude-plugin/plugin.json` | Written |
 | `package.json` + GH Actions (CI + release) | Written; CI now runs the runtime-test build per push |
-| `tests/runtime/` unit tests | **70 deftests / 371 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
-| `tests/ops_smoke.bb` babashka tests | **20 deftests / 36 assertions / 0 failures**; ops.clj load-path + pure-helper coverage, run via `npm run test:ops`, gated in CI |
+| `tests/runtime/` unit tests | **73 deftests / 385 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
+| `tests/ops_smoke.bb` babashka tests | **26 deftests / 51 assertions / 0 failures**; ops.clj load-path + pure-helper coverage, run via `npm run test:ops`, gated in CI |
 | `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app; bundled bootstrap + re-com CSS for self-contained rendering; wired into `re-frame-debux` via `:local/root` (rfp-mkf) so the worked example for the form-by-form trace recipe carries a non-nil `:debux/code` |
 | End-to-end against a live re-frame app | **Verified** — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 predicate filters validated; time-travel rolls userland app-db correctly. v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs #1, #2). |
 
@@ -119,7 +119,7 @@ Each navigation event triggers `::reset-current-epoch-app-db`, but only when 10x
 
 **Unit-tested (`tests/runtime/runtime_test.cljs` + `tests/runtime/fixtures.cljs`, runs via `npm test`):**
 
-- 70 deftests / 371 assertions / 0 failures (CLJS) + 20 deftests / 36 assertions / 0 failures (babashka, `tests/ops_smoke.bb`).
+- 73 deftests / 385 assertions / 0 failures (CLJS) + 26 deftests / 51 assertions / 0 failures (babashka, `tests/ops_smoke.bb`).
 - `re-com?` / `re-com-category` (broadened heuristics).
 - `parse-rc-src` (file:line shape, malformed cases, edge cases).
 - `extract-query-vs` (cache-key map → query-v, duplicates, malformed entries).
@@ -229,7 +229,7 @@ Line 42's cardinal rule was telling the LLM to call `hot-reload/wait` — a labe
 1. **Tag the next release** — `v0.1.0-beta.2` is on `main` un-tagged but the working tree is now ~30 commits past beta.2 (native epoch path, dispatch-and-settle, dispatch-with --stub, `:event/source`, `:subscribe/source`, Phase 2 debux integration). The natural next tag is `v0.1.0-beta.3` (or v0.2 if the new dispatch surfaces warrant a minor bump). Operator decision; CI green throughout.
 2. **Phase 5 live verification** — exercise the edit-then-reload cycle end-to-end (`Edit` a fixture handler, `tail-build.sh --probe`, dispatch, observe). The probe protocol is coded and unit-tested, but no real edit→reload cycle has been run. `rfp-3es` confirmed the SKILL.md cardinal rule names the real op.
 3. **Real-world day8 app exercise** — point re-frame-pair at an actual day8 re-frame application (not just the fixture) and run the SKILL.md recipes. Catch anything the fixture's narrow surface doesn't cover.
-4. **Babashka-side unit tests — expand coverage.** `tests/ops_smoke.bb` now lands 20 deftests / 36 assertions (gated in CI via `npm run test:ops`). Still missing: bencode encode/decode roundtrip (property-test via `test.check`), `parse-predicate-args` flag-combination matrix, `read-port`'s candidate-cascade.
+4. **Babashka-side unit tests — expand coverage.** `tests/ops_smoke.bb` now lands 26 deftests / 51 assertions (gated in CI via `npm run test:ops`). Still missing: bencode encode/decode roundtrip (property-test via `test.check`), `parse-predicate-args` flag-combination matrix, `read-port`'s candidate-cascade.
 5. **CI: bash-shim E2E** — current smoke job only validates shebangs and `unknown-subcommand` parsing. Add a job that boots the fixture (or a mock nREPL listener), runs `discover-app.sh` + `dispatch.sh --trace`, and asserts edn shape. Catches regressions the unit tests can't.
 6. **SKILL.md doc completeness** — surface `registrar-handler-ref` (used in experiment-loop recipe but undocumented), `health`/`version-report` (called by discover but unlisted), `app-db/schema`, and the new `--stub` flag wiring in the ops tables. Add recipes for the new `:event/source` / `:subscribe/source` fields ("Where was this dispatched?" / "Which view subscribed?"). Tracked in `rfp-q2q` (recipes) and `rfp-8yu` (ops tables).
 
