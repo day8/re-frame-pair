@@ -280,6 +280,23 @@
                :cache-hit/reason :sub/run-unchanged}]
              (:subs/cache-hit e))))))
 
+(deftest read-10x-match-by-id-uses-direct-index
+  (testing "legacy 10x app-db path reads matches-by-id without building
+            the chronological epoch vec"
+    (let [public-shaped (-> fixtures/synthetic-match
+                            (assoc :sub-state-raw (:sub-state fixtures/synthetic-match)
+                                   :timings       (:timing fixtures/synthetic-match))
+                            (dissoc :sub-state :timing))
+          app-db        (atom {:epochs {:match-ids     [999 100]
+                                        :matches-by-id {100 public-shaped}}})]
+      (with-redefs [ten-x/ten-x-public       (fn [] nil)
+                    ten-x/ten-x-app-db-ratom (fn [] app-db)]
+        (let [match (ten-x/read-10x-match-by-id 100)]
+          (is (= (:sub-state fixtures/synthetic-match) (:sub-state match)))
+          (is (= (:timing fixtures/synthetic-match) (:timing match)))
+          (is (= (:match-info fixtures/synthetic-match) (:match-info match))))
+        (is (nil? (ten-x/read-10x-match-by-id 999)))))))
+
 (deftest coerce-epoch-surfaces-debux-code-when-present
   ;; When a fn-traced-wrapped handler runs, debux's send-trace! lands
   ;; per-form trace entries on the :code tag of *current-trace* — which
@@ -947,6 +964,22 @@
                   (fn [] (throw (ex-info "10x should not be read"
                                          {:reason :ten-x-missing})))]
       (is (nil? (rt/epoch-by-id 999))))))
+
+(deftest epoch-by-id-uses-direct-10x-lookup
+  (testing "10x fallback asks for the known id directly instead of
+            rebuilding and scanning the full epoch vec"
+    (with-redefs [native-epoch/find-native-epoch-by-id (fn [_] nil)
+                  ten-x/ten-x-loaded?                 (fn [] true)
+                  ten-x/read-10x-match-by-id          (fn [id]
+                                                        (when (= 100 id)
+                                                          fixtures/synthetic-match))
+                  ten-x/read-10x-epochs               (fn []
+                                                        (throw (ex-info "epoch vec should not be read"
+                                                                        {})))
+                  ten-x/read-10x-all-traces           (fn [] [])
+                  ten-x/ten-x-app-db-ratom            (fn [] nil)]
+      (is (= [:cart/apply-coupon "SPRING25"]
+             (:event (rt/epoch-by-id 100)))))))
 
 (deftest last-epoch-prefers-native-buffer
   (testing "last-epoch returns the native buffer's tail when populated;

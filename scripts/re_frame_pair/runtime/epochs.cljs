@@ -44,17 +44,15 @@
 (defn epoch-by-id
   "Return the coerced epoch with matching id, or nil. Prefers the
    native-epoch-buffer (upstream rf-ybv); falls back to
-   `read-10x-epochs` when 10x is loaded and the epoch has aged out
-   of the native buffer (or the native cb has not been installed
-   yet). Returns nil — never throws — when neither source can
-   answer."
+   `read-10x-match-by-id` when 10x is loaded and the epoch has aged
+   out of the native buffer (or the native cb has not been installed
+   yet). Returns nil — never throws — when neither source can answer."
   [id]
   (or (when-let [raw (native-epoch/find-native-epoch-by-id id)]
         (native-epoch/coerce-native-epoch raw))
       (when (ten-x/ten-x-loaded?)
-        (->> (ten-x/read-10x-epochs)
-             (some #(when (= id (ten-x/match-id %)) %))
-             ten-x/coerce-epoch))))
+        (some-> (ten-x/read-10x-match-by-id id)
+                ten-x/coerce-epoch))))
 
 (defn last-epoch
   "Most recently appended epoch, coerced. Prefers the native-epoch-

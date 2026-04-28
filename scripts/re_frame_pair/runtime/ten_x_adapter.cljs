@@ -233,6 +233,35 @@
   (or (:id match)
       (-> match :match-info first :id)))
 
+(defn read-10x-match-by-id
+  "Single match from 10x's epoch buffer by id. Throws ex-info with
+   `:reason :ten-x-missing` if 10x isn't loaded.
+
+   Uses the public `epoch-by-id` surface when present; otherwise reads
+   the legacy `[:epochs :matches-by-id]` map directly. This avoids
+   rebuilding the full chronological match vector for callers that
+   already know the epoch id."
+  [id]
+  (if-let [pub (ten-x-public)]
+    (normalize-10x-match ((aget pub "epoch_by_id") id))
+    (let [a (ten-x-app-db-ratom)]
+      (when-not a
+        (throw (ex-info "re-frame-10x epoch buffer unreachable"
+                        {:reason :ten-x-missing
+                         :tried-known-paths inlined-rf-known-version-paths
+                         :hint (str "10x is not loaded, or its inlined "
+                                    "re-frame namespace doesn't carry the "
+                                    "expected `re_frame.db.app_db` ratom. "
+                                    "ten-x-inlined-rf already tries every "
+                                    "child key under inlined_deps.re_frame "
+                                    "as a fallback — if you're hitting this, "
+                                    "10x itself probably isn't preloaded. "
+                                    "Note: as of rf1-jum, 10x ships a "
+                                    "`day8.re-frame-10x.public` ns that "
+                                    "is preferred over this path.")})))
+      (some-> (get-in @a [:epochs :matches-by-id id])
+              normalize-10x-match))))
+
 (defn find-trace
   "First :match-info entry whose :op-type matches. Public — used by
    the dispatch + epoch submodules."
