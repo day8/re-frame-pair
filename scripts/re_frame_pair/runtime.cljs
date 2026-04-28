@@ -762,12 +762,18 @@
 ;; native epoch by `:child-of` because they fire outside the synchronous
 ;; handler frame).
 ;;
-;; Feature detection is via JS interop on `re_frame.trace.register_epoch_cb`
-;; — the symbol doesn't exist when re-frame predates rf-ybv, so a direct
-;; `(re-frame.trace/register-epoch-cb ...)` would fail compile against
-;; the runtime-test build (which pins re-frame 1.4.5 from clojars).
-;; `register-trace-cb` has been part of re-frame for years, so the trace
-;; subscription uses the direct namespace reference.
+;; Feature detection for every re-frame.trace surface this file consumes
+;; is via JS interop on `goog.global` rather than direct namespace
+;; references. The symbol may not exist on the re-frame the file is
+;; compiled against — `register-epoch-cb` for instance is missing on
+;; re-frame 1.4.5 (the runtime-test build's pinned dep), so a direct
+;; `(re-frame.trace/register-epoch-cb ...)` would fail to compile.
+;; `register-trace-cb`, the `traces` atom, and the `trace-enabled?`
+;; goog-define have all been stable since re-frame's earliest trace
+;; releases, but they're routed through the same probe so any future
+;; re-frame trace-ns rearrangement (rename, split, feature-flagged
+;; removal) degrades gracefully — the probe returns nil instead of
+;; breaking compile.
 
 (defonce ^:private native-epoch-buffer
   (atom {:entries [] :max-size 50}))
@@ -808,6 +814,16 @@
   (when-let [g (some-> js/goog .-global)]
     (aget-path g ["re_frame" "trace" "register_epoch_cb"])))
 
+(defn- register-trace-cb-fn
+  "JS-interop accessor for `re-frame.trace/register-trace-cb`. The
+   symbol has been part of re-frame since 2017, but routing the lookup
+   through the same `goog.global` probe as `register-epoch-cb-fn`
+   keeps the file resilient to any future re-frame trace-ns
+   rearrangement."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "trace" "register_trace_cb"])))
+
 (defn install-native-epoch-cb!
   "Register a `::re-frame-pair` epoch callback if re-frame core ships
    `register-epoch-cb`. Idempotent. Silent no-op on older re-frame —
@@ -821,12 +837,13 @@
 (defn install-native-trace-cb!
   "Register a `::re-frame-pair-traces` trace callback to feed the
    trace ring buffer. Idempotent. Costs one closure invocation per
-   debounce tick, regardless of trace volume."
+   debounce tick, regardless of trace volume. Silent no-op if a
+   future re-frame removes `register-trace-cb` from the trace ns."
   []
   (when-not @native-trace-cb-installed?
-    (reset! native-trace-cb-installed? true)
-    (re-frame.trace/register-trace-cb ::re-frame-pair-traces
-                                      receive-native-traces!)))
+    (when-let [register-fn (register-trace-cb-fn)]
+      (reset! native-trace-cb-installed? true)
+      (register-fn ::re-frame-pair-traces receive-native-traces!))))
 
 (defn native-epochs
   "Read-only accessor for the native-epoch-buffer entries
@@ -1311,6 +1328,15 @@
 (defonce ^:private claude-dispatch-ids
   (atom #{}))
 
+(defn- traces-atom
+  "JS-interop accessor for the `re-frame.trace/traces` atom (re-frame's
+   internal trace ring). Routed through the same `goog.global` probe
+   as the other re-frame.trace surfaces so the lookup degrades to nil
+   if a future re-frame trace-ns refactor removes or relocates it."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "trace" "traces"])))
+
 (defn- recent-dispatch-id
   "After a `dispatch-sync`, read `re-frame.trace/traces` for the
    most recent `:event` trace and return its `:dispatch-id`.
@@ -1323,12 +1349,14 @@
    is goog.functions/debounce'd 50ms out from the LAST trace).
 
    nil when re-frame predates rf-3p7 commit af024c3 (no
-   :dispatch-id tag generated)."
+   :dispatch-id tag generated), or when the trace atom isn't
+   reachable on the loaded re-frame build."
   []
-  (->> @re-frame.trace/traces
-       reverse
-       (some (fn [t] (when (= :event (:op-type t))
-                       (-> t :tags :dispatch-id))))))
+  (when-let [traces-ref (traces-atom)]
+    (->> @traces-ref
+         reverse
+         (some (fn [t] (when (= :event (:op-type t))
+                         (-> t :tags :dispatch-id)))))))
 
 (defn tagged-dispatch!
   "Dispatch an event (queued) — the handler runs out of band, so the
@@ -2515,6 +2543,16 @@
 ;; Health check
 ;; ---------------------------------------------------------------------------
 
+(defn- trace-enabled?-fn
+  "JS-interop accessor for the `re-frame.trace/trace-enabled?`
+   goog-define. Returns the boolean value (true/false) when the
+   symbol is reachable, nil otherwise. Probe-based for the same
+   reason as the other re-frame.trace accessors — keeps the file
+   resilient if a future re-frame moves trace gating off this var."
+  []
+  (when-let [g (some-> js/goog .-global)]
+    (aget-path g ["re_frame" "trace" "trace_enabled_QMARK_"])))
+
 (defn health
   "One-call summary of the runtime's view of the world. Used by
    `discover-app.sh` to confirm the environment is healthy.
@@ -2535,7 +2573,7 @@
     {:ok?                 true
      :session-id          session-id
      :ten-x-loaded?       (ten-x-loaded?)
-     :trace-enabled?      re-frame.trace/trace-enabled?
+     :trace-enabled?      (trace-enabled?-fn)
      :re-com-debug?       (re-com-debug-enabled?)
      :last-click-capture? true
      :console-capture?    true
