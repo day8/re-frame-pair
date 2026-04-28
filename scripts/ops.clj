@@ -219,6 +219,28 @@
   ;; the inject path.
   (.getPath (io/file (.getParent (io/file *file*)) "re_frame_pair" "runtime.cljs")))
 
+(def ^:private runtime-submodule-files
+  "Submodule filenames inside scripts/re_frame_pair/runtime/, listed in
+   load order. Each is its own CLJS namespace; the facade
+   `re-frame-pair.runtime` (runtime.cljs) :require's all of them and
+   re-exports the symbols ops.clj / tests reach through. Submodules
+   come first so their nses exist when the facade's :require fires at
+   REPL time."
+  ["versions.cljs"])
+
+(defn- runtime-cljs-paths
+  "Source files comprising the re-frame-pair.runtime namespace tree,
+   in load order. Submodules first; the facade last."
+  []
+  (let [scripts-dir (.getParent (io/file *file*))
+        sub-dir     (io/file scripts-dir "re_frame_pair" "runtime")
+        sub-paths   (when (.isDirectory sub-dir)
+                      (->> runtime-submodule-files
+                           (map #(.getPath (io/file sub-dir %)))
+                           (filter #(.exists (io/file %)))
+                           vec))]
+    (vec (concat sub-paths [(runtime-cljs-path)]))))
+
 ;; ---------------------------------------------------------------------------
 ;; Output helpers
 ;; ---------------------------------------------------------------------------
@@ -477,10 +499,13 @@
    `(shadow.cljs.devtools.api/cljs-eval ...)` wrapping."
   32000)
 
-(defn- chunked-inject!
-  "Source-ship `runtime.cljs` to the connected runtime in size-bounded
-   chunks. Returns a vec of `[chunk-index resp]` for each chunk so
-   callers can detect partial failures."
+(defn- chunked-inject-source!
+  "Source-ship one CLJS file's contents to the connected runtime in
+   size-bounded chunks. Each chunk re-asserts the file's own ns (the
+   chunker reads it from the file's first form), so files with
+   different ns'es ship cleanly without bleed across boundaries.
+   Returns a vec of `[chunk-index resp]` for each chunk so callers
+   can detect partial failures."
   [build-id src]
   (let [chunks (chunk-source src inject-chunk-bytes)]
     (loop [i 0, results []]
@@ -491,6 +516,31 @@
           (if fail
             (conj results [i (assoc fail :chunk-index i :chunk-count (count chunks))])
             (recur (inc i) (conj results [i resp]))))))))
+
+(defn- chunked-inject!
+  "Ship every file in `paths` to the connected runtime via
+   `chunked-inject-source!`, in order. Submodules go first so the
+   facade's :require's resolve at REPL time. Returns a flat vec of
+   `[(- i 1) resp]` entries — same shape as the single-file result for
+   back-compat with callers that read `:chunk-count` / inspect the
+   last entry — but the index counts across all files so a failure
+   inside any file lands at a unique slot."
+  [build-id paths]
+  (loop [remaining paths
+         total     []]
+    (if (empty? remaining)
+      total
+      (let [path        (first remaining)
+            file-chunks (chunked-inject-source! build-id (slurp path))
+            base        (count total)
+            ;; Re-key chunk indices into the global counter so the
+            ;; per-file [i resp] tuples stay unique across files.
+            adjusted    (mapv (fn [[i resp]] [(+ base i) resp]) file-chunks)
+            failed?     (some (fn [[_ r]] (when (map? r) (:reason r)))
+                              adjusted)]
+        (if failed?
+          (into total adjusted)
+          (recur (rest remaining) (into total adjusted)))))))
 
 (defn- ensure-injected!
   "Idempotently ensure scripts/runtime.cljs is loaded in the connected
@@ -515,7 +565,7 @@
   [build-id]
   (if (runtime-already-injected? build-id)
     false
-    (let [results (chunked-inject! build-id (slurp (runtime-cljs-path)))
+    (let [results (chunked-inject! build-id (runtime-cljs-paths))
           last-result (last results)]
       (if (and last-result (:reason (second last-result)))
         (let [[idx fail] last-result]
@@ -653,7 +703,7 @@
     ;; debugging hard — operator couldn't tell whether to re-edit
     ;; runtime.cljs or look elsewhere.
     (let [results (try
-                    (chunked-inject! build-id (slurp (runtime-cljs-path)))
+                    (chunked-inject! build-id (runtime-cljs-paths))
                     (catch Exception e
                       (emit {:ok? false :reason :inject-failed
                              :stage :transport-throw
