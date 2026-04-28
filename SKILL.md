@@ -530,9 +530,27 @@ Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :lin
 
 Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Returns `{:ok? true :file ... :line ... :source :fn-meta}` when the handler's call site is reachable.
 
-Re-frame's reg-* macros (rf-ysy, commit `15dfc25`) capture `*file*` + `(:line (meta &form))` at expansion time and attach `{:file :line}` as metadata on the registered value via `with-meta` — interceptor chains for `:event`, fns for `:sub` / `:fx`. `(meta (registrar/get-handler kind id))` returns the location directly.
+`re-frame.macros/reg-event-db` / `reg-event-fx` / `reg-event-ctx` / `reg-sub` / `reg-fx` capture `*file*` + `(:line (meta &form))` at expansion time and attach `{:file :line}` as metadata on the registered value via `with-meta` — interceptor chains for `:event`, fns for `:sub` / `:fx`. `(meta (registrar/get-handler kind id))` returns the location directly.
 
-If the response is `:no-source-meta`, the user is on a re-frame build predating rf-ysy, or the handler was registered via the programmatic `reg-*-fn` variants (`reg-event-db-fn`, etc.) which don't capture `&form`. Say so and fall back to grepping `'(reg-event-'` for the id — don't invent a path.
+**Host-side opt-in.** `:no-source-meta` responses come from one of three causes; the first is the most common and is fixable:
+
+1. **Host registers via `re-frame.core` (function API, no source-meta capture).** Tell the user to alias-swap their `:require` in the affected ns:
+
+   ```clojure
+   ;; before — function API, no :file :line on registrations
+   (:require [re-frame.core   :as rf])
+
+   ;; after — same call shape, source-meta captured at expansion
+   (:require [re-frame.macros :as rf])
+   ```
+
+   Same call shape (`(rf/reg-event-db ...)` etc.). `re-frame.macros` is a sibling ns of macro mirrors, alias-only migration. CLJS `:advanced` strips the meta-attach branch via DCE (`goog.DEBUG=false`), so production builds carry zero allocation overhead. **Caveat:** macros can't be used in value position — for `(apply reg-sub ...)`, `(map reg-event-db ...)`, `(partial reg-fx ...)`, keep `re-frame.core`. (See `docs/handler-source-meta.md` for the design rationale and history of why the macros live in their own ns.)
+
+2. **re-frame predates the source-meta macros** (older 2026 release / pre-rf-ysy / pre-rf-hsl / pre-rf-cna). Nothing fixable host-side; flag the version-floor and move on.
+
+3. **Programmatic registration via `reg-*-fn`** (`reg-event-db-fn`, etc.) which doesn't capture `&form` — those are the value-position escape hatch and don't carry source by design.
+
+In all three cases, fall back to grepping `'(reg-event-'` for the id — don't invent a path.
 
 ### "Why did this event fire?"
 

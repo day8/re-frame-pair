@@ -2,16 +2,42 @@
 
 > Why `scripts/handler-source.sh` returns `{:ok? false :reason :no-source-meta}` against shadow-cljs builds, and what (if anything) the operator can do about it.
 
-> **Status (rfp-hpu):** Superseded by upstream re-frame rf-ysy
-> (commit `15dfc25` in re-frame). `reg-event-db` / `reg-event-fx` /
-> `reg-event-ctx` / `reg-sub` / `reg-fx` are now defmacros that
-> attach `{:file :line}` to the registered value via `with-meta`;
-> `(meta (registrar/get-handler kind id))` returns the location
-> directly. Path 3 (the rfp-rsg local registration-macro side-table
-> in `scripts/re_frame_pair/runtime.clj` + `-record-source!` +
+> **Status (re-frame 2026 release):** Source-meta capture lives in the
+> opt-in `re-frame.macros` namespace, NOT in `re-frame.core`. The
+> earlier rf-ysy defmacro conversion in re-frame.core was reverted
+> (the macros broke higher-order use — `(apply reg-event-db ...)`,
+> `(map reg-sub ...)`, `(partial reg-fx ...)`); functions are back in
+> `re-frame.core`, and `re-frame.macros` is a sibling ns of macro
+> mirrors. Migration on the host side is **alias-only** — swap
+> `re-frame.core` for `re-frame.macros` in your `:require`:
+>
+> ```clojure
+> ;; function API — no source-meta
+> (:require [re-frame.core   :as rf])
+>
+> ;; macro API — same call shape, source-meta captured
+> (:require [re-frame.macros :as rf])
+> ```
+>
+> Read back via `(meta (re-frame.registrar/get-handler kind id))` for
+> registered handlers, `(:re-frame/source (meta event))` inside event
+> handlers, or `(re-frame.core/query-v-for-reaction r)` for the
+> meta'd query-v of a subscription. Cache identity is unaffected
+> (vector / map equality ignores metadata). In CLJS production builds
+> (`goog.DEBUG=false`) the meta-attach branch is eliminated by
+> Closure dead-code elimination, so the macros reduce to bare
+> `re-frame.core/...` calls with zero allocation overhead. Macros
+> cannot be used in value position; for `(apply reg-sub ...)`,
+> `(map reg-event-db ...)`, `(partial reg-fx ...)` keep using
+> `re-frame.core`.
+>
+> Path 3 (the rfp-rsg local registration-macro side-table in
+> `scripts/re_frame_pair/runtime.clj` + `-record-source!` +
 > `handler-source-table` atom) has been retired — `handler-source`
-> now reads upstream meta straight through. The opt-in is no longer
-> needed; every `(reg-event-db ...)` site captures meta automatically.
+> now reads upstream meta straight through. Re-frame-pair itself
+> requires no migration; consumer apps that want `:event/source`,
+> `:subscribe/source`, and non-`:no-source-meta` `handler/source`
+> need the `re-frame.macros` alias swap above.
 >
 > **Earlier status (rfp-rsg, v0.2):** Path 3 had shipped as a
 > re-frame-pair-side macro layer. Kept in this doc for historical
@@ -119,15 +145,17 @@ Why this fails in practice for handler-source's use case:
 
 A spike on this would take days and produce a heuristic that works on toy fixtures and breaks on real apps.
 
-## What actually happened — rf-ysy
+## What actually happened — `re-frame.macros`
 
-Upstream re-frame changed `reg-event-db`, `reg-event-fx`, `reg-event-ctx`, `reg-sub`, and `reg-fx` into macros that attach `{:file :line}` metadata to the registered value. `handler/source` can now resolve the location with:
+Upstream re-frame moved the call-site capture into a sibling macro namespace. `re-frame.macros/reg-event-db`, `reg-event-fx`, `reg-event-ctx`, `reg-sub`, `reg-fx`, `dispatch`, `dispatch-sync`, and `subscribe` are macros that attach `{:file :line}` metadata to the registered value (or, for `dispatch[-sync]` / `subscribe`, to the event vector / query vector). `handler/source` can now resolve the location with:
 
 ```clojure
 (meta (re-frame.registrar/get-handler kind id))
 ```
 
 That makes the local side-table unnecessary. There is no longer an opt-in migration to `re-frame-pair.runtime/reg-event-db`, no `handler-source-table` to consult, and no `scripts/re_frame_pair/runtime.clj` layer to maintain.
+
+Note: this is a *consumer-side* opt-in. The host app's namespaces have to switch their `:require [re-frame.core :as rf]` to `:require [re-frame.macros :as rf]` for `:event/source`, `:subscribe/source`, and non-`:no-source-meta` `handler/source` to populate. Function API (`re-frame.core`) remains supported for callers that need `(apply reg-event-db ...)`, `(map reg-sub ...)`, `(partial reg-fx ...)`, or other higher-order use that macros can't satisfy.
 
 ## Path 3 — registration macro that captures call-site meta (historical)
 
