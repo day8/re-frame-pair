@@ -35,8 +35,11 @@
 
 (require '[clojure.test :refer [deftest is testing run-tests]]
          '[clojure.string :as str]
+         '[clojure.set :as set]
+         '[clojure.java.io :as io]
          '[clojure.tools.reader :as reader]
-         '[clojure.edn :as edn])
+         '[clojure.edn :as edn]
+         '[cheshire.core :as json])
 
 (def ^:private project-root (System/getProperty "user.dir"))
 (def ^:private skill-md     (slurp (str project-root "/SKILL.md")))
@@ -44,6 +47,8 @@
   (str project-root "/tests/fixture/deps.edn"))
 (def ^:private runtime-cljs-path
   (str project-root "/scripts/re_frame_pair/runtime.cljs"))
+(def ^:private plugin-json-path
+  (str project-root "/.claude-plugin/plugin.json"))
 
 (defn- extract-eval-cljs-forms
   "Vec of CLJS source strings inside every `scripts/eval-cljs.sh '...'`
@@ -87,6 +92,43 @@
     (assert end   (str "marker not found: " end-marker))
     (subs s start end)))
 
+(defn- skill-front-matter
+  "Return SKILL.md's YAML-ish front matter. The test only needs to read
+   allowed-tools entries, so keep this deliberately narrow instead of
+   adding a YAML parser dependency to the smoke runner."
+  []
+  (let [[_ front-matter] (re-find #"(?s)\A---\n(.*?)\n---" skill-md)]
+    (assert front-matter "SKILL.md front matter not found")
+    front-matter))
+
+(defn- skill-allowed-script-names
+  "Set of `scripts/*.sh` basenames allowed by SKILL.md front matter.
+   Accept both historical `Bash(scripts/foo.sh *)` and colon-delimited
+   `Bash(scripts/foo.sh:*)` forms so this smoke stays focused on coverage
+   rather than allowed-tools syntax churn."
+  []
+  (->> (re-seq #"Bash\(scripts/([^\s:)]+\.sh)(?:\s+\*|:\*)\)"
+               (skill-front-matter))
+       (map second)
+       set))
+
+(defn- script-sh-names
+  "Set of executable shell-script basenames under scripts/."
+  []
+  (->> (.listFiles (io/file project-root "scripts"))
+       (filter #(.isFile %))
+       (map #(.getName %))
+       (filter #(str/ends-with? % ".sh"))
+       set))
+
+(defn- plugin-script-paths
+  "Set of script paths exposed by .claude-plugin/plugin.json."
+  []
+  (-> (slurp plugin-json-path)
+      (json/parse-string true)
+      :scripts
+      set))
+
 ;; ---------------------------------------------------------------------------
 ;; Region slices — locked to specific markdown headers so a future
 ;; SKILL.md restructure either updates these or fails the test loudly.
@@ -101,6 +143,30 @@
   (region-between skill-md
                   "**Procedure (manual fn-traced"
                   "**Limits to call out to the user"))
+
+;; ---------------------------------------------------------------------------
+;; Tests — public scripts are exposed through both distribution surfaces.
+;; ---------------------------------------------------------------------------
+
+(deftest shell-scripts-declared-in-skill-and-plugin
+  (testing "every public scripts/*.sh entry is callable from the skill and
+            exposed by the Claude Code plugin manifest. This fails when a
+            new shell operation is documented but left out of either
+            distribution surface."
+    (let [scripts          (script-sh-names)
+          allowed-scripts  (skill-allowed-script-names)
+          plugin-scripts   (plugin-script-paths)
+          plugin-sh-names  (->> plugin-scripts
+                                (keep #(second (re-find #"^\./scripts/([^/]+\.sh)$" %)))
+                                set)
+          missing-allowed (sort (set/difference scripts allowed-scripts))
+          missing-plugin  (sort (set/difference scripts plugin-sh-names))]
+      (is (empty? missing-allowed)
+          (str "SKILL.md allowed-tools missing Bash entries for scripts: "
+               (pr-str missing-allowed)))
+      (is (empty? missing-plugin)
+          (str ".claude-plugin/plugin.json missing scripts entries for: "
+               (pr-str missing-plugin))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests — recipe forms parse cleanly via tools.reader.

@@ -28,7 +28,10 @@
   ],
   "scripts": [
     "./scripts/discover-app.sh",
+    "./scripts/app-summary.sh",
     "./scripts/eval-cljs.sh",
+    "./scripts/console-tail.sh",
+    "./scripts/handler-source.sh",
     "./scripts/inject-runtime.sh",
     "./scripts/dispatch.sh",
     "./scripts/trace-window.sh",

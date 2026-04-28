@@ -10,7 +10,10 @@ description: >
   reg-sub, reg-fx, epoch, interceptor, re-frame-10x, re-com, shadow-cljs.
 allowed-tools:
   - Bash(scripts/discover-app.sh *)
+  - Bash(scripts/app-summary.sh *)
   - Bash(scripts/eval-cljs.sh *)
+  - Bash(scripts/console-tail.sh *)
+  - Bash(scripts/handler-source.sh *)
   - Bash(scripts/inject-runtime.sh *)
   - Bash(scripts/dispatch.sh *)
   - Bash(scripts/trace-window.sh *)
