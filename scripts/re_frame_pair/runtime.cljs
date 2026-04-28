@@ -24,13 +24,13 @@
 ;;;; it and ships the forms over nREPL — so keep it self-contained.
 
 (ns re-frame-pair.runtime
-  (:require [re-frame.core :as rf]
+  (:require [clojure.data :as data]
+            [clojure.string :as str]
+            [re-frame.core :as rf]
             [re-frame.db :as db]
             [re-frame.registrar :as registrar]
             [re-frame.subs :as subs]
-            [re-frame.trace]
-            [clojure.data :as data]
-            [clojure.string :as str]))
+            [re-frame.trace]))
 
 ;; ---------------------------------------------------------------------------
 ;; Session sentinel
