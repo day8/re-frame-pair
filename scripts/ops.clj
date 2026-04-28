@@ -94,13 +94,35 @@
               (String. buf "UTF-8"))
             (do (.append sb ch) (recur (read-char in)))))))))
 
+(defn- open-nrepl-connection [port]
+  (let [sock (Socket. "127.0.0.1" (int port))]
+    {:socket sock
+     :out    (.getOutputStream sock)
+     :in     (PushbackInputStream. (.getInputStream sock))}))
+
+(defn- close-nrepl-connection! [{:keys [socket]}]
+  (when socket
+    (.close ^Socket socket)))
+
+(defn- with-nrepl-connection [port f]
+  (let [conn (open-nrepl-connection port)]
+    (try
+      (f conn)
+      (finally
+        (close-nrepl-connection! conn)))))
+
+(defn- nrepl-connection? [x]
+  (and (map? x)
+       (contains? x :in)
+       (contains? x :out)))
+
 (defn- nrepl-eval-raw
-  "Open a socket to nREPL at port, send an op eval of code-str, read
-   responses until :status contains \"done\", close, return responses."
-  [port code-str]
-  (with-open [sock (Socket. "127.0.0.1" (int port))]
-    (let [out (.getOutputStream sock)
-          in  (PushbackInputStream. (.getInputStream sock))
+  "Send an op eval of code-str, read responses until :status contains
+   \"done\", return responses. Accepts either a port (open/close per call)
+   or an existing connection map for polling loops."
+  [port-or-conn code-str]
+  (if (nrepl-connection? port-or-conn)
+    (let [{:keys [out in]} port-or-conn
           id  (str (random-uuid))
           msg (bencode {"op" "eval" "code" code-str "id" id})]
       (.write out (.getBytes ^String msg "UTF-8"))
@@ -112,7 +134,9 @@
                          (some #{"done"} (get resp "status" [])))]
           (if done?
             responses'
-            (recur responses')))))))
+            (recur responses')))))
+    (with-nrepl-connection port-or-conn
+      #(nrepl-eval-raw % code-str))))
 
 (defn- combine-responses
   "Collapse a sequence of nREPL responses into a single result map with
@@ -150,6 +174,11 @@
                 (when (.exists f)
                   (Integer/parseInt (str/trim (slurp f))))))
             port-file-candidates)))
+
+(defn- with-current-nrepl-connection [f]
+  (let [port (or (read-port)
+                 (throw (ex-info "nREPL port not found" {:reason :nrepl-port-not-found})))]
+    (with-nrepl-connection port f)))
 
 (defn- read-port-candidates
   "Enumerate all plausibly-active shadow-cljs nREPL ports.
@@ -215,19 +244,26 @@
 (defn- jvm-eval
   "Evaluate a Clojure (JVM-side) form over nREPL and return the combined
    response map: {:value :out :err :ex :status}."
-  [form-str]
-  (let [port (or (read-port)
-                 (throw (ex-info "nREPL port not found" {:reason :nrepl-port-not-found})))]
-    (combine-responses (nrepl-eval-raw port form-str))))
+  ([form-str]
+   (let [port (or (read-port)
+                  (throw (ex-info "nREPL port not found" {:reason :nrepl-port-not-found})))]
+     (combine-responses (nrepl-eval-raw port form-str))))
+  ([conn form-str]
+   (combine-responses (nrepl-eval-raw conn form-str))))
 
 (defn- cljs-eval
   "Evaluate a ClojureScript form in the connected browser runtime via
    shadow-cljs's `cljs-eval` API. Returns the raw nREPL response."
-  [build-id form-str]
-  (let [wrapped (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
-                        (pr-str build-id)
-                        (pr-str form-str))]
-    (jvm-eval wrapped)))
+  ([build-id form-str]
+   (let [wrapped (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
+                         (pr-str build-id)
+                         (pr-str form-str))]
+     (jvm-eval wrapped)))
+  ([conn build-id form-str]
+   (let [wrapped (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
+                         (pr-str build-id)
+                         (pr-str form-str))]
+     (jvm-eval conn wrapped))))
 
 (defn- safe-edn [s]
   (try (edn/read-string s) (catch Exception _ s)))
@@ -242,33 +278,37 @@
      2. take the last element of :results (the evaluated CLJS form's
         printed value as a string);
      3. edn/read that string to recover the CLJS value."
-  [build-id form-str]
-  (let [res (cljs-eval build-id form-str)]
-    (cond
-      (some? (:ex res))
-      (throw (ex-info "nREPL eval error" {:reason :eval-error
-                                          :ex (:ex res)
-                                          :err (:err res)}))
+  ([build-id form-str]
+   (cljs-eval-value nil build-id form-str))
+  ([conn build-id form-str]
+   (let [res (if conn
+               (cljs-eval conn build-id form-str)
+               (cljs-eval build-id form-str))]
+     (cond
+       (some? (:ex res))
+       (throw (ex-info "nREPL eval error" {:reason :eval-error
+                                           :ex (:ex res)
+                                           :err (:err res)}))
 
-      (str/blank? (str (:value res)))
-      nil
+       (str/blank? (str (:value res)))
+       nil
 
-      :else
-      (let [outer (safe-edn (str (:value res)))]
-        (cond
-          ;; Shadow result shape.
-          (and (map? outer) (vector? (:results outer)))
-          (when-let [last-result (peek (:results outer))]
-            (safe-edn last-result))
+       :else
+       (let [outer (safe-edn (str (:value res)))]
+         (cond
+           ;; Shadow result shape.
+           (and (map? outer) (vector? (:results outer)))
+           (when-let [last-result (peek (:results outer))]
+             (safe-edn last-result))
 
-          ;; Newer shadow may return {:err "..."} on cljs errors.
-          (and (map? outer) (:err outer))
-          (throw (ex-info "cljs eval error"
-                          {:reason :cljs-eval-error
-                           :err (:err outer)}))
+           ;; Newer shadow may return {:err "..."} on cljs errors.
+           (and (map? outer) (:err outer))
+           (throw (ex-info "cljs eval error"
+                           {:reason :cljs-eval-error
+                            :err (:err outer)}))
 
-          ;; Fallback — assume we already have the value.
-          :else outer)))))
+           ;; Fallback — assume we already have the value.
+           :else outer))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: discover
@@ -765,19 +805,22 @@
    bash-side budget elapses before resolution."
   [build-id handle]
   (let [deadline (+ (System/currentTimeMillis) settle-poll-budget-ms)]
-    (loop []
-      (let [r (cljs-eval-value
-                build-id
-                (format "(re-frame-pair.runtime/await-settle %s)"
-                        (pr-str handle)))]
-        (cond
-          (and (map? r) (:settled? r)) r
-          (>= (System/currentTimeMillis) deadline)
-          {:ok? false :reason :poll-timeout :handle handle
-           :budget-ms settle-poll-budget-ms}
-          :else
-          (do (Thread/sleep settle-poll-ms)
-              (recur)))))))
+    (with-current-nrepl-connection
+      (fn [conn]
+        (loop []
+          (let [r (cljs-eval-value
+                    conn
+                    build-id
+                    (format "(re-frame-pair.runtime/await-settle %s)"
+                            (pr-str handle)))]
+            (cond
+              (and (map? r) (:settled? r)) r
+              (>= (System/currentTimeMillis) deadline)
+              {:ok? false :reason :poll-timeout :handle handle
+               :budget-ms settle-poll-budget-ms}
+              :else
+              (do (Thread/sleep settle-poll-ms)
+                  (recur)))))))))
 
 (defn- dispatch-op [args]
   (ensure-port!)
@@ -985,65 +1028,67 @@
 
       :else
       (try
-        (let [start         (System/currentTimeMillis)
-              last-id       (atom (cljs-eval-value build-id "(re-frame-pair.runtime/latest-epoch-id)"))
-              emitted       (atom 0)
-              last-emitted  (atom ::none) ;; nil is a real :event value, so use a sentinel
-              last-hit      (atom (System/currentTimeMillis))
-              done?     (fn []
-                          (let [now      (System/currentTimeMillis)
-                                elapsed  (- now start)
-                                idle     (- now @last-hit)]
-                            (cond
-                              (and (not stream?) (>= elapsed window-ms))     [:done :window]
-                              (and (not stream?) (>= @emitted count-n))      [:done :count]
-                              (>= elapsed hard-ms)                           [:done :hard-cap]
-                              (and stream? (>= idle idle-ms))                [:done :idle]
-                              :else nil)))
-              fetch-form (fn [since-id]
-                           ;; One eval per poll: fetch new-epochs-since map,
-                           ;; filter matches in-runtime, return both pieces
-                           ;; so the CLI can see aged-out without a second
-                           ;; round-trip.
-                           (format
-                            "(let [r (re-frame-pair.runtime/epochs-since %s)
+        (with-current-nrepl-connection
+          (fn [conn]
+            (let [start         (System/currentTimeMillis)
+                  last-id       (atom (cljs-eval-value conn build-id "(re-frame-pair.runtime/latest-epoch-id)"))
+                  emitted       (atom 0)
+                  last-emitted  (atom ::none) ;; nil is a real :event value, so use a sentinel
+                  last-hit      (atom (System/currentTimeMillis))
+                  done?     (fn []
+                              (let [now      (System/currentTimeMillis)
+                                    elapsed  (- now start)
+                                    idle     (- now @last-hit)]
+                                (cond
+                                  (and (not stream?) (>= elapsed window-ms))     [:done :window]
+                                  (and (not stream?) (>= @emitted count-n))      [:done :count]
+                                  (>= elapsed hard-ms)                           [:done :hard-cap]
+                                  (and stream? (>= idle idle-ms))                [:done :idle]
+                                  :else nil)))
+                  fetch-form (fn [since-id]
+                               ;; One eval per poll: fetch new-epochs-since map,
+                               ;; filter matches in-runtime, return both pieces
+                               ;; so the CLI can see aged-out without a second
+                               ;; round-trip.
+                               (format
+                                "(let [r (re-frame-pair.runtime/epochs-since %s)
                                    matches (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) (:epochs r))]
                                {:matches matches
                                 :id-aged-out? (:id-aged-out? r)
                                 :head-id (re-frame-pair.runtime/latest-epoch-id)})"
-                            (pr-str since-id)
-                            (pr-str pred)))
-              aged-warned? (atom false)]
-          (loop []
-            (Thread/sleep poll-ms)
-            (let [result    (try (cljs-eval-value build-id (fetch-form @last-id))
-                                 (catch Exception _ nil))
-                  matches   (or (:matches result) [])
-                  head-id   (:head-id result)
-                  aged-out? (:id-aged-out? result)]
-              (when head-id (reset! last-id head-id))
-              (when (and aged-out? (not @aged-warned?))
-                (reset! aged-warned? true)
-                (emit {:ok? true :warning :id-aged-out
-                       :note "The id we were tracking fell off 10x's ring buffer between polls — some matching epochs may have been missed."}))
-              (doseq [m matches]
-                ;; When --dedupe-by :event is set, skip an epoch whose
-                ;; :event matches the last-emitted one. Useful with
-                ;; --stream against handlers that fire many times in a
-                ;; row (UI mash, polling, etc.).
-                (let [key (case dedupe-by
-                            :event (:event m)
-                            nil)
-                      dup? (and dedupe-by (= key @last-emitted))]
-                  (when-not dup?
-                    (when dedupe-by (reset! last-emitted key))
-                    (swap! emitted inc)
-                    (reset! last-hit (System/currentTimeMillis))
-                    (emit {:ok? true :epoch m}))))
-              (if-let [[_ why] (done?)]
-                (emit (cond-> {:ok? true :finished? true :reason why :emitted @emitted}
-                        reinjected? (assoc :reinjected? true)))
-                (recur)))))
+                                (pr-str since-id)
+                                (pr-str pred)))
+                  aged-warned? (atom false)]
+              (loop []
+                (Thread/sleep poll-ms)
+                (let [result    (try (cljs-eval-value conn build-id (fetch-form @last-id))
+                                     (catch Exception _ nil))
+                      matches   (or (:matches result) [])
+                      head-id   (:head-id result)
+                      aged-out? (:id-aged-out? result)]
+                  (when head-id (reset! last-id head-id))
+                  (when (and aged-out? (not @aged-warned?))
+                    (reset! aged-warned? true)
+                    (emit {:ok? true :warning :id-aged-out
+                           :note "The id we were tracking fell off 10x's ring buffer between polls — some matching epochs may have been missed."}))
+                  (doseq [m matches]
+                    ;; When --dedupe-by :event is set, skip an epoch whose
+                    ;; :event matches the last-emitted one. Useful with
+                    ;; --stream against handlers that fire many times in a
+                    ;; row (UI mash, polling, etc.).
+                    (let [key (case dedupe-by
+                                :event (:event m)
+                                nil)
+                          dup? (and dedupe-by (= key @last-emitted))]
+                      (when-not dup?
+                        (when dedupe-by (reset! last-emitted key))
+                        (swap! emitted inc)
+                        (reset! last-hit (System/currentTimeMillis))
+                        (emit {:ok? true :epoch m}))))
+                  (if-let [[_ why] (done?)]
+                    (emit (cond-> {:ok? true :finished? true :reason why :emitted @emitted}
+                            reinjected? (assoc :reinjected? true)))
+                    (recur)))))))
         (catch Exception e
           (emit (cond-> {:ok? false :reason :watch-failed :message (.getMessage e)}
                   reinjected? (assoc :reinjected? true))))))))
@@ -1075,32 +1120,34 @@
       ;; form itself, undefined ns, etc.) reports the cause instead
       ;; of just "did not change". Without this, the operator chases
       ;; build output for a problem that's in the probe expression.
-      (let [first-err   (atom nil)
-            try-probe!  (fn []
-                          (try (cljs-eval-value build-id probe)
-                               (catch Exception e
-                                 (when-not @first-err
-                                   (reset! first-err (.getMessage e)))
-                                 ::error)))
-            before      (try-probe!)
-            start       (System/currentTimeMillis)]
-        (loop []
-          (Thread/sleep poll-ms)
-          (let [elapsed (- (System/currentTimeMillis) start)
-                now     (try-probe!)]
-            (cond
-              (and (not= now ::error) (not= now before))
-              (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? false}
-                      reinjected? (assoc :reinjected? true)))
+      (with-current-nrepl-connection
+        (fn [conn]
+          (let [first-err   (atom nil)
+                try-probe!  (fn []
+                              (try (cljs-eval-value conn build-id probe)
+                                   (catch Exception e
+                                     (when-not @first-err
+                                       (reset! first-err (.getMessage e)))
+                                     ::error)))
+                before      (try-probe!)
+                start       (System/currentTimeMillis)]
+            (loop []
+              (Thread/sleep poll-ms)
+              (let [elapsed (- (System/currentTimeMillis) start)
+                    now     (try-probe!)]
+                (cond
+                  (and (not= now ::error) (not= now before))
+                  (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? false}
+                          reinjected? (assoc :reinjected? true)))
 
-              (>= elapsed wait-ms)
-              (emit (cond-> {:ok? false :reason :timed-out :timed-out? true
-                             :note "Probe did not change within --wait-ms. Likely a compile error in your dev build, OR a broken probe expression — see :probe-error if present."}
-                      @first-err  (assoc :probe-error @first-err)
-                      reinjected? (assoc :reinjected? true)))
+                  (>= elapsed wait-ms)
+                  (emit (cond-> {:ok? false :reason :timed-out :timed-out? true
+                                 :note "Probe did not change within --wait-ms. Likely a compile error in your dev build, OR a broken probe expression — see :probe-error if present."}
+                          @first-err  (assoc :probe-error @first-err)
+                          reinjected? (assoc :reinjected? true)))
 
-              :else
-              (recur))))))))
+                  :else
+                  (recur))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: discover-list (multi-build awareness)

@@ -442,6 +442,94 @@
             ":mode :queued stamped into the emit payload")))))
 
 ;; ---------------------------------------------------------------------------
+;; Polling ops reuse one nREPL connection for repeated evals.
+;; ---------------------------------------------------------------------------
+
+(deftest await-settle-loop-reuses-single-nrepl-connection
+  (testing "await-settle-loop opens one connection and reuses it across
+            pending -> settled polls"
+    (let [opened    (atom 0)
+          eval-conns (atom [])
+          responses (atom [{:pending? true}
+                           {:settled? true :ok? true}])]
+      (with-redefs [ops/settle-poll-ms              0
+                    ops/with-current-nrepl-connection
+                    (fn [f]
+                      (f {:conn-id (swap! opened inc)}))
+                    ops/cljs-eval-value
+                    (fn
+                      ([_build-id _form]
+                       (throw (ex-info "non-persistent eval path used" {})))
+                      ([conn _build-id _form]
+                       (swap! eval-conns conj conn)
+                       (let [r (first @responses)]
+                         (swap! responses #(vec (rest %)))
+                         r)))]
+        (is (= {:settled? true :ok? true}
+               (#'ops/await-settle-loop :app "handle-1")))
+        (is (= 1 @opened))
+        (is (= 2 (count @eval-conns)))
+        (is (= 1 (count (distinct @eval-conns))))))))
+
+(deftest watch-op-reuses-single-nrepl-connection
+  (testing "watch-op uses one persistent connection for the initial head
+            lookup and subsequent poll eval"
+    (let [opened     (atom 0)
+          eval-conns (atom [])
+          emitted    (atom [])]
+      (with-redefs [ops/ensure-port!                 (fn [] true)
+                    ops/ensure-injected!             (fn [_build-id] false)
+                    ops/with-current-nrepl-connection
+                    (fn [f]
+                      (f {:conn-id (swap! opened inc)}))
+                    ops/cljs-eval-value
+                    (fn
+                      ([_build-id _form]
+                       (throw (ex-info "non-persistent eval path used" {})))
+                      ([conn _build-id form]
+                       (swap! eval-conns conj conn)
+                       (if (= form "(re-frame-pair.runtime/latest-epoch-id)")
+                         0
+                         {:matches [{:event [:clicked]}]
+                          :head-id 1})))
+                    ops/emit                         (fn [m] (swap! emitted conj m))]
+        (#'ops/watch-op ["--count" "1" "--poll-ms" "0" "--window-ms" "1000"])
+        (is (= 1 @opened))
+        (is (= 2 (count @eval-conns)))
+        (is (= 1 (count (distinct @eval-conns))))
+        (is (some :finished? @emitted))))))
+
+(deftest tail-build-op-reuses-single-nrepl-connection
+  (testing "tail-build-op uses one persistent connection for before/after
+            probe evals"
+    (let [opened     (atom 0)
+          eval-conns (atom [])
+          emitted    (atom nil)
+          values     (atom [0 1])]
+      (with-redefs [ops/ensure-port!                 (fn [] true)
+                    ops/ensure-injected!             (fn [_build-id] false)
+                    ops/tail-build-poll-ms           0
+                    ops/with-current-nrepl-connection
+                    (fn [f]
+                      (f {:conn-id (swap! opened inc)}))
+                    ops/cljs-eval-value
+                    (fn
+                      ([_build-id _form]
+                       (throw (ex-info "non-persistent eval path used" {})))
+                      ([conn _build-id _form]
+                       (swap! eval-conns conj conn)
+                       (let [v (first @values)]
+                         (swap! values #(vec (rest %)))
+                         v)))
+                    ops/emit                         (fn [m] (reset! emitted m))]
+        (#'ops/tail-build-op ["--probe" "(js/Date.now)" "--wait-ms" "1000"])
+        (is (= 1 @opened))
+        (is (= 2 (count @eval-conns)))
+        (is (= 1 (count (distinct @eval-conns))))
+        (is (= true (:ok? @emitted)))
+        (is (= false (:soft? @emitted)))))))
+
+;; ---------------------------------------------------------------------------
 ;; ensure-injected! follows up with a `health` call after a re-ship so the
 ;; native-epoch / native-trace cbs and console-capture wrapper are installed
 ;; in the freshly-shipped runtime. Without this, every op that hit the auto-
