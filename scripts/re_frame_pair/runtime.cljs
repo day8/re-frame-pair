@@ -17,8 +17,10 @@
 ;;;;   - The `session-id` sentinel below is re-read on every op. If
 ;;;;     it's gone, a full page refresh happened and the shim
 ;;;;     re-injects this file.
-;;;;   - 10x internals accessed here are not a public API; several
-;;;;     names marked with `TODO verify` need grounding in the spike.
+;;;;   - 10x internals accessed here are not a public API; the
+;;;;     `day8.re-frame-10x.public` namespace covers most of what
+;;;;     used to be inlined-rf walking, but a few legacy paths
+;;;;     remain — flagged in-place where they live.
 ;;;;
 ;;;; This file is source-of-truth for injection. The shell shim reads
 ;;;; it and ships the forms over nREPL — so keep it self-contained.
@@ -2401,9 +2403,9 @@
    `data-rc-src` attribute. Public so `discover-app.sh` can surface
    it in the health report.
 
-   TODO verify the definitive gate in `re-com.config` in the spike;
-   this heuristic is fine when the app has rendered at least once but
-   may misreport on a freshly-loaded page.
+   This is a DOM observation, not a config read — fine once the app
+   has rendered at least one component with `:src (at)`, but may
+   misreport on a freshly-loaded page before any render has occurred.
 
    Returns false in non-browser environments (no `js/document`)."
   []
@@ -2723,8 +2725,10 @@
 ;; is below its minimum floor. CLJS libs don't have a uniform
 ;; "version" convention in-browser, so this is a best-effort read:
 ;; try known var names / JS globals, return :unknown when nothing
-;; matches. Floors are nil (no enforcement) until the spike confirms
-;; where version info actually lives for each lib.
+;; matches. Floors stay nil (no enforcement) for libs that lack a
+;; public runtime-readable version var — only re-com currently
+;; exposes one (via `re-com.config/version`, a `goog-define`).
+;; Enforcement activates per-lib once a public version surface exists.
 
 (def version-floors
   "Floor versions from spec §3.7. `nil` means 'no enforcement yet' —
@@ -2818,7 +2822,7 @@
      :enforcement-live? live?
      :note              (if live?
                           "Floors set for at least one dep; enforcement active."
-                          "Floors are nil across the board — enforcement plumbed but effectively a no-op. See spec §8a spike item 'versions'.")}))
+                          "Floors are nil across the board — enforcement plumbed but effectively a no-op. Activates per-lib once a public runtime-readable version var exists.")}))
 
 ;; ---------------------------------------------------------------------------
 ;; Health check
