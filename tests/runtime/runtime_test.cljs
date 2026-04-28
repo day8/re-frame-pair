@@ -1,5 +1,6 @@
 (ns runtime-test
-  (:require [cljs.test :refer [deftest is testing use-fixtures]]
+  (:require [cljs.reader :as reader]
+            [cljs.test :refer [deftest is testing use-fixtures]]
             [fixtures]
             [re-frame-pair.runtime :as rt]
             [re-frame-pair.runtime.dispatch :as dispatch]
@@ -1380,7 +1381,46 @@
           (is (= ["CHILD" "GRANDCHILD"] (:cascaded-epoch-ids settled)))
           (is (= [[:child] [:grandchild]]
                  (mapv :event (:cascaded-epochs settled))))
+          (is (nil? (-> settled :epoch :debux/code))
+              "await-settle strips fn-bearing debux code from the poll response")
+          (is (every? nil? (map :debux/code (:cascaded-epochs settled)))
+              "cascaded epochs are stripped too")
           (is (= :unknown-handle (:reason (rt/await-settle (:handle r))))))))))
+
+(deftest await-settle-result-edn-roundtrips-with-debux-code-in-buffer
+  (testing "fn-traced :debux/code stays out of the awaited poll result"
+    (let [code-payload [{:form 'inc :result inc}]]
+      (reset-runtime-atom! #'rt/native-epoch-buffer
+              {:entries  [(assoc (minimal-native-epoch {:id 10 :event [:root]
+                                                        :dispatch-id "ROOT"})
+                                  :traces [{:id 10 :op-type :event
+                                            :tags {:event [:root]
+                                                   :dispatch-id "ROOT"}}
+                                           {:id 11 :op-type :event/handler
+                                            :tags {:code code-payload}}])
+                          (assoc (minimal-native-epoch {:id 11 :event [:child]
+                                                        :dispatch-id "CHILD"
+                                                        :parent-dispatch-id "ROOT"})
+                                  :traces [{:id 12 :op-type :event
+                                            :tags {:event [:child]
+                                                   :dispatch-id "CHILD"
+                                                   :parent-dispatch-id "ROOT"}}
+                                           {:id 13 :op-type :event/handler
+                                            :tags {:code code-payload}}])]
+               :max-size 50})
+      (with-redefs [dispatch/dispatch-and-settle-fn
+                    (fn []
+                      (fn [_event _opts]
+                        (resolving-thenable (clj->js {:ok? true}))))
+                    dispatch/recent-dispatch-id (fn [] "ROOT")]
+        (let [r       (rt/dispatch-and-settle! [:root])
+              settled (rt/await-settle (:handle r))
+              parsed  (reader/read-string (pr-str settled))]
+          (is (true? (:ok? settled)))
+          (is (= settled parsed))
+          (is (nil? (-> settled :epoch :debux/code)))
+          (is (every? nil?
+                      (map :debux/code (:cascaded-epochs settled)))))))))
 
 (deftest dispatch-and-settle-bang-records-promise-rejection
   (testing "rf-4mr Promise rejection settles the handle with :promise-rejected"

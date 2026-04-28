@@ -374,6 +374,19 @@
         :cascaded-epoch-ids (mapv :dispatch-id cascaded-raws)
         :cascaded-epochs    (mapv #(native-epoch/coerce-native-epoch % ctx) cascaded-raws)}))))
 
+(defn- awaitable-epoch
+  "Trim fields that are useful in rich epoch reads but unsafe across
+   the cljs-eval EDN boundary used by await-settle's bash poller."
+  [epoch]
+  (some-> epoch (dissoc :debux/code)))
+
+(defn- awaitable-cascade
+  [cascade]
+  (when cascade
+    (-> cascade
+        (update :root-epoch awaitable-epoch)
+        (update :cascaded-epochs #(mapv awaitable-epoch %)))))
+
 (defonce settle-pending
   ;; handle-uuid -> {:settled? bool ... result fields}.
   (atom {}))
@@ -448,7 +461,8 @@
                           (let [raw     (js->clj js-result :keywordize-keys true)
                                 ok?     (boolean (:ok? raw))
                                 cascade (when (and ok? root-dispatch-id)
-                                          (collect-cascade-from-buffer root-dispatch-id))]
+                                          (awaitable-cascade
+                                           (collect-cascade-from-buffer root-dispatch-id)))]
                             (swap! settle-pending update handle merge
                                    (cond-> {:settled?           true
                                             :ok?                ok?
