@@ -44,34 +44,36 @@
 (defn epoch-by-id
   "Return the coerced epoch with matching id, or nil. Prefers the
    native-epoch-buffer (upstream rf-ybv); falls back to
-   `read-10x-epochs` when re-frame predates rf-ybv or the epoch has
-   aged out of the native buffer."
+   `read-10x-epochs` when 10x is loaded and the epoch has aged out
+   of the native buffer (or the native cb has not been installed
+   yet). Returns nil — never throws — when neither source can
+   answer."
   [id]
   (or (when-let [raw (native-epoch/find-native-epoch-by-id id)]
         (native-epoch/coerce-native-epoch raw))
-      (when (or (ten-x/ten-x-loaded?)
-                (not @native-epoch/native-epoch-cb-installed?))
+      (when (ten-x/ten-x-loaded?)
         (->> (ten-x/read-10x-epochs)
              (some #(when (= id (ten-x/match-id %)) %))
              ten-x/coerce-epoch))))
 
 (defn last-epoch
   "Most recently appended epoch, coerced. Prefers the native-epoch-
-   buffer; falls back to 10x. Nil if neither has any epochs."
+   buffer; falls back to 10x when it is loaded. Nil if neither
+   source has an epoch (and never throws on missing 10x)."
   []
   (or (some-> (native-epoch/native-epochs) last native-epoch/coerce-native-epoch)
-      (when (or (ten-x/ten-x-loaded?)
-                (not @native-epoch/native-epoch-cb-installed?))
+      (when (ten-x/ten-x-loaded?)
         (some-> (ten-x/read-10x-epochs) last ten-x/coerce-epoch))))
 
 (defn- ten-x-fallback-eligible?
-  "True when callers should attempt the legacy 10x epoch path. If the
-   native epoch callback is installed, missing 10x means native is the
-   only available source and callers should return the native answer
-   without leaking `read-10x-epochs`'s missing-10x exception."
+  "True when callers should attempt the legacy 10x epoch path —
+   i.e. 10x is actually reachable. Gating purely on `ten-x-loaded?`
+   keeps `read-10x-epochs`'s `:ten-x-missing` exception from leaking
+   to callers in the early-session shape (re-frame predates rf-ybv,
+   the cb has not yet run, AND 10x is not loaded), where the only
+   correct answer is 'nothing here'."
   []
-  (or (ten-x/ten-x-loaded?)
-      (not @native-epoch/native-epoch-cb-installed?)))
+  (ten-x/ten-x-loaded?))
 
 (defn- native-epoch-context
   [raw-epochs]

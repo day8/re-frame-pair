@@ -924,7 +924,24 @@
       (is (= [:cart/apply-coupon "SPRING25"] (:event e)))
       (is (= "11111111-1111-1111-1111-111111111111" (:dispatch-id e)))
       ;; rendered components correlated by id range
-      (is (= 3 (count (:renders e)))))))
+      (is (= 3 (count (:renders e))))))
+
+  (testing "no match in native buffer AND 10x unreachable → nil
+            (not a throw — fallback gated on ten-x-loaded?). Covers
+            the early-session shape where the native cb is not yet
+            installed and re-frame-10x is also absent."
+    ;; native buffer has id 100, requesting 999.
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch]
+             :max-size 50})
+    ;; native-epoch-cb-installed? defaults to false (per fixture) —
+    ;; this is the path that used to admit the 10x fallback and leak
+    ;; read-10x-epochs's :ten-x-missing throw to the caller.
+    (with-redefs [ten-x/ten-x-loaded? (fn [] false)
+                  ten-x/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read"
+                                         {:reason :ten-x-missing})))]
+      (is (nil? (rt/epoch-by-id 999))))))
 
 (deftest last-epoch-prefers-native-buffer
   (testing "last-epoch returns the native buffer's tail when populated;
@@ -953,8 +970,10 @@
       (is (= 100 (:id e)))
       (is (= [:cart/apply-coupon "SPRING25"] (:event e)))))
 
-  (testing "no match in native buffer AND 10x not loaded → nil
-            (not a throw — gated on @native-epoch-cb-installed?)"
+  (testing "no match in native buffer AND 10x unreachable → nil
+            (not a throw — fallback gated on ten-x-loaded?). Covers
+            the early-session shape where the native cb is not yet
+            installed and re-frame-10x is also absent."
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries  [fixtures/synthetic-native-epoch]
              :max-size 50})
@@ -963,10 +982,14 @@
              :ids         #{"some-other-dispatch-id"}
              :max-size    100
              :total-count 1})
-    ;; Pretend the cb is installed so the fallback is gated off when
-    ;; 10x is missing — we want nil, not the legacy throw.
-    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (is (nil? (rt/last-claude-epoch)))))
+    ;; native-epoch-cb-installed? defaults to false (per fixture) —
+    ;; this is the path that used to admit the 10x fallback and leak
+    ;; read-10x-epochs's :ten-x-missing throw to the caller.
+    (with-redefs [ten-x/ten-x-loaded? (fn [] false)
+                  ten-x/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read"
+                                         {:reason :ten-x-missing})))]
+      (is (nil? (rt/last-claude-epoch))))))
 
 (deftest epochs-since-prefers-native-buffer
   (testing "epochs-since returns the native tail without consulting 10x"
@@ -1070,7 +1093,8 @@
                         ([raw _ctx]
                          (swap! coerced-ids conj (:id raw))
                          {:id (:id raw)}))]
-      (with-redefs [ten-x/read-10x-epochs (fn [] raws)
+      (with-redefs [ten-x/ten-x-loaded?   (fn [] true)
+                    ten-x/read-10x-epochs (fn [] raws)
                     ten-x/coerce-epoch    coerce]
         (is (= {:id 2}
                (rt/find-where #(= 2 (:id %)))))
@@ -1087,7 +1111,8 @@
                         ([raw _ctx]
                          (swap! coerced-ids conj (:id raw))
                          {:id (:id raw)}))]
-      (with-redefs [ten-x/read-10x-epochs (fn [] raws)
+      (with-redefs [ten-x/ten-x-loaded?   (fn [] true)
+                    ten-x/read-10x-epochs (fn [] raws)
                     ten-x/coerce-epoch    coerce]
         (is (= [{:id 3} {:id 1}]
                (rt/find-all-where #(odd? (:id %)))))

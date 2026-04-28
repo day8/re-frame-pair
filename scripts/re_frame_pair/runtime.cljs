@@ -348,8 +348,9 @@
   "Most recent epoch dispatched by the skill in this session. Resolves
    by walking the native-epoch-buffer first (newest-first) for the
    first epoch whose `:dispatch-id` appears in `claude-dispatch-ids`,
-   then falls back to 10x's buffer when re-frame predates rf-ybv or
-   the dispatch-id has aged out of the native buffer."
+   then falls back to 10x's buffer when 10x is loaded (covers older
+   re-frame, or a dispatch-id that has aged out of the native ring).
+   Returns nil — never throws — when neither source can answer."
   []
   (let [ours        (:ids @claude-dispatch-ids)
         from-native (some->> (native-epochs)
@@ -359,8 +360,7 @@
                                        raw)))
                              coerce-native-epoch)]
     (or from-native
-        (when (or (ten-x-loaded?)
-                  (not @native-epoch-cb-installed?))
+        (when (ten-x-loaded?)
           (some->> (read-10x-epochs)
                    reverse
                    (some (fn [raw]
