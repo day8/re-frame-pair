@@ -610,8 +610,14 @@
 ;; -----------------------------------------------------------------------------
 ;; Native ring buffers — pure-state checks for the receive-* paths.
 ;; The cb registration itself is exercised live by tests/fixture; here
-;; we confirm the buffer-shape contract under direct swap!s.
+;; we confirm the buffer-shape contract and direct callback ingestion.
 ;; -----------------------------------------------------------------------------
+
+(defn- buffer-entry [id]
+  {:id id})
+
+(defn- entry-ids [entries]
+  (mapv :id entries))
 
 (deftest native-epoch-buffer-shape
   (testing "native-epoch-buffer starts as {:entries [] :max-size 50}"
@@ -624,6 +630,39 @@
     (is (= []   (:entries (runtime-atom-value #'rt/native-trace-buffer))))
     (is (= 5000 (:max-size (runtime-atom-value #'rt/native-trace-buffer))))
     (is (= []   (rt/native-traces)))))
+
+(deftest receive-native-epochs-evicts-fifo-at-max-size
+  (testing "receive-native-epochs! caps the ring buffer and drops oldest entries"
+    (doseq [batch (partition-all 10 (mapv buffer-entry (range 60)))]
+      (#'rt/receive-native-epochs! (vec batch)))
+    (let [entries (rt/native-epochs)]
+      (is (= 50 (count entries)))
+      (is (= (vec (range 10 60))
+             (entry-ids entries))))))
+
+(deftest receive-native-epochs-preserves-delivery-order
+  (testing "receive-native-epochs! appends batch entries in delivered order"
+    (#'rt/receive-native-epochs! (mapv buffer-entry [10 20 30]))
+    (#'rt/receive-native-epochs! (mapv buffer-entry [35 45]))
+    (#'rt/receive-native-epochs! (mapv buffer-entry [60]))
+    (is (= [10 20 30 35 45 60]
+           (entry-ids (rt/native-epochs))))))
+
+(deftest receive-native-traces-evicts-fifo-at-max-size
+  (testing "receive-native-traces! drops oldest traces when one batch overshoots"
+    (#'rt/receive-native-traces! (mapv buffer-entry (range 5005)))
+    (let [entries (rt/native-traces)]
+      (is (= 5000 (count entries)))
+      (is (= (vec (range 5 5005))
+             (entry-ids entries)))))
+  (testing "receive-native-traces! applies the same FIFO rule across deliveries"
+    (reset-runtime-atom! #'rt/native-trace-buffer {:entries [] :max-size 5000})
+    (#'rt/receive-native-traces! (mapv buffer-entry (range 4998)))
+    (#'rt/receive-native-traces! (mapv buffer-entry (range 4998 5003)))
+    (let [entries (rt/native-traces)]
+      (is (= 5000 (count entries)))
+      (is (= (vec (range 3 5003))
+             (entry-ids entries))))))
 
 (deftest find-native-epoch-by-id-from-buffer
   (testing "find-native-epoch-by-id walks the live buffer for a match"
@@ -732,16 +771,19 @@
     (is (false? (runtime-atom-value #'rt/native-epoch-cb-installed?)))))
 
 (deftest install-native-trace-cb-idempotent
-  (testing "install-native-trace-cb! installs once; second call is no-op"
-    (rt/install-native-trace-cb!)
-    (is (true? (runtime-atom-value #'rt/native-trace-cb-installed?)))
-    ;; second call should not re-register; we observe via the guard atom
-    (rt/install-native-trace-cb!)
-    (is (true? (runtime-atom-value #'rt/native-trace-cb-installed?)))
-    ;; Real-world cleanup: the registered cb itself must be torn down so
-    ;; future tests don't see traces from this one. The :installed? guard
-    ;; flag is reset by the :each fixture; the cb-removal is not.
-    (re-frame.trace/remove-trace-cb :re-frame-pair.runtime/re-frame-pair-traces)))
+  (testing "install-native-trace-cb! registers once; second call is no-op"
+    (let [registrations (atom [])]
+      (with-redefs [rt/register-trace-cb-fn
+                    (fn []
+                      (fn [id cb]
+                        (swap! registrations conj {:id id :cb cb})))]
+        (rt/install-native-trace-cb!)
+        (rt/install-native-trace-cb!))
+      (is (true? (runtime-atom-value #'rt/native-trace-cb-installed?)))
+      (is (= 1 (count @registrations)))
+      (is (= :re-frame-pair.runtime/re-frame-pair-traces
+             (:id (first @registrations))))
+      (is (fn? (:cb (first @registrations)))))))
 
 (deftest health-reports-native-cb-flags
   (testing "health surfaces :native-epoch-cb? and :native-trace-cb?"
