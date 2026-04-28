@@ -1116,19 +1116,20 @@
                                   (>= elapsed hard-ms)                           [:done :hard-cap]
                                   (and stream? (>= idle idle-ms))                [:done :idle]
                                   :else nil)))
-                  fetch-form (fn [since-id]
-                               ;; One eval per poll: fetch new-epochs-since map,
-                               ;; filter matches in-runtime, return both pieces
-                               ;; so the CLI can see aged-out without a second
-                               ;; round-trip.
-                               (format
-                                "(let [r (re-frame-pair.runtime/epochs-since %s)
-                                   matches (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) (:epochs r))]
-                               {:matches matches
-                                :id-aged-out? (:id-aged-out? r)
-                                :head-id (re-frame-pair.runtime/latest-epoch-id)})"
-                                (pr-str since-id)
-                                (pr-str pred)))
+                  pred-str     (pr-str pred)
+                  fetch-form   (fn [since-id]
+                                 ;; One eval per poll: fetch new-epochs-since
+                                 ;; map, filter matches in-runtime, return both
+                                 ;; pieces so aged-out status does not need a
+                                 ;; second round-trip.
+                                 (format
+                                  "(let [r (re-frame-pair.runtime/epochs-since %s)
+                                     matches (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) (:epochs r))]
+                                 {:matches matches
+                                  :id-aged-out? (:id-aged-out? r)
+                                  :head-id (re-frame-pair.runtime/latest-epoch-id)})"
+                                  (pr-str since-id)
+                                  pred-str))
                   aged-warned? (atom false)]
               (loop []
                 (Thread/sleep poll-ms)
