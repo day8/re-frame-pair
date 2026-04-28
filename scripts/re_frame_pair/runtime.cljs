@@ -631,7 +631,11 @@
    `:op-type :render` trace with `:tags :component-name` (munged form,
    e.g. `re_com.box.h_box`). These are in the full trace stream, not
    the skeleton :match-info. Filter by the match's id range, demunge,
-   and run through `classify-render-entry` for re-com annotation."
+   and annotate for re-com.
+
+   Single pass: build the render entry and run `classify-render-entry`
+   in one mapv so we don't allocate an intermediate vec just to hand
+   it to the next mapv."
   [match all-traces]
   (when-let [[first-id last-id] (match-trace-ids match)]
     (->> (traces-in-id-range all-traces first-id last-id)
@@ -640,10 +644,10 @@
                  (let [tags (:tags t)
                        comp (demunge-component-name
                               (or (:component-name tags) (str (:operation t))))]
-                   {:component comp
-                    :time-ms   (:duration t)
-                    :reaction  (:reaction tags)})))
-         (mapv classify-render-entry))))
+                   (classify-render-entry
+                     {:component comp
+                      :time-ms   (:duration t)
+                      :reaction  (:reaction tags)})))))))
 
 (defn- has-render-burst?
   "True if the match's :match-info contains a `:reagent/quiescent`
