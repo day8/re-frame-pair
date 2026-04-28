@@ -72,7 +72,18 @@ npm doesn't allow unpublishing published versions after 72 hours, and even insid
 
 ## Release notes
 
-Generated automatically from commits + PRs since the previous tag by `action-gh-release`. To shape them, use conventional-commit-ish prefixes on PR titles (`feat:`, `fix:`, `docs:`, `chore:`).
+Two surfaces, both maintained per release:
+
+- **`CHANGELOG.md`** (in-repo) — the authoritative on-disk record of
+  user-visible changes per version. Operators installing the skill
+  via `/plugin install` can grep this without leaving the editor.
+  Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+  Every PR that changes operator/agent-facing behaviour adds an
+  entry under `[Unreleased]`; cutting a tag promotes that section.
+- **GitHub release notes** — generated automatically from commits +
+  PRs since the previous tag by `action-gh-release`. To shape them,
+  use conventional-commit-ish prefixes on PR titles (`feat:`, `fix:`,
+  `docs:`, `chore:`). Mirrors but does not replace `CHANGELOG.md`.
 
 ## Pre-1.0 release cadence
 
