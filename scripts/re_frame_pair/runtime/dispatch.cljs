@@ -187,6 +187,15 @@
     (finally
       (reset! console/current-who :app))))
 
+(defn- with-claude-epoch-fallback
+  "Run the native lookup for a skill-dispatched epoch first, then use
+   10x only when it is reachable. Both functions return coerced epoch
+   records or nil."
+  [native-fn ten-x-fn]
+  (or (native-fn)
+      (when (ten-x/ten-x-loaded?)
+        (ten-x-fn))))
+
 (defn last-claude-epoch
   "Most recent epoch dispatched by the skill in this session. Resolves
    by walking the native-epoch-buffer first (newest-first) for the
@@ -195,22 +204,21 @@
    re-frame, or a dispatch-id that has aged out of the native ring).
    Returns nil — never throws — when neither source can answer."
   []
-  (let [ours        (:ids @claude-dispatch-ids)
-        from-native (some->> (native-epoch/native-epochs)
-                             reverse
-                             (some (fn [raw]
-                                     (when (contains? ours (:dispatch-id raw))
-                                       raw)))
-                             native-epoch/coerce-native-epoch)]
-    (or from-native
-        (when (ten-x/ten-x-loaded?)
-          (some->> (ten-x/read-10x-epochs)
-                   reverse
-                   (some (fn [raw]
-                           (let [evt-trace   (ten-x/find-trace raw :event)
-                                 dispatch-id (-> evt-trace :tags :dispatch-id)]
-                             (when (contains? ours dispatch-id) raw))))
-                   ten-x/coerce-epoch)))))
+  (let [ours (:ids @claude-dispatch-ids)]
+    (with-claude-epoch-fallback
+      #(some->> (native-epoch/native-epochs)
+                reverse
+                (some (fn [raw]
+                        (when (contains? ours (:dispatch-id raw))
+                          raw)))
+                native-epoch/coerce-native-epoch)
+      #(some->> (ten-x/read-10x-epochs)
+                reverse
+                (some (fn [raw]
+                        (let [evt-trace   (ten-x/find-trace raw :event)
+                              dispatch-id (-> evt-trace :tags :dispatch-id)]
+                          (when (contains? ours dispatch-id) raw))))
+                ten-x/coerce-epoch))))
 
 (def ^:private trace-debounce-settle-ms
   "How long we wait after dispatch-sync before reading 10x's epoch
