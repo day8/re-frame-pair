@@ -470,6 +470,21 @@
         (is (true? (:legacy? @emitted))
             "legacy? flag still set so the agent sees which branch was taken")))))
 
+(deftest dispatch-form-selects-stub-aware-runtime-fns
+  (testing "dispatch form construction keeps mode and stub axes separate"
+    (is (= "(re-frame-pair.runtime/tagged-dispatch-sync! [:ev])"
+           (#'ops/dispatch-form :sync "[:ev]" [])))
+    (is (= "(re-frame-pair.runtime/dispatch-sync-with-stubs! [:ev] [:http])"
+           (#'ops/dispatch-form :sync "[:ev]" [:http])))
+    (is (= "(re-frame-pair.runtime/tagged-dispatch-sync! [:ev])"
+           (#'ops/dispatch-form :trace-legacy "[:ev]" [])))
+    (is (= "(re-frame-pair.runtime/dispatch-sync-with-stubs! [:ev] [:http])"
+           (#'ops/dispatch-form :trace-legacy "[:ev]" [:http])))
+    (is (= "(re-frame-pair.runtime/tagged-dispatch! [:ev])"
+           (#'ops/dispatch-form :queued "[:ev]" [])))
+    (is (= "(re-frame-pair.runtime/dispatch-with-stubs! [:ev] [:http])"
+           (#'ops/dispatch-form :queued "[:ev]" [:http])))))
+
 (deftest dispatch-trace-legacy-fallback-no-stubs-still-uses-tagged-dispatch-sync
   (testing "--trace without --stub on a legacy re-frame must keep using
             tagged-dispatch-sync! (regression guard for the no-stub path)"

@@ -893,6 +893,19 @@
               (do (Thread/sleep settle-poll-ms)
                   (recur)))))))))
 
+(defn- dispatch-form
+  "Build the CLJS runtime dispatch form for a dispatch mode, selecting
+   the stub-aware runtime function when stub fx ids are present."
+  [mode event-str stub-fx-ids]
+  (let [[plain stubbed] (case mode
+                          :sync         ["tagged-dispatch-sync!" "dispatch-sync-with-stubs!"]
+                          :trace-legacy ["tagged-dispatch-sync!" "dispatch-sync-with-stubs!"]
+                          :queued       ["tagged-dispatch!" "dispatch-with-stubs!"])]
+    (if (seq stub-fx-ids)
+      (format "(re-frame-pair.runtime/%s %s %s)"
+              stubbed event-str (pr-str stub-fx-ids))
+      (format "(re-frame-pair.runtime/%s %s)" plain event-str))))
+
 (defn- dispatch-op [args]
   (ensure-port!)
   (let [[event-str rest-args] (partition-dispatch-args args)]
@@ -938,11 +951,7 @@
               ;; --stub on legacy re-frame: route through dispatch-sync-with-stubs! so the override map plants on event meta — otherwise the flag is silently dropped and the real fx fires.
               (let [sync-result (cljs-eval-value
                                   build-id
-                                  (if (seq stub-fx-ids)
-                                    (format "(re-frame-pair.runtime/dispatch-sync-with-stubs! %s %s)"
-                                            event-str (pr-str stub-fx-ids))
-                                    (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)"
-                                            event-str)))]
+                                  (dispatch-form :trace-legacy event-str stub-fx-ids))]
                 (if (and (map? sync-result) (:ok? sync-result))
                   (do
                     (Thread/sleep legacy-trace-collect-wait-ms)
@@ -964,21 +973,13 @@
           sync?
           (emit (tag-reinj (merge {:mode :sync}
                                   (cljs-eval-value build-id
-                                    (if (seq stub-fx-ids)
-                                      (format "(re-frame-pair.runtime/dispatch-sync-with-stubs! %s %s)"
-                                              event-str (pr-str stub-fx-ids))
-                                      (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)"
-                                              event-str))))))
+                                    (dispatch-form :sync event-str stub-fx-ids)))))
 
           ;; queued: rf/dispatch. With --stub, dispatch-with-stubs!.
           :else
           (emit (tag-reinj (merge {:mode :queued}
                                   (cljs-eval-value build-id
-                                    (if (seq stub-fx-ids)
-                                      (format "(re-frame-pair.runtime/dispatch-with-stubs! %s %s)"
-                                              event-str (pr-str stub-fx-ids))
-                                      (format "(re-frame-pair.runtime/tagged-dispatch! %s)"
-                                              event-str)))))))
+                                    (dispatch-form :queued event-str stub-fx-ids))))))
         (catch Exception e
           (emit (tag-reinj {:ok? false :reason :dispatch-failed :message (.getMessage e)
                             :ex-data (ex-data e)})))))))
