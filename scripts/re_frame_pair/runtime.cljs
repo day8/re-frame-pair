@@ -1528,7 +1528,37 @@
 ;; ---------------------------------------------------------------------------
 
 (defonce ^:private claude-dispatch-ids
-  (atom #{}))
+  ;; FIFO ring-buffer of skill-driven :dispatch-ids. Bounded so a long
+  ;; debug session — `defonce` survives the runtime re-inject that
+  ;; fires when discover-app's sentinel goes missing on browser
+  ;; refresh — doesn't accumulate UUIDs without limit. `:entries` is a
+  ;; PersistentQueue for O(overflow) head-pop eviction; `:ids` is the
+  ;; matching membership set kept lock-step so `last-claude-epoch`'s
+  ;; lookup stays O(1) instead of growing linearly with session age.
+  ;; `:total-count` is monotonic — surfaced via app-summary so the
+  ;; lifetime "skill dispatched N events" view survives eviction.
+  (atom {:entries     #queue []
+         :ids         #{}
+         :max-size    100
+         :total-count 0}))
+
+(defn- record-claude-dispatch-id!
+  "Append `dispatch-id` to the bounded claude-dispatch-ids ring buffer.
+   FIFO-evicts the oldest entry when :max-size is exceeded; both
+   :entries and :ids stay in sync so the read path's `contains?` over
+   :ids matches the queue's current contents."
+  [dispatch-id]
+  (swap! claude-dispatch-ids
+         (fn [{:keys [entries ids max-size total-count]}]
+           (let [q (conj entries dispatch-id)]
+             (loop [q  q
+                    is (conj ids dispatch-id)]
+               (if (> (count q) max-size)
+                 (recur (pop q) (disj is (peek q)))
+                 {:entries     q
+                  :ids         is
+                  :max-size    max-size
+                  :total-count (inc total-count)}))))))
 
 (defn- traces-atom
   "JS-interop accessor for the `re-frame.trace/traces` atom (re-frame's
@@ -1619,7 +1649,7 @@
       (rf/dispatch-sync event-v)
       (let [dispatch-id (recent-dispatch-id)]
         (when dispatch-id
-          (swap! claude-dispatch-ids conj dispatch-id))
+          (record-claude-dispatch-id! dispatch-id))
         {:ok?         true
          :event       event-v
          :dispatch-id dispatch-id
@@ -1656,7 +1686,7 @@
    then falls back to 10x's buffer when re-frame predates rf-ybv or
    the dispatch-id has aged out of the native buffer."
   []
-  (let [ours        @claude-dispatch-ids
+  (let [ours        (:ids @claude-dispatch-ids)
         from-native (some->> (native-epochs)
                              reverse
                              (some (fn [raw]
@@ -1951,7 +1981,7 @@
            (let [p                (d-and-s event-meta settle-opts)
                  root-dispatch-id (recent-dispatch-id)]
              (when root-dispatch-id
-               (swap! claude-dispatch-ids conj root-dispatch-id))
+               (record-claude-dispatch-id! root-dispatch-id))
              (swap! settle-pending assoc handle
                     {:settled?    false
                      :started-at  (js/Date.now)
@@ -2069,9 +2099,13 @@
     (aget-path g ["re_frame" "core" "dispatch_sync_with"])))
 
 (defonce ^:private stub-effect-log
-  ;; Vec of {:fx-id kw :value any :ts ms :who kw} entries — every
-  ;; record-only-stub invocation lands here.
-  (atom []))
+  ;; FIFO ring-buffer of stubbed-effect invocations. Each entry is a
+  ;; {:fx-id kw :value any :ts ms :who kw} map. Bounded so an
+  ;; experiment loop iterating over `dispatch-with --stub` doesn't
+  ;; accumulate effect maps (which can carry full request bodies)
+  ;; indefinitely. `clear-stubbed-effects!` remains the explicit
+  ;; reset between experiments.
+  (atom {:entries [] :max-size 200}))
 
 (defn record-only-stub
   "Build a record-only stub for `fx-id`: a 1-arg fn that captures its
@@ -2083,11 +2117,15 @@
    real stub for others."
   [fx-id]
   (fn [value]
-    (swap! stub-effect-log conj
-           {:fx-id fx-id
-            :value value
-            :ts    (js/Date.now)
-            :who   @current-who})
+    (swap! stub-effect-log
+           (fn [{:keys [entries max-size]}]
+             {:entries  (vec (take-last max-size
+                                        (conj entries
+                                              {:fx-id fx-id
+                                               :value value
+                                               :ts    (js/Date.now)
+                                               :who   @current-who})))
+              :max-size max-size}))
     nil))
 
 (defn build-stub-overrides
@@ -2137,13 +2175,14 @@
   ([] (stubbed-effects-since 0))
   ([since-ts]
    {:ok?     true
-    :entries (vec (filter #(>= (:ts %) since-ts) @stub-effect-log))
+    :entries (vec (filter #(>= (:ts %) since-ts) (:entries @stub-effect-log)))
     :now     (js/Date.now)}))
 
 (defn clear-stubbed-effects!
-  "Reset the stub-effect-log to empty. `{:ok? true}`."
+  "Reset the stub-effect-log entries to empty (preserves :max-size).
+   `{:ok? true}`."
   []
-  (reset! stub-effect-log [])
+  (swap! stub-effect-log assoc :entries [])
   {:ok? true})
 
 (defn dispatch-with!
@@ -2193,7 +2232,7 @@
         (try
           (d-sync-with event-v overrides)
           (let [dispatch-id (recent-dispatch-id)]
-            (when dispatch-id (swap! claude-dispatch-ids conj dispatch-id))
+            (when dispatch-id (record-claude-dispatch-id! dispatch-id))
             {:ok?            true
              :event          event-v
              :dispatch-id    dispatch-id
@@ -2793,7 +2832,7 @@
      :app-db-initialised? (map? @db/app-db)
      :versions            (version-report)
      :epoch-count         ec
-     :claude-epoch-count  (count @claude-dispatch-ids)}))
+     :claude-epoch-count  (:total-count @claude-dispatch-ids)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Session-bootstrap summary

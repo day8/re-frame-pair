@@ -30,9 +30,12 @@
   (reset-runtime-atom! #'rt/native-trace-cb-installed? false)
   (reset-runtime-atom! #'rt/console-log                {:entries [] :next-id 0 :max-size 500})
   (reset-runtime-atom! #'rt/current-who                :app)
-  (reset-runtime-atom! #'rt/claude-dispatch-ids        #{})
+  (reset-runtime-atom! #'rt/claude-dispatch-ids        {:entries     #queue []
+                                                        :ids         #{}
+                                                        :max-size    100
+                                                        :total-count 0})
   (reset-runtime-atom! #'rt/settle-pending             {})
-  (reset-runtime-atom! #'rt/stub-effect-log            []))
+  (reset-runtime-atom! #'rt/stub-effect-log            {:entries [] :max-size 200}))
 
 (use-fixtures :each (fn [t] (reset-all-runtime-atoms!) (t)))
 
@@ -939,7 +942,10 @@
                         fixtures/synthetic-native-next-epoch]
              :max-size 50})
     (reset-runtime-atom! #'rt/claude-dispatch-ids
-            #{"11111111-1111-1111-1111-111111111111"})
+            {:entries     (conj #queue [] "11111111-1111-1111-1111-111111111111")
+             :ids         #{"11111111-1111-1111-1111-111111111111"}
+             :max-size    100
+             :total-count 1})
     (let [e (rt/last-claude-epoch)]
       (is (= 100 (:id e)))
       (is (= [:cart/apply-coupon "SPRING25"] (:event e)))))
@@ -949,7 +955,11 @@
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries  [fixtures/synthetic-native-epoch]
              :max-size 50})
-    (reset-runtime-atom! #'rt/claude-dispatch-ids #{"some-other-dispatch-id"})
+    (reset-runtime-atom! #'rt/claude-dispatch-ids
+            {:entries     (conj #queue [] "some-other-dispatch-id")
+             :ids         #{"some-other-dispatch-id"}
+             :max-size    100
+             :total-count 1})
     ;; Pretend the cb is installed so the fallback is gated off when
     ;; 10x is missing — we want nil, not the legacy throw.
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
@@ -1323,7 +1333,7 @@
           (is (= :claude (:who call)))
           (is (fn? (-> call :event meta :re-frame/fx-overrides :dispatch)))
           (is (= :app (runtime-atom-value #'rt/current-who)))
-          (is (contains? (runtime-atom-value #'rt/claude-dispatch-ids) "ROOT"))
+          (is (contains? (:ids (runtime-atom-value #'rt/claude-dispatch-ids)) "ROOT"))
 
           (is (true? (:settled? settled)))
           (is (true? (:ok? settled)))
@@ -1385,8 +1395,8 @@
     (let [stub (rt/record-only-stub :http-xhrio)
           ret  (stub {:method :post :uri "/login"})]
       (is (nil? ret))
-      (is (= 1 (count (runtime-atom-value #'rt/stub-effect-log))))
-      (let [entry (first (runtime-atom-value #'rt/stub-effect-log))]
+      (is (= 1 (count (:entries (runtime-atom-value #'rt/stub-effect-log)))))
+      (let [entry (first (:entries (runtime-atom-value #'rt/stub-effect-log)))]
         (is (= :http-xhrio (:fx-id entry)))
         (is (= {:method :post :uri "/login"} (:value entry)))
         (is (number? (:ts entry)))
@@ -1395,21 +1405,21 @@
   (testing "stub closes over fx-id — distinct ids show in the log"
     ;; Reset between testing blocks: :each fixtures fire per-deftest, not
     ;; per-testing — and the previous block populated the log.
-    (reset-runtime-atom! #'rt/stub-effect-log [])
+    (reset-runtime-atom! #'rt/stub-effect-log {:entries [] :max-size 200})
     ((rt/record-only-stub :navigate) {:to "/dashboard"})
     ((rt/record-only-stub :http-xhrio) {:method :get :uri "/me"})
-    (is (= [:navigate :http-xhrio] (mapv :fx-id (runtime-atom-value #'rt/stub-effect-log)))))
+    (is (= [:navigate :http-xhrio] (mapv :fx-id (:entries (runtime-atom-value #'rt/stub-effect-log))))))
 
   (testing ":who is read at invocation time, not at construction time
             (so a stub built once and called repeatedly tags whatever
              current-who is when the stub fires)"
-    (reset-runtime-atom! #'rt/stub-effect-log [])
+    (reset-runtime-atom! #'rt/stub-effect-log {:entries [] :max-size 200})
     (let [stub (rt/record-only-stub :foo)]
       (reset-runtime-atom! #'rt/current-who :claude)
       (stub :v1)
       (reset-runtime-atom! #'rt/current-who :app)
       (stub :v2))
-    (is (= [:claude :app] (mapv :who (runtime-atom-value #'rt/stub-effect-log))))))
+    (is (= [:claude :app] (mapv :who (:entries (runtime-atom-value #'rt/stub-effect-log)))))))
 
 (deftest build-stub-overrides-shape
   (testing "produces {fx-id stub-fn} with one entry per fx-id"
@@ -1425,13 +1435,14 @@
     (let [m (rt/build-stub-overrides [:a :b])]
       ((:a m) "hi")
       ((:b m) {:k 1}))
-    (is (= #{:a :b} (set (map :fx-id (runtime-atom-value #'rt/stub-effect-log)))))))
+    (is (= #{:a :b} (set (map :fx-id (:entries (runtime-atom-value #'rt/stub-effect-log))))))))
 
 (deftest stubbed-effects-since-filters-and-tails
   (testing "no-arg form returns everything"
     (reset-runtime-atom! #'rt/stub-effect-log
-            [{:fx-id :a :value 1 :ts 100 :who :claude}
-             {:fx-id :b :value 2 :ts 200 :who :claude}])
+            {:entries  [{:fx-id :a :value 1 :ts 100 :who :claude}
+                        {:fx-id :b :value 2 :ts 200 :who :claude}]
+             :max-size 200})
     (let [r (rt/stubbed-effects-since)]
       (is (true? (:ok? r)))
       (is (= 2 (count (:entries r))))
@@ -1441,22 +1452,61 @@
             (a tailing convention — pass back :now from the previous
              call to read only what landed since)"
     (reset-runtime-atom! #'rt/stub-effect-log
-            [{:fx-id :a :value 1 :ts 100 :who :claude}
-             {:fx-id :b :value 2 :ts 200 :who :claude}
-             {:fx-id :c :value 3 :ts 300 :who :claude}])
+            {:entries  [{:fx-id :a :value 1 :ts 100 :who :claude}
+                        {:fx-id :b :value 2 :ts 200 :who :claude}
+                        {:fx-id :c :value 3 :ts 300 :who :claude}]
+             :max-size 200})
     (let [r (rt/stubbed-effects-since 200)]
       (is (= [:b :c] (mapv :fx-id (:entries r))))))
 
   (testing "since-ts past the latest entry returns empty"
     (reset-runtime-atom! #'rt/stub-effect-log
-            [{:fx-id :a :value 1 :ts 100 :who :claude}])
+            {:entries  [{:fx-id :a :value 1 :ts 100 :who :claude}]
+             :max-size 200})
     (is (empty? (:entries (rt/stubbed-effects-since 999))))))
 
 (deftest clear-stubbed-effects-empties-the-log
   (reset-runtime-atom! #'rt/stub-effect-log
-          [{:fx-id :a :value 1 :ts 100 :who :claude}])
+          {:entries  [{:fx-id :a :value 1 :ts 100 :who :claude}]
+           :max-size 200})
   (is (= {:ok? true} (rt/clear-stubbed-effects!)))
-  (is (empty? (runtime-atom-value #'rt/stub-effect-log))))
+  (is (empty? (:entries (runtime-atom-value #'rt/stub-effect-log))))
+  (is (= 200 (:max-size (runtime-atom-value #'rt/stub-effect-log)))))
+
+(deftest stub-effect-log-respects-max-size
+  (testing "FIFO-evicts oldest entries once :max-size is exceeded;
+            long-running --stub experiments don't grow without bound"
+    (reset-runtime-atom! #'rt/stub-effect-log {:entries [] :max-size 3})
+    (let [stub (rt/record-only-stub :http-xhrio)]
+      (dotimes [i 5] (stub {:i i})))
+    (let [{:keys [entries max-size]} (runtime-atom-value #'rt/stub-effect-log)]
+      (is (= 3 max-size))
+      (is (= 3 (count entries)))
+      ;; Oldest two (i=0, i=1) evicted; most-recent three (i=2,3,4) remain.
+      (is (= [{:i 2} {:i 3} {:i 4}] (mapv :value entries))))))
+
+(deftest claude-dispatch-ids-respects-max-size
+  (testing "FIFO-evicts oldest dispatch-ids once :max-size is
+            exceeded; :ids and :entries stay in lock-step so the
+            last-claude-epoch read path's `contains?` matches the
+            queue's current contents"
+    (reset-runtime-atom! #'rt/claude-dispatch-ids
+            {:entries     #queue []
+             :ids         #{}
+             :max-size    3
+             :total-count 0})
+    (let [record! @#'rt/record-claude-dispatch-id!]
+      (dotimes [i 5] (record! (str "id-" i))))
+    (let [{:keys [entries ids max-size total-count]}
+          (runtime-atom-value #'rt/claude-dispatch-ids)]
+      (is (= 3 max-size))
+      (is (= 3 (count entries)))
+      ;; Oldest two evicted; most-recent three remain in BOTH structures.
+      (is (= ["id-2" "id-3" "id-4"] (vec entries)))
+      (is (= #{"id-2" "id-3" "id-4"} ids))
+      ;; Lifetime counter survives eviction so app-summary's
+      ;; :claude-epoch-count still reflects "skill dispatched N events".
+      (is (= 5 total-count)))))
 
 (deftest dispatch-with-bang-fallback-without-rf-ge8
   (testing "runtime-test (re-frame 1.4.5) → :dispatch-with-unavailable"
@@ -1511,7 +1561,7 @@
                    :override-ids #{:dispatch}
                    :who          :claude}]
                  @calls))
-          (is (contains? (runtime-atom-value #'rt/claude-dispatch-ids) "SYNC-ROOT"))
+          (is (contains? (:ids (runtime-atom-value #'rt/claude-dispatch-ids)) "SYNC-ROOT"))
           (is (= :app (runtime-atom-value #'rt/current-who))))))))
 
 (deftest dispatch-sync-with-bang-catches-handler-throw
