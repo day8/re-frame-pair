@@ -6,6 +6,7 @@
             [re-frame-pair.runtime.native-epoch :as native-epoch]
             [re-frame-pair.runtime.registrar :as registrar]
             [re-frame-pair.runtime.ten-x-adapter :as ten-x]
+            [re-frame-pair.runtime.versions :as versions]
             [re-frame.subs :as rf-subs]))
 
 ;;; Unit tests for the pure fns inside re-frame-pair.runtime.
@@ -2533,6 +2534,49 @@
       (is (nil? (:src entry))
           "missing :src in :re-com/render tags must not crash and must not
            manufacture a fake :src on the render entry"))))
+
+(deftest read-version-of-probes-re-frame-config-version
+  ;; rf-2026: re-frame.core/version is mirrored from the goog-define
+  ;; re-frame.config/version (modeled on re-com.config/version), so
+  ;; the same global-path read works for both libs. Pre-2026 re-frame
+  ;; (no goog-define exposed) → :unknown stays the answer.
+  (testing "non-empty :re-frame goog-global returns the string verbatim"
+    (with-redefs [versions/read-goog-global-path
+                  (fn [path]
+                    (case (vec path)
+                      ["re_frame" "config" "version"] "1.5.0"
+                      nil))]
+      (let [report (rt/version-report)]
+        (is (= "1.5.0" (-> report :by-dep :re-frame :observed))))))
+
+  (testing "empty-string goog-define (host build did NOT set
+            :closure-defines) → :unknown — matches re-com semantics
+            so a missing override stays diagnosable"
+    (with-redefs [versions/read-goog-global-path
+                  (fn [path]
+                    (case (vec path)
+                      ["re_frame" "config" "version"] ""
+                      nil))]
+      (let [report (rt/version-report)]
+        (is (= :unknown (-> report :by-dep :re-frame :observed))))))
+
+  (testing "nil goog-global path (re-frame predates 2026 release —
+            no goog-define exists) → :unknown — backwards compatible"
+    (with-redefs [versions/read-goog-global-path (fn [_] nil)]
+      (let [report (rt/version-report)]
+        (is (= :unknown (-> report :by-dep :re-frame :observed))))))
+
+  (testing "re-com path still works when re-frame path also probed —
+            no regression on the existing :re-com surface"
+    (with-redefs [versions/read-goog-global-path
+                  (fn [path]
+                    (case (vec path)
+                      ["re_com" "config" "version"]   "2.21.0"
+                      ["re_frame" "config" "version"] "1.5.0"
+                      nil))]
+      (let [report (rt/version-report)]
+        (is (= "2.21.0" (-> report :by-dep :re-com :observed)))
+        (is (= "1.5.0"  (-> report :by-dep :re-frame :observed)))))))
 
 (deftest undo-prefers-public-event-ids-when-ten-x-public-loaded
   ;; rf1-jum: when day8.re-frame-10x.public is loaded, prefer its
