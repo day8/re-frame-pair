@@ -1,7 +1,8 @@
 (ns runtime-test
   (:require [cljs.test :refer [deftest is testing use-fixtures]]
             [fixtures]
-            [re-frame-pair.runtime :as rt]))
+            [re-frame-pair.runtime :as rt]
+            [re-frame-pair.runtime.native-epoch :as native-epoch]))
 
 ;;; Unit tests for the pure fns inside re-frame-pair.runtime.
 ;;; Runs via shadow-cljs in node — no browser, no live re-frame app needed.
@@ -1101,7 +1102,11 @@
 (deftest install-native-trace-cb-idempotent
   (testing "install-native-trace-cb! registers once; second call is no-op"
     (let [registrations (atom [])]
-      (with-redefs [rt/register-trace-cb-fn
+      ;; install-native-trace-cb! lives in runtime.native-epoch and calls
+      ;; register-trace-cb-fn unqualified, so the redef has to land on the
+      ;; submodule's var — re-exporting it through `rt` doesn't reach the
+      ;; call site.
+      (with-redefs [native-epoch/register-trace-cb-fn
                     (fn []
                       (fn [id cb]
                         (swap! registrations conj {:id id :cb cb})))]
@@ -2360,3 +2365,46 @@
                   rt/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (is (= [] (rt/epochs-in-last-ms 50))))))
+
+(deftest sub-runs-from-state-scopes-input-deps-to-match-id-range
+  ;; Cross-epoch leakage regression. The legacy 10x path joined sub-state
+  ;; reactions to :sub/run trace tags via sub-input-deps, which keyed by
+  ;; query-v VALUE across the *entire* trace stream. So when the same
+  ;; query-v re-ran in a later epoch with different input attribution,
+  ;; the later epoch's :input-query-sources overwrote the earlier one's
+  ;; in the deps map — and coercing the EARLIER match surfaced the LATER
+  ;; epoch's source meta. The native rf-ybv path scopes sub-runs to the
+  ;; epoch's trace id-range; the legacy path now mirrors that bound so
+  ;; the two paths agree on what 'this epoch's input sources' means.
+  (testing "later epoch's :sub/run for the same query-v does NOT leak its
+            input source meta into an earlier epoch's :input-query-sources"
+    (let [outer-q       [:cart/total]
+          input-q-early (with-meta [:cart/items]
+                          {:re-frame/source {:file "view-A.cljs" :line 10}})
+          input-q-late  (with-meta [:cart/items]
+                          {:re-frame/source {:file "view-B.cljs" :line 20}})
+          burst-early   {:match-info
+                         [{:id 120 :op-type :event :tags {}}
+                          {:id 130 :op-type :reagent/quiescent}]
+                         :sub-state
+                         {:reaction-state
+                          {"rx1" {:subscription outer-q :order [:sub/run]}}}}
+          burst-late    {:match-info
+                         [{:id 220 :op-type :event :tags {}}
+                          {:id 230 :op-type :reagent/quiescent}]
+                         :sub-state
+                         {:reaction-state
+                          {"rx1" {:subscription outer-q :order [:sub/run]}}}}
+          all-traces    [{:id 122 :op-type :sub/run
+                          :tags {:query-v outer-q :input-query-vs [input-q-early]}}
+                         {:id 222 :op-type :sub/run
+                          :tags {:query-v outer-q :input-query-vs [input-q-late]}}]
+          ctx           {:all-traces  all-traces
+                         :all-matches [fixtures/synthetic-match
+                                       burst-early
+                                       burst-late]}
+          [entry]       (:subs/ran (rt/coerce-epoch fixtures/synthetic-match ctx))]
+      (is (= [{:file "view-A.cljs" :line 10}] (:input-query-sources entry))
+          "early epoch's :input-query-sources must NOT carry the late epoch's
+           input meta — pre-fix the late entry's value won the unscoped reduce
+           in sub-input-deps and clobbered this epoch's attribution"))))

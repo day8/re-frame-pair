@@ -319,7 +319,17 @@
    make it up. Total sub time is in :timing :animation-frame-subs if
    needed."
   [match all-traces]
-  (let [deps (sub-input-deps all-traces)]
+  ;; Scope the join inputs to traces that fall within this match's id
+  ;; range. sub-input-deps does a key-by-query-v reduce, so feeding it
+  ;; the unfiltered stream lets a query-v re-run in a LATER epoch
+  ;; overwrite the meta that this epoch's :input-query-sources should
+  ;; surface — the native rf-ybv path filters by id-range; the legacy
+  ;; path has to do the same to stay in sync.
+  (let [[first-id last-id] (match-trace-ids match)
+        in-range           (if (and first-id last-id)
+                             (traces-in-id-range all-traces first-id last-id)
+                             all-traces)
+        deps               (sub-input-deps in-range)]
     (->> (-> match :sub-state :reaction-state)
          (filter (fn [[_ sub]]
                    (and (some #{:sub/run} (:order sub))
