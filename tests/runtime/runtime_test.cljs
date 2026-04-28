@@ -2158,3 +2158,48 @@
         (let [r (rt/handler-source :sub :test/sub-empty-meta)]
           (is (false? (:ok? r)))
           (is (= :no-source-meta (:reason r))))))))
+
+(deftest handler-source-event-fn-with-meta
+  (testing ":event stored as a fn (with-meta) — re-frame's
+            programmatic-registration variants (reg-event-*-fn) and
+            cooperative test setups can store a fn rather than the
+            macro-emitted interceptor chain. handler-source must read
+            the meta off the fn just as it does for :sub / :fx."
+    (let [handler-fn (with-meta (fn [_db _ev])
+                                {:file "events.cljs" :line 142})]
+      (with-registered :event :test/event-fn-with-meta handler-fn
+        (fn []
+          (let [r (rt/handler-source :event :test/event-fn-with-meta)]
+            (is (true? (:ok? r)))
+            (is (= "events.cljs" (:file r)))
+            (is (= 142           (:line r)))
+            (is (= :fn-meta      (:source r)))))))))
+
+(deftest handler-source-only-reads-registrar-and-meta
+  (testing "Negative regression. handler-source reads ONLY
+            (registrar/get-handler kind id) + (meta stored). No fallback
+            to a local side-table — the rfp-rsg sideband retired by
+            rfp-hpu must stay gone, even if a future cherry-pick or
+            agent reflexively re-introduces a stored-source-table atom
+            in the runtime ns. Handlers registered without source meta
+            on the value MUST return :no-source-meta cleanly, never
+            consult any other source.
+
+            The contract is: if (registrar/get-handler kind id) returns
+            a value with no useful meta, the answer is :no-source-meta.
+            Period. This deftest pins that contract behaviorally so a
+            quiet regression cannot creep in."
+    ;; Register a handler with NO source-bearing meta on the stored value.
+    ;; Even if a sideband side-table existed in the runtime ns, the
+    ;; contract says handler-source ignores it.
+    (with-registered :sub :test/sub-no-meta-contract (fn [_])
+      (fn []
+        (let [r (rt/handler-source :sub :test/sub-no-meta-contract)]
+          (is (false? (:ok? r))
+              "must report :no-source-meta when stored value has none — no sideband fallback")
+          (is (= :no-source-meta (:reason r)))
+          ;; Returned shape must not include any sideband-looking keys
+          ;; (e.g. :source-from-side-table, :recovered-from-table) that
+          ;; would leak the existence of a hypothetical fallback.
+          (is (not (contains? r :source-from-side-table)))
+          (is (not (contains? r :recovered-from-table))))))))
