@@ -333,6 +333,96 @@
       (is (= v (bencode-roundtrip v))))))
 
 ;; ---------------------------------------------------------------------------
+;; form-end-offsets / chunk-source — runtime.cljs splitter for the inject path.
+;;
+;; runtime.cljs is ~85KB; the nREPL transport ceiling is ~64KB. chunked-inject!
+;; splits at top-level form boundaries, re-asserting the ns at the head of
+;; chunks 2+. A bug here means every shim breaks silently — pin the contract
+;; with static fixtures.
+;; ---------------------------------------------------------------------------
+
+(deftest form-end-offsets-three-forms
+  (testing "returns end-offset for each top-level form, in order"
+    (let [src "(ns demo)\n(def a 1)\n(def b 2)"
+          offs (#'ops/form-end-offsets src)]
+      (is (= 3 (count offs))
+          "one offset per top-level form")
+      ;; First form ends at index 9 (after "(ns demo)").
+      (is (= 9 (nth offs 0)))
+      ;; Second form: "(ns demo)\n(def a 1)" → 19.
+      (is (= 19 (nth offs 1)))
+      ;; Third form: full source length (no trailing newline) = 29.
+      (is (= 29 (count src)))
+      (is (= 29 (nth offs 2))))))
+
+(deftest form-end-offsets-handles-tagged-literals
+  (testing "tools.reader data-readers shim handles CLJS tags
+            (#js, #queue, #inst, #uuid) without throwing"
+    (let [src "(ns demo)\n(def x #js {:k 1})\n(def y 2)"]
+      (is (= 3 (count (#'ops/form-end-offsets src)))
+          "must read all three forms, including the #js literal in form 2"))))
+
+(deftest form-end-offsets-handles-comments
+  (testing "comments and whitespace between forms don't add false offsets"
+    (let [src ";; preamble\n(ns demo)\n;; mid\n(def a 1)"]
+      (is (= 2 (count (#'ops/form-end-offsets src)))
+          "two top-level forms; the two comment lines are not forms"))))
+
+(deftest chunk-source-single-chunk-fits-verbatim
+  (testing "source under max-bytes returns 1 chunk, byte-for-byte verbatim"
+    (let [src    "(ns demo)\n(def a 1)\n(def b 2)"
+          chunks (#'ops/chunk-source src 10000)]
+      (is (= 1 (count chunks)))
+      (is (= src (first chunks))))))
+
+(deftest chunk-source-multi-chunk-prepends-ns
+  (testing "source over max-bytes splits into N chunks; chunks 2+ are
+            prefixed with the ns form so cljs-eval lands in the right ns"
+    (let [src    (str "(ns demo)\n"
+                      "(def a 1)\n"
+                      "(def b 2)\n"
+                      "(def c 3)\n"
+                      "(def d 4)")
+          ;; Max-bytes small enough to force multiple chunks (~25 bytes
+          ;; allows ns + ~1 form per chunk).
+          chunks (#'ops/chunk-source src 25)]
+      (is (>= (count chunks) 2)
+          "the size pressure must produce at least 2 chunks")
+      (is (clojure.string/starts-with? (first chunks) "(ns demo)")
+          "chunk 1 starts with the ns form (verbatim leading slice)")
+      (doseq [c (rest chunks)]
+        (is (clojure.string/starts-with? c "(ns demo)\n")
+            "chunks 2+ MUST re-assert the ns so the defns land in demo, not cljs.user")))))
+
+(deftest chunk-source-each-chunk-under-budget
+  (testing "every chunk fits under max-bytes (modulo the ns prefix overhead
+            on chunks 2+, which the chunker accounts for)"
+    (let [src     (apply str "(ns demo)\n"
+                            (repeat 50 "(def x 1)\n"))
+          max-b   200
+          chunks  (#'ops/chunk-source src max-b)]
+      (doseq [c chunks]
+        (is (<= (count (.getBytes ^String c "UTF-8")) max-b)
+            (str "chunk byte-size " (count (.getBytes ^String c "UTF-8"))
+                 " exceeds budget " max-b))))))
+
+(deftest chunk-source-reassembles-to-original-content
+  (testing "concatenating chunks (stripping the repeated ns prefix from
+            chunks 2+) recovers the original source"
+    (let [src    (apply str "(ns demo)\n"
+                           (for [i (range 30)] (str "(def x" i " " i ")\n")))
+          chunks (#'ops/chunk-source src 200)
+          ns-len 10  ;; "(ns demo)\n"
+          recombined (str (first chunks)
+                          (clojure.string/join
+                            ""
+                            (for [c (rest chunks)]
+                              (subs c ns-len))))]
+      (is (= (clojure.string/trim src)
+             (clojure.string/trim recombined))
+          "modulo trailing-newline trim, recombined matches original"))))
+
+;; ---------------------------------------------------------------------------
 ;; --trace legacy fallback honours --stub.
 ;;
 ;; When re-frame predates rf-4mr (commit f8f0f59 — dispatch-and-settle), the
