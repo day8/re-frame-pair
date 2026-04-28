@@ -373,14 +373,6 @@
 ;; rfp-zl8 / rf-ybv. Pure fn, takes context explicitly.
 ;; -----------------------------------------------------------------------------
 
-(defn- reset-native-buffers!
-  "Reset native-epoch-buffer + native-trace-buffer + cb-installed
-   guards to their defonce starting state. Tests do this before each
-   scenario so order-of-test doesn't carry state."
-  []
-  (reset-runtime-atom! #'rt/native-epoch-buffer {:entries [] :max-size 50})
-  (reset-runtime-atom! #'rt/native-trace-buffer {:entries [] :max-size 5000}))
-
 (deftest coerce-native-epoch-shape
   (let [e (rt/coerce-native-epoch fixtures/synthetic-native-epoch
                                   fixtures/native-context)]
@@ -623,21 +615,18 @@
 
 (deftest native-epoch-buffer-shape
   (testing "native-epoch-buffer starts as {:entries [] :max-size 50}"
-    (reset-native-buffers!)
     (is (= []  (:entries (runtime-atom-value #'rt/native-epoch-buffer))))
     (is (= 50  (:max-size (runtime-atom-value #'rt/native-epoch-buffer))))
     (is (= []  (rt/native-epochs)))))
 
 (deftest native-trace-buffer-shape
   (testing "native-trace-buffer starts as {:entries [] :max-size 5000}"
-    (reset-native-buffers!)
     (is (= []   (:entries (runtime-atom-value #'rt/native-trace-buffer))))
     (is (= 5000 (:max-size (runtime-atom-value #'rt/native-trace-buffer))))
     (is (= []   (rt/native-traces)))))
 
 (deftest find-native-epoch-by-id-from-buffer
   (testing "find-native-epoch-by-id walks the live buffer for a match"
-    (reset-native-buffers!)
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries [fixtures/synthetic-native-epoch
                        fixtures/synthetic-native-next-epoch]
@@ -652,7 +641,6 @@
   (testing "epoch-by-id reads from the native buffer when it carries
             the requested id; coerced via coerce-native-epoch (vs
             coerce-epoch which is for the 10x match shape)"
-    (reset-native-buffers!)
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries  [fixtures/synthetic-native-epoch]
              :max-size 50})
@@ -669,7 +657,6 @@
 (deftest last-epoch-prefers-native-buffer
   (testing "last-epoch returns the native buffer's tail when populated;
             no need to consult 10x at all"
-    (reset-native-buffers!)
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries  [fixtures/synthetic-native-epoch
                         fixtures/synthetic-native-next-epoch]
@@ -681,7 +668,6 @@
 (deftest last-claude-epoch-prefers-native-buffer
   (testing "last-claude-epoch matches by :dispatch-id against the
             native buffer first"
-    (reset-native-buffers!)
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries  [fixtures/synthetic-native-epoch
                         fixtures/synthetic-native-next-epoch]
@@ -694,7 +680,6 @@
 
   (testing "no match in native buffer AND 10x not loaded → nil
             (not a throw — gated on @native-epoch-cb-installed?)"
-    (reset-native-buffers!)
     (reset-runtime-atom! #'rt/native-epoch-buffer
             {:entries  [fixtures/synthetic-native-epoch]
              :max-size 50})
@@ -702,30 +687,26 @@
     ;; Pretend the cb is installed so the fallback is gated off when
     ;; 10x is missing — we want nil, not the legacy throw.
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (try
-      (is (nil? (rt/last-claude-epoch)))
-      (finally
-        (reset-runtime-atom! #'rt/native-epoch-cb-installed? false)))))
+    (is (nil? (rt/last-claude-epoch)))))
 
 (deftest install-native-epoch-cb-noop-without-register-fn
   (testing "install-native-epoch-cb! is a silent no-op when re-frame
             predates rf-ybv (the runtime-test build pins re-frame
             1.4.5, which doesn't ship register-epoch-cb)"
-    (reset-runtime-atom! #'rt/native-epoch-cb-installed? false)
     (rt/install-native-epoch-cb!)
     ;; runtime-test: register-epoch-cb-fn returns nil → no install
     (is (false? (runtime-atom-value #'rt/native-epoch-cb-installed?)))))
 
 (deftest install-native-trace-cb-idempotent
   (testing "install-native-trace-cb! installs once; second call is no-op"
-    (reset-runtime-atom! #'rt/native-trace-cb-installed? false)
     (rt/install-native-trace-cb!)
     (is (true? (runtime-atom-value #'rt/native-trace-cb-installed?)))
     ;; second call should not re-register; we observe via the guard atom
     (rt/install-native-trace-cb!)
     (is (true? (runtime-atom-value #'rt/native-trace-cb-installed?)))
-    ;; clean up so other tests don't see the registered cb
-    (reset-runtime-atom! #'rt/native-trace-cb-installed? false)
+    ;; Real-world cleanup: the registered cb itself must be torn down so
+    ;; future tests don't see traces from this one. The :installed? guard
+    ;; flag is reset by the :each fixture; the cb-removal is not.
     (re-frame.trace/remove-trace-cb :re-frame-pair.runtime/re-frame-pair-traces)))
 
 (deftest health-reports-native-cb-flags
@@ -857,7 +838,6 @@
 
 (deftest await-settle-state-transitions
   (testing "unknown handle: returns :unknown-handle reason"
-    (reset-runtime-atom! #'rt/settle-pending {})
     (let [r (rt/await-settle "no-such-handle")]
       (is (false? (:settled? r)))
       (is (= :unknown-handle (:reason r)))))
@@ -908,8 +888,6 @@
 (deftest record-only-stub-captures-and-returns-nil
   (testing "the stub appends a log entry and returns nil — the
             original fx's side effect is suppressed"
-    (reset-runtime-atom! #'rt/stub-effect-log [])
-    (reset-runtime-atom! #'rt/current-who :app)
     (let [stub (rt/record-only-stub :http-xhrio)
           ret  (stub {:method :post :uri "/login"})]
       (is (nil? ret))
@@ -921,6 +899,8 @@
         (is (= :app (:who entry))))))
 
   (testing "stub closes over fx-id — distinct ids show in the log"
+    ;; Reset between testing blocks: :each fixtures fire per-deftest, not
+    ;; per-testing — and the previous block populated the log.
     (reset-runtime-atom! #'rt/stub-effect-log [])
     ((rt/record-only-stub :navigate) {:to "/dashboard"})
     ((rt/record-only-stub :http-xhrio) {:method :get :uri "/me"})
@@ -947,7 +927,6 @@
     (is (= {} (rt/build-stub-overrides []))))
 
   (testing "each stub records into the same log when invoked"
-    (reset-runtime-atom! #'rt/stub-effect-log [])
     (reset-runtime-atom! #'rt/current-who :claude)
     (let [m (rt/build-stub-overrides [:a :b])]
       ((:a m) "hi")
@@ -1246,17 +1225,8 @@
 ;; guarantee a code addition is exercised. See tests/ops_smoke.bb for the
 ;; babashka-side load-smoke partner.
 
-(defn- reset-console-log!
-  "Reset the console-log atom and the :who pointer to the same shape
-   the runtime defonce starts at. Tests do this before each scenario
-   so order doesn't matter."
-  []
-  (reset-runtime-atom! #'rt/console-log {:entries [] :next-id 0 :max-size 500})
-  (reset-runtime-atom! #'rt/current-who :app))
-
 (deftest console-tail-since-empty-buffer
   (testing "console-tail-since on a fresh buffer returns no entries"
-    (reset-console-log!)
     (let [r (rt/console-tail-since 0)]
       (is (true? (:ok? r)))
       (is (= [] (:entries r)))
@@ -1265,7 +1235,6 @@
 
 (deftest console-tail-since-id-filter
   (testing "since-id selects only entries with :id >= since-id"
-    (reset-console-log!)
     ;; Seed the atom directly so we don't depend on the JS console wrap
     ;; in the node-test environment. The capture pipeline ends up calling
     ;; the same swap! the wrapper does — this tests the read seam.
@@ -1283,7 +1252,6 @@
 
 (deftest console-tail-since-who-filter
   (testing "who arg picks only entries tagged with that :who"
-    (reset-console-log!)
     (reset-runtime-atom! #'rt/console-log
             {:entries  [{:id 0 :who :app    :level :log :args [] :ts 0 :stack nil}
                         {:id 1 :who :claude :level :log :args [] :ts 0 :stack nil}
@@ -1299,7 +1267,6 @@
 
 (deftest console-tail-since-id-and-who-combined
   (testing "since-id + who AND-combine"
-    (reset-console-log!)
     (reset-runtime-atom! #'rt/console-log
             {:entries  [{:id 0 :who :app    :level :log :args [] :ts 0 :stack nil}
                         {:id 1 :who :claude :level :log :args [] :ts 0 :stack nil}
@@ -1318,7 +1285,6 @@
 
 (deftest tagged-dispatch-sync-bang-synthesises-handler-error-entry
   (testing "tagged-dispatch-sync! catch appends a :handler-error console entry"
-    (reset-console-log!)
     (re-frame.core/reg-event-db
      :test/throws-on-purpose
      (fn [_db _ev] (throw (ex-info "boom" {:why :test}))))
@@ -1336,8 +1302,6 @@
 
 (deftest tagged-dispatch-sync-bang-restores-current-who-on-catch
   (testing "even when the handler throws, current-who is restored to :app"
-    (reset-console-log!)
-    (reset-runtime-atom! #'rt/current-who :app)
     (re-frame.core/reg-event-db
      :test/throws-on-purpose-2
      (fn [_db _ev] (throw (ex-info "boom" {}))))
@@ -1347,8 +1311,6 @@
 
 (deftest tagged-dispatch-sync-bang-success-path-restores-who
   (testing "after a successful dispatch, current-who is :app again"
-    (reset-console-log!)
-    (reset-runtime-atom! #'rt/current-who :app)
     (re-frame.core/reg-event-db
      :test/no-op
      (fn [db _ev] db))
