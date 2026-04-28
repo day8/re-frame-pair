@@ -769,10 +769,10 @@
 ;; `register-trace-cb` has been part of re-frame for years, so the trace
 ;; subscription uses the direct namespace reference.
 
-(defonce native-epoch-buffer
+(defonce ^:private native-epoch-buffer
   (atom {:entries [] :max-size 50}))
 
-(defonce native-trace-buffer
+(defonce ^:private native-trace-buffer
   (atom {:entries [] :max-size 5000}))
 
 (defonce ^:private native-epoch-cb-installed? (atom false))
@@ -1215,15 +1215,14 @@
 ;; `tagged-dispatch-sync!` (which runs the handler synchronously)
 ;; when you need handler output tagged.
 
-;; `console-log` and `current-who` are exposed (no ^:private) so the
-;; runtime-test build can reset / inspect them without warnings. The
-;; runtime API consumers should still go through `console-tail-since`
-;; / `tagged-dispatch-{!,sync!}` rather than poking the atoms.
+;; Session-local console state. Runtime API consumers should use
+;; `console-tail-since` / `tagged-dispatch-{!,sync!}` rather than
+;; poking these atoms.
 
-(defonce console-log
+(defonce ^:private console-log
   (atom {:entries [] :next-id 0 :max-size 500}))
 
-(defonce current-who (atom :app))
+(defonce ^:private current-who (atom :app))
 
 (defn- stringify-arg
   "Stringify a console-call argument for the buffer. Avoids holding
@@ -1309,7 +1308,7 @@
 ;; (UUIDs) rather than 10x match-ids.
 ;; ---------------------------------------------------------------------------
 
-(defonce claude-dispatch-ids
+(defonce ^:private claude-dispatch-ids
   (atom #{}))
 
 (defn- recent-dispatch-id
@@ -1645,10 +1644,8 @@
         :cascaded-epoch-ids (mapv :dispatch-id cascaded-raws)
         :cascaded-epochs    (mapv coerce-native-epoch cascaded-raws)}))))
 
-(defonce settle-pending
-  ;; handle-uuid -> {:settled? bool ... result fields}. Exposed (no
-  ;; ^:private) so the runtime-test build can reset / inspect without
-  ;; warnings, in line with native-epoch-buffer / claude-dispatch-ids.
+(defonce ^:private settle-pending
+  ;; handle-uuid -> {:settled? bool ... result fields}.
   (atom {}))
 
 (defn dispatch-and-settle!
@@ -1841,10 +1838,9 @@
   (when-let [g (some-> js/goog .-global)]
     (aget-path g ["re_frame" "core" "dispatch_sync_with"])))
 
-(defonce stub-effect-log
+(defonce ^:private stub-effect-log
   ;; Vec of {:fx-id kw :value any :ts ms :who kw} entries — every
-  ;; record-only-stub invocation lands here. Exposed (no ^:private)
-  ;; so the runtime-test build can reset / inspect without warnings.
+  ;; record-only-stub invocation lands here.
   (atom []))
 
 (defn record-only-stub
