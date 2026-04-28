@@ -2203,3 +2203,160 @@
           ;; would leak the existence of a hypothetical fallback.
           (is (not (contains? r :source-from-side-table)))
           (is (not (contains? r :recovered-from-table))))))))
+
+(deftest find-epoch-by-dispatch-id-walks-newest-first
+  (testing "returns the unique match by :dispatch-id from the event-trace tags"
+    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+          matches    [(minimal-10x-match {:dispatch-id "OLD"})
+                      (minimal-10x-match {:dispatch-id "MID"})
+                      (minimal-10x-match {:dispatch-id "NEW"})]]
+      (is (= "OLD" (-> (find-by-id "OLD" matches) :match-info first :tags :dispatch-id)))
+      (is (= "MID" (-> (find-by-id "MID" matches) :match-info first :tags :dispatch-id)))
+      (is (= "NEW" (-> (find-by-id "NEW" matches) :match-info first :tags :dispatch-id)))))
+
+  (testing "newest-first: when two matches share a dispatch-id the most-recent
+            entry in the buffer wins (we expect uniqueness in production but
+            the walk order pins the contract — protects callers from receiving
+            a stale match if a duplicate slips in)"
+    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+          stale      (assoc-in (minimal-10x-match {:dispatch-id "X"})
+                               [:match-info 0 :marker] :stale)
+          fresh      (assoc-in (minimal-10x-match {:dispatch-id "X"})
+                               [:match-info 0 :marker] :fresh)
+          matches    [stale fresh]
+          hit        (find-by-id "X" matches)]
+      (is (= :fresh (-> hit :match-info first :marker)))))
+
+  (testing "no match → nil (caller distinguishes 'not yet landed' from 'no events')"
+    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+          matches    [(minimal-10x-match {:dispatch-id "A"})
+                      (minimal-10x-match {:dispatch-id "B"})]]
+      (is (nil? (find-by-id "MISSING" matches)))))
+
+  (testing "empty buffer → nil"
+    (let [find-by-id @#'rt/find-epoch-by-dispatch-id]
+      (is (nil? (find-by-id "ANY" []))))))
+
+(deftest epochs-since-nil-id-returns-all-epochs
+  (testing "nil id is the 'no resume cursor' shape — returns the full buffer
+            with :id-aged-out? false (NOT the aged-out shape)"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 1 :start 100}
+                        {:id 2 :start 200}
+                        {:id 3 :start 300}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw)})
+                                           ([raw _ctx] {:id (:id raw)}))
+                  rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (let [r (rt/epochs-since nil)]
+        (is (false? (:id-aged-out? r)))
+        (is (= [{:id 1} {:id 2} {:id 3}] (:epochs r)))))))
+
+(deftest epochs-since-head-match-returns-empty
+  (testing "id matches the newest epoch in the buffer → [] with
+            :id-aged-out? false (caller is already up-to-date)"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 1} {:id 2} {:id 3}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw)})
+                                           ([raw _ctx] {:id (:id raw)}))
+                  rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (let [r (rt/epochs-since 3)]
+        (is (false? (:id-aged-out? r)))
+        (is (= [] (:epochs r)))))))
+
+(deftest epochs-since-aged-out-id-flags-and-returns-empty
+  (testing "id absent from native AND from 10x → :id-aged-out? true,
+            :epochs [], :requested-id echoes the lost cursor for diagnostics"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 10} {:id 11}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/ten-x-loaded? (fn [] true)
+                  rt/read-10x-epochs (fn [] [{:id 8} {:id 9} {:id 10} {:id 11}])
+                  rt/coerce-native-epoch (fn
+                                           ([raw] raw)
+                                           ([raw _ctx] raw))
+                  rt/coerce-epoch (fn
+                                    ([raw] raw)
+                                    ([raw _ctx] raw))]
+      (let [r (rt/epochs-since :gone-forever)]
+        (is (true? (:id-aged-out? r)))
+        (is (= [] (:epochs r)))
+        (is (= :gone-forever (:requested-id r))))))
+
+  (testing "no 10x fallback eligible AND id not in native → :id-aged-out? true"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 10} {:id 11}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/ten-x-loaded? (fn [] false)
+                  rt/coerce-native-epoch (fn
+                                           ([raw] raw)
+                                           ([raw _ctx] raw))]
+      (let [r (rt/epochs-since :missing)]
+        (is (true? (:id-aged-out? r)))
+        (is (= [] (:epochs r)))
+        (is (= :missing (:requested-id r)))))))
+
+(deftest epochs-in-last-ms-cutoff-is-inclusive-at-boundary
+  (testing "an epoch with :start exactly equal to (now - ms) is included —
+            cutoff is `>=`, not `>` (drops by one tick would silently lose
+            the leading edge of the window)"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 1 :start 800}     ;; (now - ms)  exact boundary
+                        {:id 2 :start 850}
+                        {:id 3 :start 999}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/now-ms (fn [] 1000)
+                  rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw)})
+                                           ([raw _ctx] {:id (:id raw)}))
+                  rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (is (= [{:id 1} {:id 2} {:id 3}]
+             (rt/epochs-in-last-ms 200))))))
+
+(deftest epochs-in-last-ms-drops-untimed-epochs
+  (testing "an epoch with no :start in its event trace is excluded — the
+            filter requires the timestamp to exist (the (and t (>= t cutoff))
+            shape protects against nil :start, which would otherwise NPE
+            under naive comparison)"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 1 :start 950}
+                        {:id 2 :start nil}
+                        {:id 3 :start 980}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/now-ms (fn [] 1000)
+                  rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw)})
+                                           ([raw _ctx] {:id (:id raw)}))
+                  rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (is (= [{:id 1} {:id 3}]
+             (rt/epochs-in-last-ms 100))))))
+
+(deftest epochs-in-last-ms-empty-window-when-all-too-old
+  (testing "every epoch is outside the window → returns [] (NOT nil and NOT
+            an aged-out marker — the pull-window contract is just 'epochs in
+            this slice', the absence of any is a normal answer)"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 1 :start 100}
+                        {:id 2 :start 200}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/now-ms (fn [] 1000)
+                  rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw)})
+                                           ([raw _ctx] {:id (:id raw)}))
+                  rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (is (= [] (rt/epochs-in-last-ms 50))))))
