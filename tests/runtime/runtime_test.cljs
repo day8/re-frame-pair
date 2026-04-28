@@ -2,6 +2,7 @@
   (:require [cljs.test :refer [deftest is testing use-fixtures]]
             [fixtures]
             [re-frame-pair.runtime :as rt]
+            [re-frame-pair.runtime.dispatch :as dispatch]
             [re-frame-pair.runtime.epochs :as epochs]
             [re-frame-pair.runtime.native-epoch :as native-epoch]
             [re-frame-pair.runtime.registrar :as registrar]
@@ -1350,14 +1351,14 @@
                                                 :parent-dispatch-id "CHILD"})]
              :max-size 50})
     (let [calls (atom [])]
-      (with-redefs [rt/dispatch-and-settle-fn
+      (with-redefs [dispatch/dispatch-and-settle-fn
                     (fn []
                       (fn [event opts]
                         (swap! calls conj {:event event
                                            :opts  opts
                                            :who   (runtime-atom-value #'rt/current-who)})
                         (resolving-thenable (clj->js {:ok? true}))))
-                    rt/recent-dispatch-id (fn [] "ROOT")]
+                    dispatch/recent-dispatch-id (fn [] "ROOT")]
         (let [r       (rt/dispatch-and-settle!
                        [:test/root]
                        {:timeout-ms 15 :stub-fx-ids [:dispatch]})
@@ -1383,11 +1384,11 @@
 
 (deftest dispatch-and-settle-bang-records-promise-rejection
   (testing "rf-4mr Promise rejection settles the handle with :promise-rejected"
-    (with-redefs [rt/dispatch-and-settle-fn
+    (with-redefs [dispatch/dispatch-and-settle-fn
                   (fn []
                     (fn [_event _opts]
                       (rejecting-thenable (js/Error. "settle exploded"))))
-                  rt/recent-dispatch-id (fn [] "ROOT")]
+                  dispatch/recent-dispatch-id (fn [] "ROOT")]
       (let [r       (rt/dispatch-and-settle! [:test/root])
             settled (rt/await-settle (:handle r))]
         (is (true? (:ok? r)))
@@ -1401,7 +1402,7 @@
 
 (deftest dispatch-and-settle-bang-catches-synchronous-handler-throw
   (testing "rf-4mr accessor throw returns :handler-threw and logs handler-error"
-    (with-redefs [rt/dispatch-and-settle-fn
+    (with-redefs [dispatch/dispatch-and-settle-fn
                   (fn []
                     (fn [_event _opts]
                       (throw (ex-info "handler boom" {:phase :dispatch-and-settle}))))]
@@ -1532,7 +1533,7 @@
              :ids         #{}
              :max-size    3
              :total-count 0})
-    (let [record! @#'rt/record-claude-dispatch-id!]
+    (let [record! @#'dispatch/record-claude-dispatch-id!]
       (dotimes [i 5] (record! (str "id-" i))))
     (let [{:keys [entries ids max-size total-count]}
           (runtime-atom-value #'rt/claude-dispatch-ids)]
@@ -1560,7 +1561,7 @@
 (deftest dispatch-with-bang-success-calls-rf-ge8-accessor
   (testing "dispatch-with! flips current-who for the synchronous enqueue"
     (let [calls (atom [])]
-      (with-redefs [rt/dispatch-with-fn
+      (with-redefs [dispatch/dispatch-with-fn
                     (fn []
                       (fn [event overrides]
                         (swap! calls conj {:event        event
@@ -1582,13 +1583,13 @@
 (deftest dispatch-sync-with-bang-success-captures-dispatch-id
   (testing "dispatch-sync-with! records the dispatch id and restores current-who"
     (let [calls (atom [])]
-      (with-redefs [rt/dispatch-sync-with-fn
+      (with-redefs [dispatch/dispatch-sync-with-fn
                     (fn []
                       (fn [event overrides]
                         (swap! calls conj {:event        event
                                            :override-ids (set (keys overrides))
                                            :who          (runtime-atom-value #'rt/current-who)})))
-                    rt/recent-dispatch-id (fn [] "SYNC-ROOT")]
+                    dispatch/recent-dispatch-id (fn [] "SYNC-ROOT")]
         (let [r (rt/dispatch-sync-with! [:test/sync]
                                         {:dispatch (fn [_] nil)})]
           (is (true? (:ok? r)))
@@ -1603,7 +1604,7 @@
 
 (deftest dispatch-sync-with-bang-catches-handler-throw
   (testing "dispatch-sync-with! mirrors tagged-dispatch-sync!'s handler error shape"
-    (with-redefs [rt/dispatch-sync-with-fn
+    (with-redefs [dispatch/dispatch-sync-with-fn
                   (fn []
                     (fn [_event _overrides]
                       (throw (ex-info "sync boom" {:phase :dispatch-sync-with}))))]
@@ -2271,7 +2272,7 @@
 
 (deftest find-epoch-by-dispatch-id-walks-newest-first
   (testing "returns the unique match by :dispatch-id from the event-trace tags"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id
           matches    [(minimal-10x-match {:dispatch-id "OLD"})
                       (minimal-10x-match {:dispatch-id "MID"})
                       (minimal-10x-match {:dispatch-id "NEW"})]]
@@ -2283,7 +2284,7 @@
             entry in the buffer wins (we expect uniqueness in production but
             the walk order pins the contract — protects callers from receiving
             a stale match if a duplicate slips in)"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id
           stale      (assoc-in (minimal-10x-match {:dispatch-id "X"})
                                [:match-info 0 :marker] :stale)
           fresh      (assoc-in (minimal-10x-match {:dispatch-id "X"})
@@ -2293,13 +2294,13 @@
       (is (= :fresh (-> hit :match-info first :marker)))))
 
   (testing "no match → nil (caller distinguishes 'not yet landed' from 'no events')"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id
           matches    [(minimal-10x-match {:dispatch-id "A"})
                       (minimal-10x-match {:dispatch-id "B"})]]
       (is (nil? (find-by-id "MISSING" matches)))))
 
   (testing "empty buffer → nil"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id]
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id]
       (is (nil? (find-by-id "ANY" []))))))
 
 (deftest epochs-since-nil-id-returns-all-epochs
