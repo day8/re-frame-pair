@@ -1,5 +1,5 @@
 (ns app.events
-  (:require [re-frame.core         :as rf]
+  (:require [re-frame.macros       :as rf]
             [day8.re-frame.tracing :refer-macros [fn-traced]]
             [app.db                :as db]))
 

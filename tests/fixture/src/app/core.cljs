@@ -1,6 +1,10 @@
 (ns app.core
   (:require [reagent.dom.client :as rdc]
-            [re-frame.core      :as rf]
+            ;; rf-core for the function-only clear-subscription-cache!;
+            ;; rf for dispatch-sync's macro form so the bootstrap dispatch
+            ;; carries :re-frame/source meta (rf-hsl).
+            [re-frame.core      :as rf-core]
+            [re-frame.macros    :as rf]
             [app.events]                   ;; side-effecting registrations
             [app.subs]                     ;; "
             [app.views          :as views]))
@@ -12,7 +16,7 @@
   (rdc/render root-container [views/root]))
 
 (defn ^:dev/after-load reload! []
-  (rf/clear-subscription-cache!)
+  (rf-core/clear-subscription-cache!)
   (mount!))
 
 (defn init []
