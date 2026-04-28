@@ -61,6 +61,13 @@ next tag's body of work.
   `hot-reload/wait` label.
 - **CHANGELOG.md** (this file).
 
+### Renamed
+
+- `scripts/trace-window.sh` → `scripts/trace-recent.sh`. The shell
+  shim now matches the SKILL.md `trace/recent` op name and the
+  ops.clj `trace-recent` subcommand. Same behaviour. External
+  callers should update their script paths.
+
 ### Changed
 
 - **`handler/source` mechanism.** Upstream `rf-ysy` made
@@ -96,7 +103,7 @@ live re-frame app. CI green.
   `registrar/describe`, `subs/list`, `app/summary`, `handler/source`.
 - Write ops: `dispatch.sh --sync`, `app-db/reset`, `eval-cljs.sh`.
 - Trace ops: `dispatch.sh --trace`, `watch-epochs.sh`,
-  `trace-window.sh`, `find-where`.
+  `trace-recent.sh`, `find-where`.
 - Hot-reload coordination: `tail-build.sh --probe`.
 - Time-travel: 10x `undo` / `redo` integration.
 - Diagnostics recipes assembled from primitive ops.

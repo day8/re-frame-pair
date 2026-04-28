@@ -34,7 +34,7 @@
     "./scripts/handler-source.sh",
     "./scripts/inject-runtime.sh",
     "./scripts/dispatch.sh",
-    "./scripts/trace-window.sh",
+    "./scripts/trace-recent.sh",
     "./scripts/watch-epochs.sh",
     "./scripts/tail-build.sh",
     "./scripts/ops.clj",

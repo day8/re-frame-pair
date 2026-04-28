@@ -104,7 +104,7 @@ re-frame-pair/
 │   ├── inject-runtime.sh           # on connect: inject helpers + session sentinel over REPL
 │   ├── runtime.cljs                # source-of-truth ClojureScript that inject-runtime.sh evaluates
 │   ├── dispatch.sh                 # fire a re-frame event and return the resulting trace
-│   ├── trace-window.sh             # capture the next N trace events
+│   ├── trace-recent.sh             # capture the next N trace events
 │   ├── watch-epochs.sh             # long-running tail; reads epochs from nREPL :out stream (§4.4)
 │   └── tail-build.sh               # tail `shadow-cljs watch` server output for "Build complete" (§4.5)
 ├── README.md
@@ -451,7 +451,7 @@ allowed-tools:
   - Bash(scripts/eval-cljs.sh *)
   - Bash(scripts/inject-runtime.sh)
   - Bash(scripts/dispatch.sh *)
-  - Bash(scripts/trace-window.sh *)
+  - Bash(scripts/trace-recent.sh *)
   - Bash(scripts/watch-epochs.sh *)
   - Bash(scripts/tail-build.sh *)
 ---
@@ -487,7 +487,7 @@ REPL hot-swap is ephemeral; source edits are permanent and must be followed by `
     "./scripts/eval-cljs.sh",
     "./scripts/inject-runtime.sh",
     "./scripts/dispatch.sh",
-    "./scripts/trace-window.sh",
+    "./scripts/trace-recent.sh",
     "./scripts/watch-epochs.sh",
     "./scripts/tail-build.sh"
   ]

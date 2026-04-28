@@ -16,7 +16,7 @@ allowed-tools:
   - Bash(scripts/handler-source.sh *)
   - Bash(scripts/inject-runtime.sh *)
   - Bash(scripts/dispatch.sh *)
-  - Bash(scripts/trace-window.sh *)
+  - Bash(scripts/trace-recent.sh *)
   - Bash(scripts/watch-epochs.sh *)
   - Bash(scripts/tail-build.sh *)
   - Read
@@ -105,7 +105,7 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | `trace/last-claude-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-claude-epoch)'` | Most recent epoch this session dispatched |
 | `trace/epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/epoch-by-id "<id>")'` | Named epoch |
 | `trace/dispatch-and-settle` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + await the cascade (adaptive quiet-period) + return root and cascaded epochs. Implemented via `re-frame.core/dispatch-and-settle` (rf-4mr); falls back to fixed-sleep + `tagged-dispatch-sync!` for re-frame builds predating it. |
-| `trace/recent` | `scripts/trace-window.sh <ms>` | Epochs added in last N ms (pull) |
+| `trace/recent` | `scripts/trace-recent.sh <ms>` | Epochs added in last N ms (pull) |
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op for "when did X happen?" post-mortems |
 | `trace/find-all-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-all-where <pred>)'` | Every matching epoch, newest first — for trajectories rather than single transitions |
 

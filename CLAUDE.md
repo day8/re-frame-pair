@@ -83,7 +83,7 @@ Run from `tests/fixture/`:
 - `../../scripts/eval-cljs.sh '<form>'` — eval CLJS in browser
 - `../../scripts/dispatch.sh --trace '[:ev args]'` — fire event, return epoch
 - `../../scripts/watch-epochs.sh --count N` — live-watch
-- `../../scripts/trace-window.sh <ms>` — epochs in last N ms
+- `../../scripts/trace-recent.sh <ms>` — epochs in last N ms
 - `../../scripts/inject-runtime.sh` — force re-ship runtime
 - `../../scripts/tail-build.sh --probe '<form>'` — wait for hot-reload to land
 
