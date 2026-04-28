@@ -25,7 +25,9 @@
 (ns ops
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.tools.reader :as tr]
+            [clojure.tools.reader.reader-types :as trt])
   (:import (java.net Socket)
            (java.io PushbackInputStream)))
 
@@ -358,9 +360,6 @@
        :hint   "Source did not compile in the connected runtime."}
 
       :else nil)))
-
-(require '[clojure.tools.reader :as tr]
-         '[clojure.tools.reader.reader-types :as trt])
 
 (defn- form-end-offsets
   "Read `src` as a sequence of top-level CLJS forms and return the
