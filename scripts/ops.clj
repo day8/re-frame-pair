@@ -226,7 +226,9 @@
    re-exports the symbols ops.clj / tests reach through. Submodules
    come first so their nses exist when the facade's :require fires at
    REPL time."
-  ["versions.cljs"])
+  ["re_com.cljs"
+   "session.cljs"
+   "versions.cljs"])
 
 (defn- runtime-cljs-paths
   "Source files comprising the re-frame-pair.runtime namespace tree,

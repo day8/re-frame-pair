@@ -33,59 +33,20 @@
             [re-frame.registrar :as registrar]
             [re-frame.subs :as subs]
             [re-frame.trace]
+            [re-frame-pair.runtime.re-com :as re-com]
+            [re-frame-pair.runtime.session :as session]
             [re-frame-pair.runtime.versions :as versions]))
 
 ;; ---------------------------------------------------------------------------
-;; Session sentinel
-;; ---------------------------------------------------------------------------
-;;
-;; A random UUID set once per injection. Every subsequent op reads it
-;; through `eval-cljs.sh`. If a full page refresh has wiped the
-;; browser-side runtime, reading the var throws and the shim knows to
-;; re-inject.
-
-(def session-id
-  (str (random-uuid)))
-
-(defn sentinel
-  "Return the session sentinel. Used by the shim to confirm the runtime
-   is still alive in the current browser runtime."
-  []
-  {:ok?        true
-   :session-id session-id
-   :installed  (js/Date.now)})
-
-;; ---------------------------------------------------------------------------
-;; app-db read/write
+;; Session + app-db — re-exported from re-frame-pair.runtime.session
 ;; ---------------------------------------------------------------------------
 
-(defn snapshot
-  "Full current app-db."
-  []
-  @db/app-db)
-
-(defn app-db-at
-  "Read a path in app-db."
-  [path]
-  (get-in @db/app-db path))
-
-(defn app-db-reset!
-  "Replace app-db with v. Logged explicitly via `tap>` so the human
-   sees what the agent changed."
-  [v]
-  (tap> {:re-frame-pair/op :app-db/reset
-         :previous          @db/app-db
-         :next              v
-         :t                 (js/Date.now)})
-  (reset! db/app-db v)
-  {:ok? true})
-
-(defn schema
-  "Opt-in app-db schema. Apps that want one can write a spec/malli
-   schema to `:re-frame-pair/schema` in app-db (typically via an
-   `after` interceptor). Returns nil if the app hasn't opted in."
-  []
-  (get @db/app-db :re-frame-pair/schema))
+(def session-id     session/session-id)
+(def sentinel       session/sentinel)
+(def snapshot       session/snapshot)
+(def app-db-at      session/app-db-at)
+(def app-db-reset!  session/app-db-reset!)
+(def schema         session/schema)
 
 ;; ---------------------------------------------------------------------------
 ;; Registrar introspection
@@ -274,10 +235,6 @@
 ;; etc. The match-id is the `:id` of the first trace in match-info.
 ;; (See day8.re-frame-10x.tools.metamorphic for the parser that builds
 ;; these matches.)
-
-;; Forward-declared — defined in the re-com awareness section below.
-;; Used by `renders-for` to annotate render entries with re-com hints.
-(declare classify-render-entry)
 
 (def ^:private inlined-rf-known-version-paths
   "Best-known 10x-inlined re-frame version slugs. Used by the
@@ -645,7 +602,7 @@
                  (let [tags (:tags t)
                        comp (demunge-component-name
                               (or (:component-name tags) (str (:operation t))))]
-                   (classify-render-entry
+                   (re-com/classify-render-entry
                      {:component comp
                       :time-ms   (:duration t)
                       :reaction  (:reaction tags)})))))))
@@ -2320,63 +2277,12 @@
       v)))
 
 ;; ---------------------------------------------------------------------------
-;; re-com awareness
+;; re-com awareness — re-exported from re-frame-pair.runtime.re-com
 ;; ---------------------------------------------------------------------------
 
-(defn re-com?
-  "True if the component name names a re-com component. Public so
-   tests can exercise the heuristic directly."
-  [component-name]
-  (and (string? component-name)
-       (str/starts-with? component-name "re-com.")))
-
-(defn re-com-category
-  "Classify a re-com component by ns segment. Rough — enough to let
-   recipes answer 'which inputs re-rendered'. Public for tests.
-
-   Categories follow the re-com source layout (current as of 2026-04):
-   layout boxes, inputs (buttons, dropdowns, selection lists, etc.),
-   tables, and content (text/typography/throbbers/popovers/etc.)."
-  [component-name]
-  (cond
-    (not (re-com? component-name))                            nil
-    (re-find #"re-com\.box"                  component-name)  :layout
-    (re-find #"re-com\.gap"                  component-name)  :layout
-    (re-find #"re-com\.scroller"             component-name)  :layout
-    (re-find #"re-com\.splits"               component-name)  :layout
-    (re-find #"re-com\.modal-panel"          component-name)  :layout
-    (re-find #"re-com\.buttons"              component-name)  :input
-    (re-find #"re-com\.checkbox"             component-name)  :input
-    (re-find #"re-com\.radio-button"         component-name)  :input
-    (re-find #"re-com\.input-text"           component-name)  :input
-    (re-find #"re-com\.input-time"           component-name)  :input
-    (re-find #"re-com\.dropdown"             component-name)  :input
-    (re-find #"re-com\.single-dropdown"      component-name)  :input
-    (re-find #"re-com\.tag-dropdown"         component-name)  :input
-    (re-find #"re-com\.selection-list"       component-name)  :input
-    (re-find #"re-com\.multi-select"         component-name)  :input
-    (re-find #"re-com\.tree-select"          component-name)  :input
-    (re-find #"re-com\.typeahead"            component-name)  :input
-    (re-find #"re-com\.datepicker"           component-name)  :input
-    (re-find #"re-com\.daterange"            component-name)  :input
-    (re-find #"re-com\.slider"               component-name)  :input
-    (re-find #"re-com\.tabs"                 component-name)  :input
-    (re-find #"re-com\.bar-tabs"             component-name)  :input
-    (re-find #"re-com\.pill-tabs"            component-name)  :input
-    (re-find #"re-com\.horizontal-tabs"      component-name)  :input
-    (re-find #"re-com\.simple-v-table"       component-name)  :table
-    (re-find #"re-com\.v-table"              component-name)  :table
-    (re-find #"re-com\.nested-grid"          component-name)  :table
-    (re-find #"re-com\.table-filter"         component-name)  :table
-    :else                                                     :content))
-
-(defn classify-render-entry
-  "Annotate a render entry with :re-com? and :re-com/category."
-  [{:keys [component] :as entry}]
-  (let [cat (re-com-category component)]
-    (cond-> entry
-      (re-com? component) (assoc :re-com? true)
-      cat                  (assoc :re-com/category cat))))
+(def re-com?               re-com/re-com?)
+(def re-com-category       re-com/re-com-category)
+(def classify-render-entry re-com/classify-render-entry)
 
 ;; ---------------------------------------------------------------------------
 ;; DOM ↔ source bridge (re-com `:src`)
