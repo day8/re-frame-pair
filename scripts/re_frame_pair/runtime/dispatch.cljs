@@ -56,16 +56,20 @@
   (when-let [g (some-> js/goog .-global)]
     (ten-x/aget-path g ["re_frame" "trace" "traces"])))
 
+(defn- trace-count
+  "Current number of raw entries in re-frame.trace/traces, or nil when
+   the trace atom is not reachable."
+  []
+  (some-> (traces-atom) deref count))
+
 (defn- recent-dispatch-id
-  "After a `dispatch-sync`, read `re-frame.trace/traces` for the
-   most recent `:event` trace and return its `:dispatch-id`.
+  "Read `re-frame.trace/traces` for the most recent `:event` trace and
+   return its `:dispatch-id`.
+
    `re-frame.trace/traces` is updated synchronously inside
    `re-frame.events/handle`'s `with-trace` finish-trace (the cb
    delivery to 10x runs through a ~50ms debounce, but the source
-   atom updates immediately), so this resolves the id we just
-   generated as long as no cb fired between finish-trace and our
-   read — acceptable race in practice (single-threaded JS, the cb
-   is goog.functions/debounce'd 50ms out from the LAST trace).
+   atom updates immediately).
 
    nil when re-frame predates rf-3p7 commit af024c3 (no
    :dispatch-id tag generated), or when the trace atom isn't
@@ -76,6 +80,20 @@
       (->> (if (vector? traces) (rseq traces) (reverse traces))
            (some (fn [t] (when (= :event (:op-type t))
                            (-> t :tags :dispatch-id))))))))
+
+(defn- root-dispatch-id-after
+  "Return the first `:event` dispatch-id appended after `watermark`.
+   This pins the root event when a handler performs synchronous
+   cascades that append child `:event` traces before dispatch-sync
+   returns. Falls back to `recent-dispatch-id` when no watermark is
+   available."
+  [watermark]
+  (if (some? watermark)
+    (when-let [traces-ref (traces-atom)]
+      (->> (drop watermark @traces-ref)
+           (some (fn [t] (when (= :event (:op-type t))
+                           (-> t :tags :dispatch-id))))))
+    (recent-dispatch-id)))
 
 (defn tagged-dispatch!
   "Dispatch an event (queued) — the handler runs out of band, so the
@@ -141,8 +159,9 @@
   (reset! console/current-who :claude)
   (try
     (try
+      (let [watermark (trace-count)]
       (rf/dispatch-sync event-v)
-      (let [dispatch-id (recent-dispatch-id)]
+      (let [dispatch-id (root-dispatch-id-after watermark)]
         (when dispatch-id
           (record-claude-dispatch-id! dispatch-id))
         {:ok?         true
@@ -151,7 +170,7 @@
          :epoch-id    nil
          :note        (if dispatch-id
                         "10x's epoch lands after the trace-debounce (~50ms); resolve via collect-after-dispatch with :dispatch-id."
-                        "re-frame predates rf-3p7 (commit af024c3) — :dispatch-id auto-generation not available; correlation by :dispatch-id won't work.")})
+                        "re-frame predates rf-3p7 (commit af024c3) — :dispatch-id auto-generation not available; correlation by :dispatch-id won't work.")}))
       (catch :default e
         (let [stack (try (.-stack e) (catch :default _ ""))]
           (console/append-console-entry!
@@ -447,8 +466,9 @@
                            overrides (vary-meta assoc :re-frame/fx-overrides overrides))]
          (reset! console/current-who :claude)
          (try
-           (let [p                (d-and-s event-meta settle-opts)
-                 root-dispatch-id (recent-dispatch-id)]
+           (let [watermark        (trace-count)
+                 p                (d-and-s event-meta settle-opts)
+                 root-dispatch-id (root-dispatch-id-after watermark)]
              (when root-dispatch-id
                (record-claude-dispatch-id! root-dispatch-id))
              (swap! settle-pending assoc handle
@@ -663,14 +683,15 @@
       (reset! console/current-who :claude)
       (try
         (try
+          (let [watermark (trace-count)]
           (d-sync-with event-v overrides)
-          (let [dispatch-id (recent-dispatch-id)]
+          (let [dispatch-id (root-dispatch-id-after watermark)]
             (when dispatch-id (record-claude-dispatch-id! dispatch-id))
             {:ok?            true
              :event          event-v
              :dispatch-id    dispatch-id
              :epoch-id       nil
-             :stubbed-fx-ids (vec (sort (keys overrides)))})
+             :stubbed-fx-ids (vec (sort (keys overrides)))}))
           (catch :default e
             (let [stack (try (.-stack e) (catch :default _ ""))]
               (console/append-console-entry!

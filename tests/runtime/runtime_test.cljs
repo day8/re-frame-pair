@@ -1405,7 +1405,7 @@
                                            :opts  opts
                                            :who   (runtime-atom-value #'rt/current-who)})
                         (resolving-thenable (clj->js {:ok? true}))))
-                    dispatch/recent-dispatch-id (fn [] "ROOT")]
+                    dispatch/root-dispatch-id-after (fn [_] "ROOT")]
         (let [r       (rt/dispatch-and-settle!
                        [:test/root]
                        {:timeout-ms 15 :stub-fx-ids [:dispatch]})
@@ -1458,7 +1458,7 @@
                     (fn []
                       (fn [_event _opts]
                         (resolving-thenable (clj->js {:ok? true}))))
-                    dispatch/recent-dispatch-id (fn [] "ROOT")]
+                    dispatch/root-dispatch-id-after (fn [_] "ROOT")]
         (let [r       (rt/dispatch-and-settle! [:root])
               settled (rt/await-settle (:handle r))
               parsed  (reader/read-string (pr-str settled))]
@@ -1474,7 +1474,7 @@
                   (fn []
                     (fn [_event _opts]
                       (rejecting-thenable (js/Error. "settle exploded"))))
-                  dispatch/recent-dispatch-id (fn [] "ROOT")]
+                  dispatch/root-dispatch-id-after (fn [_] "ROOT")]
       (let [r       (rt/dispatch-and-settle! [:test/root])
             settled (rt/await-settle (:handle r))]
         (is (true? (:ok? r)))
@@ -1632,6 +1632,21 @@
       ;; :claude-epoch-count still reflects "skill dispatched N events".
       (is (= 5 total-count)))))
 
+(deftest root-dispatch-id-after-prefers-first-event-after-watermark
+  (testing "sync cascades append child event traces before dispatch-sync
+            returns; the root id is the first new event, not the last"
+    (let [traces (atom [{:id 1 :op-type :event
+                         :tags {:dispatch-id "BEFORE"}}
+                        {:id 2 :op-type :sub/run :tags {}}
+                        {:id 3 :op-type :event
+                         :tags {:dispatch-id "ROOT"}}
+                        {:id 4 :op-type :event
+                         :tags {:dispatch-id "SYNC-CHILD"
+                                :parent-dispatch-id "ROOT"}}])]
+      (with-redefs [dispatch/traces-atom (fn [] traces)]
+        (is (= "SYNC-CHILD" (#'dispatch/recent-dispatch-id)))
+        (is (= "ROOT" (#'dispatch/root-dispatch-id-after 2)))))))
+
 (deftest dispatch-with-bang-fallback-without-rf-ge8
   (testing "runtime-test (re-frame 1.4.5) → :dispatch-with-unavailable"
     (let [r (rt/dispatch-with! [:test/foo] {:http-xhrio (fn [_] nil)})]
@@ -1675,7 +1690,7 @@
                         (swap! calls conj {:event        event
                                            :override-ids (set (keys overrides))
                                            :who          (runtime-atom-value #'rt/current-who)})))
-                    dispatch/recent-dispatch-id (fn [] "SYNC-ROOT")]
+                    dispatch/root-dispatch-id-after (fn [_] "SYNC-ROOT")]
         (let [r (rt/dispatch-sync-with! [:test/sync]
                                         {:dispatch (fn [_] nil)})]
           (is (true? (:ok? r)))
