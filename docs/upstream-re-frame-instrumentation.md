@@ -14,14 +14,16 @@ re-frame-10x has no immediate use for it.
 > re-frame-pair touches a non-public shape today and sketches a
 > concrete upstream primitive that would replace the workaround.
 
-> **Implementation status (2026-04-27).** Seven of nine gaps have
-> shipped upstream and are consumed in re-frame-pair: §3.1 (rf-3p7
-> item 1, `24c26df`), §3.2 (rf-3p7 item 3 `fa90f70` + rf-cna `9e1fbeb`),
-> §3.3 (`8cc973c`), §3.4 (rf-3p7 item 2 `af024c3`), §3.5 (rf-ysy
-> `15dfc25`), §3.6 (`75746fc`), §3.7 (rf-gta `968cecf`). §3.8 and §3.9
-> remain (the latter is out of scope by construction). See per-section
-> Status annotations below; the prose under each remains as the
-> proposal that motivated the upstream change. Companion arc: rf-hsl
+> **Implementation status (2026-04-27).** Eight of nine gaps have
+> shipped upstream: §3.1 (rf-3p7 item 1, `24c26df`), §3.2 (rf-3p7
+> item 3 `fa90f70` + rf-cna `9e1fbeb`), §3.3 (`8cc973c`), §3.4
+> (rf-3p7 item 2 `af024c3`), §3.5 (rf-ysy `15dfc25`), §3.6
+> (`75746fc`), §3.7 (rf-gta `968cecf`), and §3.8 (rf-yyo
+> `84d3bf0`). §3.1 through §3.7 are consumed in re-frame-pair;
+> §3.8 consumer-side adoption remains TODO. §3.9 is out of scope by
+> construction. See per-section Status annotations below; the prose
+> under each remains as the proposal that motivated the upstream
+> change. Companion arc: rf-hsl
 > (`c40cb82`), rf-ybv (`4a53afb`), rf-ge8 (`2651a30`), rf-4mr
 > (`f8f0f59`), and rf-556 (`b68318b`) shipped during the same window
 > but address surfaces this doc didn't enumerate — see
@@ -301,6 +303,16 @@ users who don't `unwrap`/`trim-v`; load-bearing for those who do.
 
 ### 3.8. (L) No reaction → query-v reverse map at runtime
 
+> **Status (2026-04-27).** Shipped upstream as
+> `re-frame.subs/query-v-for-reaction`, re-exported at
+> `re-frame.core/query-v-for-reaction` (rf-yyo, commit `84d3bf0`).
+> An object-identity-keyed reverse map is maintained alongside
+> `query->reaction`; entries are inserted on `cache-and-return` and
+> removed on dispose. Consumer-side adoption is still TODO:
+> re-frame-pair currently retains `extract-query-vs` over
+> `query->reaction` cache keys. The text below is retained as the
+> proposal that motivated the change.
+
 **Workaround.** `extract-query-vs` (`runtime.cljs:164-173`) walks
 `query->reaction`'s keys to recover query-vectors. The keys are
 `[cache-key-map dyn-vec]` pairs — public, but the shape isn't a
@@ -373,6 +385,11 @@ third-party tool, not just re-frame-pair. Ship that, drop
 - **Reagent-side render trace shape.** Reagent, not re-frame.
 
 ## 5. Top 5 actionable takeaways (ranked by leverage)
+
+All five top-leverage takeaways have landed upstream; see the
+per-section Status banners for commit references and consumer status.
+This list is retained as a historical record of the implementation
+order.
 
 1. **(§3.1) Spec the trace-tag schema.** *"re-frame's trace channel
    is the only structured event surface, and consumers (10x, debux,
