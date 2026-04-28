@@ -46,6 +46,8 @@
 
 (def ^:private project-root (System/getProperty "user.dir"))
 (def ^:private skill-md     (slurp (str project-root "/SKILL.md")))
+(def ^:private debux-recipe-md
+  (slurp (str project-root "/docs/recipes/debux.md")))
 (def ^:private fixture-deps-path
   (str project-root "/tests/fixture/deps.edn"))
 (def ^:private fixture-events-path
@@ -141,15 +143,19 @@
 ;; SKILL.md restructure either updates these or fails the test loudly.
 ;; ---------------------------------------------------------------------------
 
+;; The full debux procedures (runtime-API + manual fn-traced fallback)
+;; live in docs/recipes/debux.md to keep SKILL.md focused on day-to-day
+;; vocabulary; SKILL.md links here. Markers below match the H3-headed
+;; regions in that file.
 (def ^:private runtime-api-region
-  (region-between skill-md
-                  "**Procedure (runtime API"
-                  "**Procedure (manual fn-traced"))
+  (region-between debux-recipe-md
+                  "### Procedure (runtime API"
+                  "### Procedure (manual fn-traced"))
 
 (def ^:private manual-fallback-region
-  (region-between skill-md
-                  "**Procedure (manual fn-traced"
-                  "**Limits to call out to the user"))
+  (region-between debux-recipe-md
+                  "### Procedure (manual fn-traced"
+                  "### Limits to call out to the user"))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests — public scripts are exposed through both distribution surfaces.
