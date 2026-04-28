@@ -425,6 +425,33 @@
   (testing "nil input -> nil"
     (is (nil? (rt/coerce-native-epoch nil)))))
 
+(deftest coerce-native-epoch-with-empty-ctx-traces
+  ;; Pins the boundary where a non-nil raw native epoch is coerced
+  ;; with an EMPTY trace stream. This is a real-and-common production
+  ;; race: rf-ybv's register-epoch-cb fires synchronously when
+  ;; assemble-epochs delivers, but re-frame.trace's debounce-tick
+  ;; flushing the per-trace ring buffer is on a separate timer — so
+  ;; the epoch can land before any of its sub/run / sub/create /
+  ;; render traces have flushed into the trace-cb queue. Consumers
+  ;; reading {:subs/ran [] :subs/cache-hit [] :renders []} cannot
+  ;; today distinguish this race from a genuinely sub-less epoch.
+  ;; Behaviour pinned here is OPTION (a): silently empty vectors.
+  ;; If the projection is later updated to surface a pending-traces
+  ;; sentinel, a sibling test should exercise that marker.
+  (testing "non-nil raw with empty traces / all-epochs containing only
+            self → :subs/ran, :subs/cache-hit, :renders all []
+            (current behaviour, ambiguous with a genuinely sub-less
+            epoch — known race window)"
+    (let [raw fixtures/synthetic-native-epoch
+          ctx {:traces [] :all-epochs [raw]}
+          e   (rt/coerce-native-epoch raw ctx)]
+      (is (some? e) "non-nil raw still produces a coerced record")
+      (is (= (:id raw) (:id e)) "raw fields still pass through")
+      (is (= (:event raw) (:event e)))
+      (is (= [] (:subs/ran e)))
+      (is (= [] (:subs/cache-hit e)))
+      (is (= [] (:renders e))))))
+
 (deftest coerce-native-epoch-debux-code-from-event-handler
   (testing ":debux/code reads from :event-handler trace's :tags
             (where merge-trace! lands when fn-traced-wrapped handlers
