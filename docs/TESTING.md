@@ -4,7 +4,7 @@ Four surfaces need coverage at different fidelities. See `docs/initial-spec.md` 
 
 ## 1. Runtime unit tests (`tests/runtime/`)
 
-**Status: wired to shadow-cljs `:node-test` build. 73 deftests / 385 assertions / 0 failures. CI runs them per push.**
+**Status: wired to shadow-cljs `:node-test` build. 85 deftests / 412 assertions / 0 failures. CI runs them per push.**
 
 `runtime_test.cljs` covers pure fns in `scripts/re_frame_pair/runtime.cljs` — the re-com classifier (broadened to current re-com layout), the `:src` parser (file:line shape per `re-com.debug.cljs`), the predicate matcher (`epoch-matches?`), the cache-key extractor (`extract-query-vs`), the session-sentinel shape, both `coerce-epoch` and `coerce-native-epoch` translations against synthetic 10x match records / `assemble-epochs` output (including the `:debux/code` surface from the inner `:event/handler` trace's `:tags :code` (parity asserted across both coerce paths so the legacy 10x and rf-ybv native paths can't drift on the lookup target), `:event/source` flattening from event-vec meta, `:subscribe/source` + `:input-query-sources` flattening on `:subs/ran` entries, and `:subscribe/source` flattening on `:subs/cache-hit` entries), the native ring buffers (`native-epoch-buffer` / `native-trace-buffer` ingest + drain, `epoch-by-id` / `last-epoch` / `last-claude-epoch` prefer-native-then-fall-back-to-10x), `collect-cascade-from-buffer` parent-chain walk by `:dispatch-id` (plus legacy 10x `chained-dispatch-ids` parity — transitive descendants surface, not just direct children), `await-settle` state transitions plus the `dispatch-and-settle!` and `dispatch-with-stubs!` fallback paths for re-frame builds predating rf-4mr / rf-ge8, the fx-stubs log helpers (`record-only-stub` / `build-stub-overrides` / `validate-fx-ids` / `stubbed-effects-since` / `clear-stubbed-effects!`), `subs-ran-from-native-traces` query-v dedupe, `subs-cache-hit-from-native-traces` `:cached?` filtering, the `dbg-macro-available?` probe, `console-tail-since` id/who filters, `tagged-dispatch-sync!` success and handler-error paths (current-who restoration, synthesised error entries), `app-summary` shape including app-db one-level coercion, `handler-source` across kinds (sub / fx / event with chain-meta / `:no-source-meta` fallback / not-registered / empty-meta-map), `version-below?` semver comparison, and the `undo-*` ten-x-missing failure paths. Synthetic-match helpers live in `tests/runtime/fixtures.cljs` — one place to update when 10x's shape changes. They run via shadow-cljs's `:node-test` target — no browser, no live re-frame app.
 
@@ -19,7 +19,7 @@ CI runs the same target on every push (see `.github/workflows/ci.yml`'s `runtime
 
 ## 1b. Babashka-side smoke tests (`tests/ops_smoke.bb`)
 
-**Status: wired. 26 deftests / 51 assertions / 0 failures. CI runs them per push via `npm run test:ops`.**
+**Status: wired. 32 deftests / 80 assertions / 0 failures. CI runs them per push via `npm run test:ops`.**
 
 Closes the gap that `npm test` (CLJS-only) leaves around `scripts/ops.clj`. Two coverage axes:
 
@@ -27,6 +27,13 @@ Closes the gap that `npm test` (CLJS-only) leaves around `scripts/ops.clj`. Two 
 2. **Pure-helper coverage** — `list-builds-on-port` (set-vs-seq normalisation, `rfp-j2i`), `read-port-candidates`, `build-id-from-args` (both `--build=app` and `--build=:app` forms, `rfp-jfp`), via `with-redefs` over the nREPL / fs seams.
 
 Bencode round-trip, `parse-predicate-args` flag matrix, and `read-port` candidate-cascade are tracked in STATUS.md *Near-term* item 4.
+
+`tests/skill_recipe_smoke.bb` also pins the fixture contract for the
+`dispatch.sh --stub` recipe: `events.cljs` must keep a real
+`:test/log-message` `reg-fx`, direct and cascaded events that emit it,
+and README smoke steps that verify the runtime stub log against the
+fixture's real effect log. This is a CI-level guard for the fixture
+surface; it does not replace the live browser smoke.
 
 ## 2. Bash-shim integration (`tests/shim/`)
 
@@ -39,6 +46,13 @@ End-to-end against the fixture app. For each shell script in `scripts/*.sh`, ass
 - structured result has expected keys
 
 Recommended approach: [`bats`](https://bats-core.readthedocs.io/) or a simple bash test harness. One `.bats` file per script; the fixture is started/stopped per test suite (not per test).
+
+The fixture now has a concrete `--stub` target for this suite:
+`:test/log-message`. The live smoke should clear
+`app.events/test-fx-log` and `re-frame-pair.runtime`'s stub log, run
+`scripts/dispatch.sh --trace --stub :test/log-message '[:test/log-then-dispatch "hello"]'`,
+then assert the stub log contains both root and child payloads while the
+real fixture log remains empty.
 
 ## 3. End-to-end in-browser (`tests/e2e/`)
 

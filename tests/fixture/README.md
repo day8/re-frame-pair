@@ -28,7 +28,7 @@ tests/fixture/
 │   └── css/                # bootstrap.css, re-com.css, material-design-iconic-font.min.css (committed for self-contained dev)
 └── src/app/
     ├── db.cljs             # initial-db
-    ├── events.cljs         # 9 handlers, mix of reg-event-db / reg-event-fx
+    ├── events.cljs         # 12 event handlers plus a fixture-local reg-fx
     ├── subs.cljs           # Layer 2 (counter, items, coupon, events-fired) + Layer 3 (cart-summary)
     ├── views.cljs          # re-com components with `:src (at)` on every call site
     └── core.cljs           # entry point; `(rf/dispatch-sync [:initialize])` then mount
@@ -46,6 +46,8 @@ charter onto the fixture surface.
 | `:counter/inc` / `:counter/dec` / `:counter/reset` | basic `reg-event-db` root-key mutation; the simplest dispatch → diff path |
 | `:item/inc-qty` | path-based update inside a vector — interesting `:app-db/diff` shape via `clojure.data/diff` |
 | `:coupon/apply` | `reg-event-fx` with chained `:dispatch` to `:analytics/track` — exercises `coerce-epoch`'s `:effects/fired` flattening AND the rfp-l7m C fix that the trace returns the user-fired event, not the chained one |
+| `:test/log` | fixture-local `reg-fx` target (`:test/log-message`) for the `dispatch.sh --stub` recipe — the real effect records to `app.events/test-fx-log`, while stubs record to `re-frame-pair.runtime/stub-effect-log` |
+| `:test/log-then-dispatch` | emits `:test/log-message` and then dispatches `:test/log-child`, so `--trace --stub :test/log-message` exercises effect substitution across a dispatch cascade |
 | `:broken/throw` | the experiment-loop recipe target — handler throws; `tagged-dispatch-sync!` catches and returns `{:ok? false :reason :handler-threw}` (rfp-l7m D) |
 | `:broken/non-map` | handler returns a vector — app-db becomes corrupt; runtime stays alive and the diff captures the `[:not :a :map]` shape |
 | `:cart-summary` (Layer 3 sub of `:items` + `:coupon`) | the "why didn't my view update?" recipe — non-trivial sub chain to walk |
@@ -53,7 +55,7 @@ charter onto the fixture surface.
 
 ## What this fixture does NOT cover
 
-- **Real network effects** (`:http-xhrio`, fetch) — `:coupon/apply`'s `:dispatch` is the only async-ish behaviour.
+- **Real network effects** (`:http-xhrio`, fetch) — `:test/log-message` is a safe fixture-local effect for `--stub` validation, not a network adapter.
 - **Multiple build IDs** — the fixture has a single `:app` build.
 - **Production-mode build** — only `:dev` is exercised; `npx shadow-cljs release app` works but isn't part of the spike.
 - **End-to-end edit-then-reload** — Phase 5 (hot-reload coordination) probe protocol is unit-tested but not exercised live yet.
@@ -112,6 +114,29 @@ Returns `{:ok? false :reason ...}` if any step in the cycle breaks
 returns false, etc.) — each `:reason` keyword is enumerated in the
 source.
 
+## Safe custom effect for `--stub`
+
+`src/app/events.cljs` registers `:test/log-message` with `rf/reg-fx`.
+The real effect records payloads in `app.events/test-fx-log`; a stubbed
+dispatch records the same payloads in `re-frame-pair.runtime`'s stub log
+and leaves the fixture log empty.
+
+With the watch running and a browser tab open, this exercises the bash shim
+and the `dispatch-with` bridge against a real `reg-fx`:
+
+```bash
+scripts/eval-cljs.sh '(app.events/clear-test-fx-log!)'
+scripts/eval-cljs.sh '(re-frame-pair.runtime/clear-stubbed-effects!)'
+scripts/dispatch.sh --trace --stub :test/log-message '[:test/log-then-dispatch "hello"]'
+scripts/eval-cljs.sh '(re-frame-pair.runtime/stubbed-effects-since 0)'
+scripts/eval-cljs.sh '(app.events/test-fx-log-snapshot)'
+```
+
+Expected shape: `stubbed-effects-since` contains `:root` and `:child`
+payloads for `:test/log-message`, while `test-fx-log-snapshot` returns
+no entries. Running the same dispatch without `--stub` should invert that:
+the fixture log receives the payloads and the stub log stays empty.
+
 ## Validating against the fixture
 
 From the project root, with the watch running and a browser tab open:
@@ -122,6 +147,8 @@ scripts/discover-app.sh                                          # health report
 scripts/eval-cljs.sh '(re-frame-pair.runtime/snapshot)'          # round-trip
 scripts/dispatch.sh --trace '[:counter/inc]'                     # full §4.3a epoch
                                                                  # — :debux/code is non-nil for this event (rfp-mkf)
+scripts/dispatch.sh --trace --stub :test/log-message \
+  '[:test/log-then-dispatch "hello"]'                             # stubbed custom fx across cascade
 scripts/watch-epochs.sh --count 3                                # then click + 3 times in browser
 ```
 

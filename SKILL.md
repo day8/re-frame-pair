@@ -544,6 +544,9 @@ Canonical procedure:
 scripts/dispatch.sh --trace --stub :http-xhrio --stub :navigate '[:user/login {...}]'
 ```
 
+The bundled fixture has a safe custom effect for validating this path:
+`scripts/dispatch.sh --trace --stub :test/log-message '[:test/log-then-dispatch "hello"]'`.
+
 Each named fx is replaced with a record-only stub for that single dispatch (and its cascade — children queued via `:fx [:dispatch ...]` inherit the substitution; rf-ge8). The captured effect values land in the session log:
 
 ```

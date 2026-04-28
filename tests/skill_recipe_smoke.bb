@@ -23,6 +23,9 @@
 ;;;;      errors out at compile time.
 ;;;;   4. re-frame-pair.runtime/debux-runtime-api? still exists in
 ;;;;      runtime.cljs (the recipe's first call is the detection probe).
+;;;;   5. The fixture keeps a real custom reg-fx target for the
+;;;;      dispatch.sh --stub recipe, with README smoke steps for
+;;;;      verifying stubbed and real effect logs against a live app.
 ;;;;
 ;;;; What this DOES NOT cover: that the wrapped handler actually runs
 ;;;; under fn-traced and produces a :code trace at runtime. That requires
@@ -45,6 +48,10 @@
 (def ^:private skill-md     (slurp (str project-root "/SKILL.md")))
 (def ^:private fixture-deps-path
   (str project-root "/tests/fixture/deps.edn"))
+(def ^:private fixture-events-path
+  (str project-root "/tests/fixture/src/app/events.cljs"))
+(def ^:private fixture-readme-path
+  (str project-root "/tests/fixture/README.md"))
 (def ^:private runtime-cljs-path
   (str project-root "/scripts/re_frame_pair/runtime.cljs"))
 (def ^:private plugin-json-path
@@ -260,6 +267,38 @@
           (str "day8.re-frame/tracing must be :local/root-pinned for the "
                "fixture (sibling :local/root re-frame-debux); got "
                (pr-str tracing))))))
+
+(deftest fixture-custom-fx-stub-target-is-present
+  (testing "the live fixture exposes a real custom reg-fx target and a
+            cascaded event so dispatch.sh --stub has something concrete
+            to substitute outside synthetic runtime tests."
+    (let [src (slurp fixture-events-path)]
+      (is (str/includes? src "(rf/reg-fx\n :test/log-message")
+          "fixture must register :test/log-message via rf/reg-fx")
+      (is (str/includes? src "(rf/reg-event-fx\n :test/log\n")
+          "fixture must keep a direct event that emits :test/log-message")
+      (is (str/includes? src "(rf/reg-event-fx\n :test/log-then-dispatch")
+          "fixture must keep a cascaded event for --trace --stub validation")
+      (is (str/includes? src "(rf/reg-event-fx\n :test/log-child")
+          "fixture must keep the child event used by the cascade smoke")
+      (is (str/includes? src "(defn clear-test-fx-log!")
+          "fixture must expose a way to clear the real effect log")
+      (is (str/includes? src "(defn test-fx-log-snapshot")
+          "fixture must expose a way to assert the real effect stayed quiet"))))
+
+(deftest fixture-readme-documents-stub-smoke
+  (testing "the fixture README documents the live-app smoke for
+            dispatch.sh --stub, including both the runtime stub log and
+            the fixture's real effect log."
+    (let [src (slurp fixture-readme-path)]
+      (is (str/includes? src "scripts/dispatch.sh --trace --stub :test/log-message")
+          "README must show the bash shim invocation against the fixture fx")
+      (is (str/includes? src "(re-frame-pair.runtime/stubbed-effects-since 0)")
+          "README must show how to inspect the stubbed effect log")
+      (is (str/includes? src "(app.events/test-fx-log-snapshot)")
+          "README must show how to verify the real fx did not fire")
+      (is (str/includes? src "[:test/log-then-dispatch \"hello\"]")
+          "README must use the cascaded event in the smoke command"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests — runtime.cljs still defines debux-runtime-api?.

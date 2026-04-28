@@ -84,6 +84,51 @@
    (update db :events-fired inc)))
 
 ;; -----------------------------------------------------------------------------
+;; Test effects — custom reg-fx handlers for the dispatch-with --stub recipe.
+;; -----------------------------------------------------------------------------
+
+(defonce test-fx-log
+  (atom []))
+
+(defn clear-test-fx-log! []
+  (reset! test-fx-log [])
+  {:ok? true})
+
+(defn test-fx-log-snapshot []
+  {:ok? true
+   :entries @test-fx-log})
+
+(rf/reg-fx
+ :test/log-message
+ (fn [payload]
+   (swap! test-fx-log conj
+          {:payload payload
+           :ts      (.now js/Date)})
+   (.log js/console (str "test fx fired: " (pr-str payload)))))
+
+(rf/reg-event-fx
+ :test/log
+ (fn [{:keys [db]} [_ message]]
+   {:db               (update db :events-fired inc)
+    :test/log-message {:message message
+                       :source  :direct}}))
+
+(rf/reg-event-fx
+ :test/log-then-dispatch
+ (fn [{:keys [db]} [_ message]]
+   {:db (update db :events-fired inc)
+    :fx [[:test/log-message {:message message
+                             :source  :root}]
+         [:dispatch [:test/log-child message]]]}))
+
+(rf/reg-event-fx
+ :test/log-child
+ (fn [{:keys [db]} [_ message]]
+   {:db               (update db :events-fired inc)
+    :test/log-message {:message message
+                       :source  :child}}))
+
+;; -----------------------------------------------------------------------------
 ;; Deliberately broken handlers — for the "experiment loop" recipe to
 ;; iterate against. They are real bugs the agent should observe and fix.
 ;; -----------------------------------------------------------------------------
