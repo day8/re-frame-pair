@@ -187,6 +187,25 @@
     (is (= :app (#'ops/build-id-from-args ["[:event/foo]" "--build=:app" "--sync"])))
     (is (= :app (#'ops/build-id-from-args ["--sync" "--build=app" "[:foo]"])))))
 
+(deftest discover-no-capture-passes-health-option
+  (testing "--no-capture asks runtime health to skip console/native trace installs"
+    (let [seen    (atom nil)
+          emitted (atom nil)]
+      (with-redefs [ops/ensure-port!         (fn [] true)
+                    ops/inject-runtime!      (fn [_build-id opts]
+                                               (reset! seen opts)
+                                               {:ok? true
+                                                :ten-x-loaded? true
+                                                :trace-enabled? true
+                                                :re-com-debug? true
+                                                :versions {:by-dep {}}})
+                    ops/read-port            (fn [] 8777)
+                    ops/list-builds-on-port  (fn [_] [:app])
+                    ops/emit                 (fn [m] (reset! emitted m))]
+        (#'ops/discover ["--no-capture"])
+        (is (= {:capture? false} @seen))
+        (is (true? (:capture-skipped? @emitted)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; rfp-zml: --stub flag parsing for dispatch-with bridge
 ;; ---------------------------------------------------------------------------
@@ -227,6 +246,62 @@
 (deftest parse-stub-fx-ids-empty
   (testing "no --stub flags → empty vec"
     (is (= [] (#'ops/parse-stub-fx-ids ["[:ev]" "--trace"])))))
+
+;; ---------------------------------------------------------------------------
+;; parse-predicate-args — watch-epochs.sh predicate map builder.
+;; ---------------------------------------------------------------------------
+
+(deftest parse-predicate-args-each-flag
+  (testing "individual watch predicate flags produce the runtime map shape"
+    (is (= {:event-id :cart/add}
+           (#'ops/parse-predicate-args ["--event-id" ":cart/add"])))
+    (is (= {:event-id-prefix ":cart/"}
+           (#'ops/parse-predicate-args ["--event-id-prefix" "cart/"])))
+    (is (= {:event-id-prefix ":cart/"}
+           (#'ops/parse-predicate-args ["--event-id-prefix" ":cart/"])))
+    (is (= {:effects :http-xhrio}
+           (#'ops/parse-predicate-args ["--effects" "http-xhrio"])))
+    (is (= {:timing-ms [:> 100]}
+           (#'ops/parse-predicate-args ["--timing-ms" ">100"])))
+    (is (= {:timing-ms [:< 5]}
+           (#'ops/parse-predicate-args ["--timing-ms" "<5"])))
+    (is (= {:touches-path [:cart :items]}
+           (#'ops/parse-predicate-args ["--touches-path" "[:cart :items]"])))
+    (is (= {:sub-ran :cart/total}
+           (#'ops/parse-predicate-args ["--sub-ran" "cart/total"])))
+    (is (= {:render "re-com.buttons/button"}
+           (#'ops/parse-predicate-args ["--render" "re-com.buttons/button"])))))
+
+(deftest parse-predicate-args-combines-flags
+  (testing "flags compose into one predicate map; later duplicate flags win"
+    (is (= {:event-id-prefix ":cart/"
+            :effects :dispatch
+            :timing-ms [:> 25]
+            :sub-ran :cart/total}
+           (#'ops/parse-predicate-args
+            ["--event-id-prefix" "cart/"
+             "--effects" ":dispatch"
+             "--timing-ms" ">25"
+             "--sub-ran" ":cart/total"])))
+    (is (= {:render "new"}
+           (#'ops/parse-predicate-args ["--render" "old" "--render" "new"])))))
+
+(deftest parse-predicate-args-rejects-bad-timing-and-custom
+  (testing "bad timing syntax and deferred custom predicate flag die cleanly"
+    (with-redefs [ops/die (fn [reason & {:as data}]
+                            (throw (ex-info "die" (assoc data :reason reason))))]
+      (is (= :bad-timing-ms
+             (try (#'ops/parse-predicate-args ["--timing-ms" ">=100"])
+                  (catch clojure.lang.ExceptionInfo e
+                    (:reason (ex-data e))))))
+      (is (= :bad-timing-ms
+             (try (#'ops/parse-predicate-args ["--timing-ms" "><100"])
+                  (catch clojure.lang.ExceptionInfo e
+                    (:reason (ex-data e))))))
+      (is (= :flag-not-supported
+             (try (#'ops/parse-predicate-args ["--custom" "(fn [_] true)"])
+                  (catch clojure.lang.ExceptionInfo e
+                    (:reason (ex-data e)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; partition-dispatch-args — order-independent split of dispatch.sh args.
@@ -470,6 +545,21 @@
         (is (true? (:legacy? @emitted))
             "legacy? flag still set so the agent sees which branch was taken")))))
 
+(deftest dispatch-form-selects-stub-aware-runtime-fns
+  (testing "dispatch form construction keeps mode and stub axes separate"
+    (is (= "(re-frame-pair.runtime/tagged-dispatch-sync! [:ev])"
+           (#'ops/dispatch-form :sync "[:ev]" [])))
+    (is (= "(re-frame-pair.runtime/dispatch-sync-with-stubs! [:ev] [:http])"
+           (#'ops/dispatch-form :sync "[:ev]" [:http])))
+    (is (= "(re-frame-pair.runtime/tagged-dispatch-sync! [:ev])"
+           (#'ops/dispatch-form :trace-legacy "[:ev]" [])))
+    (is (= "(re-frame-pair.runtime/dispatch-sync-with-stubs! [:ev] [:http])"
+           (#'ops/dispatch-form :trace-legacy "[:ev]" [:http])))
+    (is (= "(re-frame-pair.runtime/tagged-dispatch! [:ev])"
+           (#'ops/dispatch-form :queued "[:ev]" [])))
+    (is (= "(re-frame-pair.runtime/dispatch-with-stubs! [:ev] [:http])"
+           (#'ops/dispatch-form :queued "[:ev]" [:http])))))
+
 (deftest dispatch-trace-legacy-fallback-no-stubs-still-uses-tagged-dispatch-sync
   (testing "--trace without --stub on a legacy re-frame must keep using
             tagged-dispatch-sync! (regression guard for the no-stub path)"
@@ -666,6 +756,27 @@
         (is (= 1 @opened))
         (is (= 2 (count @eval-conns)))
         (is (= 1 (count (distinct @eval-conns))))))))
+
+(deftest await-settle-loop-times-out-while-pending
+  (testing "pending responses past the wall-clock budget return :poll-timeout"
+    (let [calls (atom 0)]
+      (with-redefs [ops/settle-poll-ms        0
+                    ops/settle-poll-budget-ms 0
+                    ops/with-current-nrepl-connection
+                    (fn [f] (f {:conn-id 1}))
+                    ops/cljs-eval-value
+                    (fn
+                      ([_build-id _form]
+                       (throw (ex-info "non-persistent eval path used" {})))
+                      ([_conn _build-id _form]
+                       (swap! calls inc)
+                       {:pending? true}))]
+        (is (= {:ok? false
+                :reason :poll-timeout
+                :handle "handle-1"
+                :budget-ms 0}
+               (#'ops/await-settle-loop :app "handle-1")))
+        (is (= 1 @calls))))))
 
 (deftest watch-op-reuses-single-nrepl-connection
   (testing "watch-op uses one persistent connection for the initial head

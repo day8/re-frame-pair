@@ -1,11 +1,14 @@
 (ns runtime-test
-  (:require [cljs.test :refer [deftest is testing use-fixtures]]
+  (:require [cljs.reader :as reader]
+            [cljs.test :refer [deftest is testing use-fixtures]]
             [fixtures]
             [re-frame-pair.runtime :as rt]
+            [re-frame-pair.runtime.dispatch :as dispatch]
             [re-frame-pair.runtime.epochs :as epochs]
             [re-frame-pair.runtime.native-epoch :as native-epoch]
             [re-frame-pair.runtime.registrar :as registrar]
             [re-frame-pair.runtime.ten-x-adapter :as ten-x]
+            [re-frame-pair.runtime.versions :as versions]
             [re-frame.subs :as rf-subs]))
 
 ;;; Unit tests for the pure fns inside re-frame-pair.runtime.
@@ -276,6 +279,23 @@
                :subscribe/source fixtures/cart-items-cache-source
                :cache-hit/reason :sub/run-unchanged}]
              (:subs/cache-hit e))))))
+
+(deftest read-10x-match-by-id-uses-direct-index
+  (testing "legacy 10x app-db path reads matches-by-id without building
+            the chronological epoch vec"
+    (let [public-shaped (-> fixtures/synthetic-match
+                            (assoc :sub-state-raw (:sub-state fixtures/synthetic-match)
+                                   :timings       (:timing fixtures/synthetic-match))
+                            (dissoc :sub-state :timing))
+          app-db        (atom {:epochs {:match-ids     [999 100]
+                                        :matches-by-id {100 public-shaped}}})]
+      (with-redefs [ten-x/ten-x-public       (fn [] nil)
+                    ten-x/ten-x-app-db-ratom (fn [] app-db)]
+        (let [match (ten-x/read-10x-match-by-id 100)]
+          (is (= (:sub-state fixtures/synthetic-match) (:sub-state match)))
+          (is (= (:timing fixtures/synthetic-match) (:timing match)))
+          (is (= (:match-info fixtures/synthetic-match) (:match-info match))))
+        (is (nil? (ten-x/read-10x-match-by-id 999)))))))
 
 (deftest coerce-epoch-surfaces-debux-code-when-present
   ;; When a fn-traced-wrapped handler runs, debux's send-trace! lands
@@ -712,7 +732,7 @@
 (deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
   ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source
   ;; {:file ... :line ...}} to the query-v's meta at the call site.
-  ;; sub-runs-from-state (now shared by both paths via the match-shape
+  ;; subs-ran-from-10x-state (now shared by both paths via the match-shape
   ;; convergence) should lift that to :subscribe/source on each entry,
   ;; plus a sibling :input-query-sources vec parallel to :input-query-vs.
   (testing "native-trace path: query-v meta surfaces as :subscribe/source;
@@ -945,6 +965,22 @@
                                          {:reason :ten-x-missing})))]
       (is (nil? (rt/epoch-by-id 999))))))
 
+(deftest epoch-by-id-uses-direct-10x-lookup
+  (testing "10x fallback asks for the known id directly instead of
+            rebuilding and scanning the full epoch vec"
+    (with-redefs [native-epoch/find-native-epoch-by-id (fn [_] nil)
+                  ten-x/ten-x-loaded?                 (fn [] true)
+                  ten-x/read-10x-match-by-id          (fn [id]
+                                                        (when (= 100 id)
+                                                          fixtures/synthetic-match))
+                  ten-x/read-10x-epochs               (fn []
+                                                        (throw (ex-info "epoch vec should not be read"
+                                                                        {})))
+                  ten-x/read-10x-all-traces           (fn [] [])
+                  ten-x/ten-x-app-db-ratom            (fn [] nil)]
+      (is (= [:cart/apply-coupon "SPRING25"]
+             (:event (rt/epoch-by-id 100)))))))
+
 (deftest last-epoch-prefers-native-buffer
   (testing "last-epoch returns the native buffer's tail when populated;
             no need to consult 10x at all"
@@ -1155,6 +1191,46 @@
       (is (boolean? (:native-epoch-cb? h)))
       (is (boolean? (:native-trace-cb? h))))))
 
+(deftest health-can-skip-capture-installs
+  (testing "discover --no-capture can avoid console and native trace overhead"
+    (let [installed (atom [])]
+      (with-redefs [rt/install-last-click-capture!  (fn [] (swap! installed conj :last-click))
+                    rt/install-native-epoch-cb!    (fn [] (swap! installed conj :native-epoch))
+                    rt/install-console-capture!    (fn [] (swap! installed conj :console))
+                    rt/install-rf-error-handler!   (fn [] (swap! installed conj :rf-error-handler))
+                    rt/install-native-trace-cb!    (fn [] (swap! installed conj :native-trace))
+                    rt/console-capture-installed?  (fn [] false)
+                    rt/rf-error-handler-installed? (fn [] false)]
+        (let [h (rt/health {:capture? false})]
+          (is (= [:last-click :native-epoch] @installed)
+              "rf-error-handler install is gated on :capture? — skipped for discover-only sessions")
+          (is (false? (:console-capture? h)))
+          (is (false? (:rf-error-handler? h)))
+          (is (false? (:native-trace-cb? h))))))))
+
+(deftest health-installs-rf-error-handler-bridge
+  (testing "with :capture? true (default), health installs the re-frame
+            event-error-handler bridge so browser-side handler throws
+            land in console-tail with :who :handler-error — alongside
+            the console wrapper, the native trace cb, and the click
+            capture listener"
+    (let [installed (atom [])]
+      (with-redefs [rt/install-last-click-capture!  (fn [] (swap! installed conj :last-click))
+                    rt/install-native-epoch-cb!    (fn [] (swap! installed conj :native-epoch))
+                    rt/install-console-capture!    (fn [] (swap! installed conj :console))
+                    rt/install-rf-error-handler!   (fn [] (swap! installed conj :rf-error-handler))
+                    rt/install-native-trace-cb!    (fn [] (swap! installed conj :native-trace))
+                    rt/console-capture-installed?  (fn [] true)
+                    rt/rf-error-handler-installed? (fn [] true)]
+        (let [h (rt/health)]
+          (is (= [:last-click :native-epoch :console :rf-error-handler :native-trace]
+                 @installed)
+              "rf-error-handler install fires AFTER console-capture so the
+               bridge can reach the wrapped js/console.error if it ever
+               needs to forward via the wrapped path")
+          (is (true? (:console-capture? h)))
+          (is (true? (:rf-error-handler? h))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Upstream rf-4mr — dispatch-and-settle bridge for the bash shim.
 ;; -----------------------------------------------------------------------------
@@ -1349,14 +1425,14 @@
                                                 :parent-dispatch-id "CHILD"})]
              :max-size 50})
     (let [calls (atom [])]
-      (with-redefs [rt/dispatch-and-settle-fn
+      (with-redefs [dispatch/dispatch-and-settle-fn
                     (fn []
                       (fn [event opts]
                         (swap! calls conj {:event event
                                            :opts  opts
                                            :who   (runtime-atom-value #'rt/current-who)})
                         (resolving-thenable (clj->js {:ok? true}))))
-                    rt/recent-dispatch-id (fn [] "ROOT")]
+                    dispatch/root-dispatch-id-after (fn [_] "ROOT")]
         (let [r       (rt/dispatch-and-settle!
                        [:test/root]
                        {:timeout-ms 15 :stub-fx-ids [:dispatch]})
@@ -1378,15 +1454,54 @@
           (is (= ["CHILD" "GRANDCHILD"] (:cascaded-epoch-ids settled)))
           (is (= [[:child] [:grandchild]]
                  (mapv :event (:cascaded-epochs settled))))
+          (is (nil? (-> settled :epoch :debux/code))
+              "await-settle strips fn-bearing debux code from the poll response")
+          (is (every? nil? (map :debux/code (:cascaded-epochs settled)))
+              "cascaded epochs are stripped too")
           (is (= :unknown-handle (:reason (rt/await-settle (:handle r))))))))))
+
+(deftest await-settle-result-edn-roundtrips-with-debux-code-in-buffer
+  (testing "fn-traced :debux/code stays out of the awaited poll result"
+    (let [code-payload [{:form 'inc :result inc}]]
+      (reset-runtime-atom! #'rt/native-epoch-buffer
+              {:entries  [(assoc (minimal-native-epoch {:id 10 :event [:root]
+                                                        :dispatch-id "ROOT"})
+                                  :traces [{:id 10 :op-type :event
+                                            :tags {:event [:root]
+                                                   :dispatch-id "ROOT"}}
+                                           {:id 11 :op-type :event/handler
+                                            :tags {:code code-payload}}])
+                          (assoc (minimal-native-epoch {:id 11 :event [:child]
+                                                        :dispatch-id "CHILD"
+                                                        :parent-dispatch-id "ROOT"})
+                                  :traces [{:id 12 :op-type :event
+                                            :tags {:event [:child]
+                                                   :dispatch-id "CHILD"
+                                                   :parent-dispatch-id "ROOT"}}
+                                           {:id 13 :op-type :event/handler
+                                            :tags {:code code-payload}}])]
+               :max-size 50})
+      (with-redefs [dispatch/dispatch-and-settle-fn
+                    (fn []
+                      (fn [_event _opts]
+                        (resolving-thenable (clj->js {:ok? true}))))
+                    dispatch/root-dispatch-id-after (fn [_] "ROOT")]
+        (let [r       (rt/dispatch-and-settle! [:root])
+              settled (rt/await-settle (:handle r))
+              parsed  (reader/read-string (pr-str settled))]
+          (is (true? (:ok? settled)))
+          (is (= settled parsed))
+          (is (nil? (-> settled :epoch :debux/code)))
+          (is (every? nil?
+                      (map :debux/code (:cascaded-epochs settled)))))))))
 
 (deftest dispatch-and-settle-bang-records-promise-rejection
   (testing "rf-4mr Promise rejection settles the handle with :promise-rejected"
-    (with-redefs [rt/dispatch-and-settle-fn
+    (with-redefs [dispatch/dispatch-and-settle-fn
                   (fn []
                     (fn [_event _opts]
                       (rejecting-thenable (js/Error. "settle exploded"))))
-                  rt/recent-dispatch-id (fn [] "ROOT")]
+                  dispatch/root-dispatch-id-after (fn [_] "ROOT")]
       (let [r       (rt/dispatch-and-settle! [:test/root])
             settled (rt/await-settle (:handle r))]
         (is (true? (:ok? r)))
@@ -1400,7 +1515,7 @@
 
 (deftest dispatch-and-settle-bang-catches-synchronous-handler-throw
   (testing "rf-4mr accessor throw returns :handler-threw and logs handler-error"
-    (with-redefs [rt/dispatch-and-settle-fn
+    (with-redefs [dispatch/dispatch-and-settle-fn
                   (fn []
                     (fn [_event _opts]
                       (throw (ex-info "handler boom" {:phase :dispatch-and-settle}))))]
@@ -1531,7 +1646,7 @@
              :ids         #{}
              :max-size    3
              :total-count 0})
-    (let [record! @#'rt/record-claude-dispatch-id!]
+    (let [record! @#'dispatch/record-claude-dispatch-id!]
       (dotimes [i 5] (record! (str "id-" i))))
     (let [{:keys [entries ids max-size total-count]}
           (runtime-atom-value #'rt/claude-dispatch-ids)]
@@ -1543,6 +1658,21 @@
       ;; Lifetime counter survives eviction so app-summary's
       ;; :claude-epoch-count still reflects "skill dispatched N events".
       (is (= 5 total-count)))))
+
+(deftest root-dispatch-id-after-prefers-first-event-after-watermark
+  (testing "sync cascades append child event traces before dispatch-sync
+            returns; the root id is the first new event, not the last"
+    (let [traces (atom [{:id 1 :op-type :event
+                         :tags {:dispatch-id "BEFORE"}}
+                        {:id 2 :op-type :sub/run :tags {}}
+                        {:id 3 :op-type :event
+                         :tags {:dispatch-id "ROOT"}}
+                        {:id 4 :op-type :event
+                         :tags {:dispatch-id "SYNC-CHILD"
+                                :parent-dispatch-id "ROOT"}}])]
+      (with-redefs [dispatch/traces-atom (fn [] traces)]
+        (is (= "SYNC-CHILD" (#'dispatch/recent-dispatch-id)))
+        (is (= "ROOT" (#'dispatch/root-dispatch-id-after 2)))))))
 
 (deftest dispatch-with-bang-fallback-without-rf-ge8
   (testing "runtime-test (re-frame 1.4.5) → :dispatch-with-unavailable"
@@ -1559,7 +1689,7 @@
 (deftest dispatch-with-bang-success-calls-rf-ge8-accessor
   (testing "dispatch-with! flips current-who for the synchronous enqueue"
     (let [calls (atom [])]
-      (with-redefs [rt/dispatch-with-fn
+      (with-redefs [dispatch/dispatch-with-fn
                     (fn []
                       (fn [event overrides]
                         (swap! calls conj {:event        event
@@ -1581,13 +1711,13 @@
 (deftest dispatch-sync-with-bang-success-captures-dispatch-id
   (testing "dispatch-sync-with! records the dispatch id and restores current-who"
     (let [calls (atom [])]
-      (with-redefs [rt/dispatch-sync-with-fn
+      (with-redefs [dispatch/dispatch-sync-with-fn
                     (fn []
                       (fn [event overrides]
                         (swap! calls conj {:event        event
                                            :override-ids (set (keys overrides))
                                            :who          (runtime-atom-value #'rt/current-who)})))
-                    rt/recent-dispatch-id (fn [] "SYNC-ROOT")]
+                    dispatch/root-dispatch-id-after (fn [_] "SYNC-ROOT")]
         (let [r (rt/dispatch-sync-with! [:test/sync]
                                         {:dispatch (fn [_] nil)})]
           (is (true? (:ok? r)))
@@ -1602,7 +1732,7 @@
 
 (deftest dispatch-sync-with-bang-catches-handler-throw
   (testing "dispatch-sync-with! mirrors tagged-dispatch-sync!'s handler error shape"
-    (with-redefs [rt/dispatch-sync-with-fn
+    (with-redefs [dispatch/dispatch-sync-with-fn
                   (fn []
                     (fn [_event _overrides]
                       (throw (ex-info "sync boom" {:phase :dispatch-sync-with}))))]
@@ -2270,7 +2400,7 @@
 
 (deftest find-epoch-by-dispatch-id-walks-newest-first
   (testing "returns the unique match by :dispatch-id from the event-trace tags"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id
           matches    [(minimal-10x-match {:dispatch-id "OLD"})
                       (minimal-10x-match {:dispatch-id "MID"})
                       (minimal-10x-match {:dispatch-id "NEW"})]]
@@ -2282,7 +2412,7 @@
             entry in the buffer wins (we expect uniqueness in production but
             the walk order pins the contract — protects callers from receiving
             a stale match if a duplicate slips in)"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id
           stale      (assoc-in (minimal-10x-match {:dispatch-id "X"})
                                [:match-info 0 :marker] :stale)
           fresh      (assoc-in (minimal-10x-match {:dispatch-id "X"})
@@ -2292,13 +2422,13 @@
       (is (= :fresh (-> hit :match-info first :marker)))))
 
   (testing "no match → nil (caller distinguishes 'not yet landed' from 'no events')"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id
           matches    [(minimal-10x-match {:dispatch-id "A"})
                       (minimal-10x-match {:dispatch-id "B"})]]
       (is (nil? (find-by-id "MISSING" matches)))))
 
   (testing "empty buffer → nil"
-    (let [find-by-id @#'rt/find-epoch-by-dispatch-id]
+    (let [find-by-id @#'dispatch/find-epoch-by-dispatch-id]
       (is (nil? (find-by-id "ANY" []))))))
 
 (deftest epochs-since-nil-id-returns-all-epochs
@@ -2425,7 +2555,7 @@
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (is (= [] (rt/epochs-in-last-ms 50))))))
 
-(deftest sub-runs-from-state-scopes-input-deps-to-match-id-range
+(deftest subs-ran-from-10x-state-scopes-input-deps-to-match-id-range
   ;; Cross-epoch leakage regression. The legacy 10x path joined sub-state
   ;; reactions to :sub/run trace tags via sub-input-deps, which keyed by
   ;; query-v VALUE across the *entire* trace stream. So when the same
@@ -2533,6 +2663,49 @@
       (is (nil? (:src entry))
           "missing :src in :re-com/render tags must not crash and must not
            manufacture a fake :src on the render entry"))))
+
+(deftest read-version-of-probes-re-frame-config-version
+  ;; rf-2026: re-frame.core/version is mirrored from the goog-define
+  ;; re-frame.config/version (modeled on re-com.config/version), so
+  ;; the same global-path read works for both libs. Pre-2026 re-frame
+  ;; (no goog-define exposed) → :unknown stays the answer.
+  (testing "non-empty :re-frame goog-global returns the string verbatim"
+    (with-redefs [versions/read-goog-global-path
+                  (fn [path]
+                    (case (vec path)
+                      ["re_frame" "config" "version"] "1.5.0"
+                      nil))]
+      (let [report (rt/version-report)]
+        (is (= "1.5.0" (-> report :by-dep :re-frame :observed))))))
+
+  (testing "empty-string goog-define (host build did NOT set
+            :closure-defines) → :unknown — matches re-com semantics
+            so a missing override stays diagnosable"
+    (with-redefs [versions/read-goog-global-path
+                  (fn [path]
+                    (case (vec path)
+                      ["re_frame" "config" "version"] ""
+                      nil))]
+      (let [report (rt/version-report)]
+        (is (= :unknown (-> report :by-dep :re-frame :observed))))))
+
+  (testing "nil goog-global path (re-frame predates 2026 release —
+            no goog-define exists) → :unknown — backwards compatible"
+    (with-redefs [versions/read-goog-global-path (fn [_] nil)]
+      (let [report (rt/version-report)]
+        (is (= :unknown (-> report :by-dep :re-frame :observed))))))
+
+  (testing "re-com path still works when re-frame path also probed —
+            no regression on the existing :re-com surface"
+    (with-redefs [versions/read-goog-global-path
+                  (fn [path]
+                    (case (vec path)
+                      ["re_com" "config" "version"]   "2.21.0"
+                      ["re_frame" "config" "version"] "1.5.0"
+                      nil))]
+      (let [report (rt/version-report)]
+        (is (= "2.21.0" (-> report :by-dep :re-com :observed)))
+        (is (= "1.5.0"  (-> report :by-dep :re-frame :observed)))))))
 
 (deftest undo-prefers-public-event-ids-when-ten-x-public-loaded
   ;; rf1-jum: when day8.re-frame-10x.public is loaded, prefer its

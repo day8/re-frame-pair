@@ -233,6 +233,35 @@
   (or (:id match)
       (-> match :match-info first :id)))
 
+(defn read-10x-match-by-id
+  "Single match from 10x's epoch buffer by id. Throws ex-info with
+   `:reason :ten-x-missing` if 10x isn't loaded.
+
+   Uses the public `epoch-by-id` surface when present; otherwise reads
+   the legacy `[:epochs :matches-by-id]` map directly. This avoids
+   rebuilding the full chronological match vector for callers that
+   already know the epoch id."
+  [id]
+  (if-let [pub (ten-x-public)]
+    (normalize-10x-match ((aget pub "epoch_by_id") id))
+    (let [a (ten-x-app-db-ratom)]
+      (when-not a
+        (throw (ex-info "re-frame-10x epoch buffer unreachable"
+                        {:reason :ten-x-missing
+                         :tried-known-paths inlined-rf-known-version-paths
+                         :hint (str "10x is not loaded, or its inlined "
+                                    "re-frame namespace doesn't carry the "
+                                    "expected `re_frame.db.app_db` ratom. "
+                                    "ten-x-inlined-rf already tries every "
+                                    "child key under inlined_deps.re_frame "
+                                    "as a fallback — if you're hitting this, "
+                                    "10x itself probably isn't preloaded. "
+                                    "Note: as of rf1-jum, 10x ships a "
+                                    "`day8.re-frame-10x.public` ns that "
+                                    "is preferred over this path.")})))
+      (some-> (get-in @a [:epochs :matches-by-id id])
+              normalize-10x-match))))
+
 (defn find-trace
   "First :match-info entry whose :op-type matches. Public — used by
    the dispatch + epoch submodules."
@@ -334,7 +363,7 @@
                      m)))
                {})))
 
-(defn- sub-runs-from-state
+(defn- subs-ran-from-10x-state
   "§4.3a :subs/ran. 10x's `:match-info` doesn't carry `:sub/run` traces
    directly (`metam/parse-traces` strips them when building partitions);
    instead the post-epoch reaction state at
@@ -387,7 +416,7 @@
    :subscribe/source (some-> q meta :re-frame/source)
    :cache-hit/reason reason})
 
-(defn- unchanged-sub-runs-from-state
+(defn- unchanged-subs-ran-from-10x-state
   [match]
   (->> (-> match :sub-state :reaction-state)
        (filter (fn [[_ sub]]
@@ -407,7 +436,7 @@
          distinct
          (mapv #(sub-cache-hit-entry % :sub/create-cached)))))
 
-(defn- sub-cache-hits-from-state
+(defn- subs-cache-hit-from-10x-state
   "§4.3a :subs/cache-hit. Two signals land here:
 
    * `:sub/run` reactions whose final value was `=` to their prior value
@@ -419,10 +448,10 @@
    `:cache-hit/reason` keeps those cases distinguishable for consumers
    that need the sharper diagnostic."
   [match all-traces]
-  (vec (concat (unchanged-sub-runs-from-state match)
+  (vec (concat (unchanged-subs-ran-from-10x-state match)
                (cached-sub-creates-from-traces match all-traces))))
 
-(defn- renders-from-traces
+(defn- renders-from-10x-state
   "§4.3a :renders. Reagent records each component render as a
    `:op-type :render` trace with `:tags :component-name` (munged form,
    e.g. `re_com.box.h_box`). These are in the full trace stream, not
@@ -597,9 +626,9 @@
         ;; `registrar/describe :event <id>`.
         :interceptor-chain (mapv :id (:interceptors tags))
         :app-db/diff       (diff-app-db event-trace)
-        :subs/ran          (when render-src (sub-runs-from-state render-src all-traces))
-        :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src all-traces))
-        :renders           (when render-src (renders-from-traces render-src all-traces))
+        :subs/ran          (when render-src (subs-ran-from-10x-state render-src all-traces))
+        :subs/cache-hit    (when render-src (subs-cache-hit-from-10x-state render-src all-traces))
+        :renders           (when render-src (renders-from-10x-state render-src all-traces))
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
         ;; Read from the inner :event/handler trace, not the outer

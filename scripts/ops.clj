@@ -236,6 +236,11 @@
    "ten_x_adapter.cljs"
    ;; native-epoch depends on ten-x-adapter (aget-path, coerce-epoch).
    "native_epoch.cljs"
+   ;; dispatch depends on console (current-who, append-console-entry!),
+   ;; native-epoch (native-epochs/-traces, coerce-native-epoch), and
+   ;; ten-x-adapter (aget-path, ten-x-loaded?, read-10x-epochs,
+   ;; find-trace, coerce-epoch, match-id). Goes after all three.
+   "dispatch.cljs"
    ;; epochs depends on native-epoch + ten-x-adapter (epoch ladder).
    "epochs.cljs"
    ;; dom depends on epochs (latest-epoch-id for click-fire).
@@ -278,6 +283,28 @@
 ;; nREPL conveniences
 ;; ---------------------------------------------------------------------------
 
+(def ^:private runtime-ns "re-frame-pair.runtime")
+
+(defn- runtime-symbol
+  "Build a `re-frame-pair.runtime/<sym>` symbol string for direct var eval."
+  [sym]
+  (str runtime-ns "/" (name sym)))
+
+(defn- runtime-form
+  "Build a `(re-frame-pair.runtime/<sym> <args>...)` form string."
+  [sym & args]
+  (str "(" (runtime-symbol sym)
+       (when (seq args)
+         (str " " (str/join " " args)))
+       ")"))
+
+(defn- cljs-eval-form
+  "Build the JVM-side shadow-cljs cljs-eval wrapper for `form-str`."
+  [build-id form-str]
+  (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
+          (pr-str build-id)
+          (pr-str form-str)))
+
 (defn- jvm-eval
   "Evaluate a Clojure (JVM-side) form over nREPL and return the combined
    response map: {:value :out :err :ex :status}."
@@ -292,15 +319,9 @@
   "Evaluate a ClojureScript form in the connected browser runtime via
    shadow-cljs's `cljs-eval` API. Returns the raw nREPL response."
   ([build-id form-str]
-   (let [wrapped (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
-                         (pr-str build-id)
-                         (pr-str form-str))]
-     (jvm-eval wrapped)))
+   (jvm-eval (cljs-eval-form build-id form-str)))
   ([conn build-id form-str]
-   (let [wrapped (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
-                         (pr-str build-id)
-                         (pr-str form-str))]
-     (jvm-eval conn wrapped))))
+   (jvm-eval conn (cljs-eval-form build-id form-str))))
 
 (defn- safe-edn [s]
   (try (edn/read-string s) (catch Exception _ s)))
@@ -377,14 +398,14 @@
    runtime and we can skip re-shipping scripts/runtime.cljs.
 
    Returns a boolean. Swallows evaluation errors (treating them as
-   'not injected') because the eval *will* throw with an undefined-ns
+  'not injected') because the eval *will* throw with an undefined-ns
    error until the first inject.
 
    Spec §3.4 — the sentinel is why re-injection only fires on full
    page refresh, not every connect."
   [build-id]
   (try
-    (let [v (cljs-eval-value build-id "re-frame-pair.runtime/session-id")]
+    (let [v (cljs-eval-value build-id (runtime-symbol 'session-id))]
       (and (string? v) (seq v)))
     (catch Exception _ false)))
 
@@ -569,38 +590,43 @@
    chunk index, error, and a hint.
 
    When a re-ship happens, follows up with one `health` call to install
-   the native epoch / trace callbacks, the console-capture wrapper, and
-   the last-click capture listener. Without this follow-up, the runtime
-   ns lands but its capture cbs are never invoked — every post-refresh
-   op that reads `native-epochs` / `native-traces` returns empty, and
-   `console-tail` stops receiving entries. The four installs are guarded
-   by idempotency atoms / window markers, so calling health a second
-   time (e.g. through `inject-runtime!` for `discover`) is a no-op for
-   side effects."
-  [build-id]
-  (if (runtime-already-injected? build-id)
-    false
-    (let [results (chunked-inject! build-id (runtime-cljs-paths))
-          last-result (last results)]
-      (if (and last-result (:reason (second last-result)))
-        (let [[idx fail] last-result]
-          (die :inject-failed
-               :stage         (:stage fail)
-               :chunk-index   idx
-               :chunk-count   (:chunk-count fail)
-               :ex            (:ex fail)
-               :err           (:err fail)
-               :hint          (:hint fail)))
-        (do
-          (cljs-eval-value build-id "(re-frame-pair.runtime/health)")
-          true)))))
+   the runtime captures requested by `opts`. Without this follow-up, the
+   runtime ns lands but its callbacks are never invoked. Installs are
+   guarded by idempotency atoms / window markers, so calling health a
+   second time (e.g. through `inject-runtime!` for `discover`) is a no-op
+   for side effects."
+  ([build-id] (ensure-injected! build-id {:capture? true}))
+  ([build-id {:keys [capture?] :or {capture? true}}]
+   (if (runtime-already-injected? build-id)
+     false
+     (let [results (chunked-inject! build-id (runtime-cljs-paths))
+           last-result (last results)]
+       (if (and last-result (:reason (second last-result)))
+         (let [[idx fail] last-result]
+           (die :inject-failed
+                :stage         (:stage fail)
+                :chunk-index   idx
+                :chunk-count   (:chunk-count fail)
+                :ex            (:ex fail)
+                :err           (:err fail)
+                :hint          (:hint fail)))
+         (do
+           (cljs-eval-value build-id
+                            (if capture?
+                              (runtime-form 'health)
+                              (runtime-form 'health (pr-str {:capture? false}))))
+           true))))))
 
 (defn- inject-runtime!
   "Ensure scripts/runtime.cljs is loaded and return the health map.
    Used by `discover` for its full health report."
-  [build-id]
-  (ensure-injected! build-id)
-  (cljs-eval-value build-id "(re-frame-pair.runtime/health)"))
+  ([build-id] (inject-runtime! build-id {:capture? true}))
+  ([build-id {:keys [capture?] :or {capture? true}}]
+   (ensure-injected! build-id {:capture? capture?})
+   (cljs-eval-value build-id
+                    (if capture?
+                      (runtime-form 'health)
+                      (runtime-form 'health (pr-str {:capture? false}))))))
 
 (defn- version-failure
   "If the health report's version block names a below-floor dep,
@@ -626,12 +652,13 @@
 (defn- discover [args]
   (ensure-port!)
   (let [build-id        (build-id-from-args args)
+        capture?        (not (some #{"--no-capture"} args))
         ;; If the operator named a build (--build= or env), we don't
         ;; warn about multi-build — they made the choice.
         explicit-build? (or (some #(str/starts-with? % "--build=") args)
                             (boolean (System/getenv "SHADOW_CLJS_BUILD_ID")))]
     (try
-      (let [health      (inject-runtime! build-id)
+      (let [health      (inject-runtime! build-id {:capture? capture?})
             version-err (version-failure health)
             ;; Multi-build awareness: probe active builds on the
             ;; chosen port. Failure is non-fatal — `discover` still
@@ -665,6 +692,7 @@
           :else
           (emit (cond-> health
                   true                          (assoc :ok? true :build-id build-id)
+                  (not capture?)                (assoc :capture-skipped? true)
                   (not (:re-com-debug? health)) (assoc :warning :re-com-debug-disabled
                                                        :note    "DOM ↔ source ops will degrade; otherwise functional.")
                   ;; Multi-build wins as the structured :warning when
@@ -737,7 +765,7 @@
                             true)))]
       (when shipped?
         (try
-          (emit (assoc (cljs-eval-value build-id "(re-frame-pair.runtime/health)")
+          (emit (assoc (cljs-eval-value build-id (runtime-form 'health))
                        :build-id build-id
                        :forced? true
                        :chunk-count (count results)
@@ -877,8 +905,7 @@
           (let [r (cljs-eval-value
                     conn
                     build-id
-                    (format "(re-frame-pair.runtime/await-settle %s)"
-                            (pr-str handle)))]
+                    (runtime-form 'await-settle (pr-str handle)))]
             (cond
               (and (map? r) (:settled? r)) r
               (>= (System/currentTimeMillis) deadline)
@@ -887,6 +914,18 @@
               :else
               (do (Thread/sleep settle-poll-ms)
                   (recur)))))))))
+
+(defn- dispatch-form
+  "Build the CLJS runtime dispatch form for a dispatch mode, selecting
+   the stub-aware runtime function when stub fx ids are present."
+  [mode event-str stub-fx-ids]
+  (let [[plain stubbed] (case mode
+                          :sync         ["tagged-dispatch-sync!" "dispatch-sync-with-stubs!"]
+                          :trace-legacy ["tagged-dispatch-sync!" "dispatch-sync-with-stubs!"]
+                          :queued       ["tagged-dispatch!" "dispatch-with-stubs!"])]
+    (if (seq stub-fx-ids)
+      (runtime-form stubbed event-str (pr-str stub-fx-ids))
+      (runtime-form plain event-str))))
 
 (defn- dispatch-op [args]
   (ensure-port!)
@@ -920,8 +959,7 @@
                             "{}")
                 start (cljs-eval-value
                         build-id
-                        (format "(re-frame-pair.runtime/dispatch-and-settle! %s %s)"
-                                event-str opts-form))]
+                        (runtime-form 'dispatch-and-settle! event-str opts-form))]
             (cond
               (and (map? start) (:ok? start) (:handle start))
               (let [resolved (await-settle-loop build-id (:handle start))]
@@ -933,18 +971,14 @@
               ;; --stub on legacy re-frame: route through dispatch-sync-with-stubs! so the override map plants on event meta — otherwise the flag is silently dropped and the real fx fires.
               (let [sync-result (cljs-eval-value
                                   build-id
-                                  (if (seq stub-fx-ids)
-                                    (format "(re-frame-pair.runtime/dispatch-sync-with-stubs! %s %s)"
-                                            event-str (pr-str stub-fx-ids))
-                                    (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)"
-                                            event-str)))]
+                                  (dispatch-form :trace-legacy event-str stub-fx-ids))]
                 (if (and (map? sync-result) (:ok? sync-result))
                   (do
                     (Thread/sleep legacy-trace-collect-wait-ms)
                     (let [collected (cljs-eval-value
                                       build-id
-                                      (format "(re-frame-pair.runtime/collect-after-dispatch %s)"
-                                              (pr-str (:dispatch-id sync-result))))]
+                                      (runtime-form 'collect-after-dispatch
+                                                    (pr-str (:dispatch-id sync-result))))]
                       (emit (tag-reinj (merge {:mode :trace :legacy? true}
                                               sync-result collected)))))
                   (emit (tag-reinj (merge {:mode :trace :epoch nil :legacy? true}
@@ -959,21 +993,13 @@
           sync?
           (emit (tag-reinj (merge {:mode :sync}
                                   (cljs-eval-value build-id
-                                    (if (seq stub-fx-ids)
-                                      (format "(re-frame-pair.runtime/dispatch-sync-with-stubs! %s %s)"
-                                              event-str (pr-str stub-fx-ids))
-                                      (format "(re-frame-pair.runtime/tagged-dispatch-sync! %s)"
-                                              event-str))))))
+                                    (dispatch-form :sync event-str stub-fx-ids)))))
 
           ;; queued: rf/dispatch. With --stub, dispatch-with-stubs!.
           :else
           (emit (tag-reinj (merge {:mode :queued}
                                   (cljs-eval-value build-id
-                                    (if (seq stub-fx-ids)
-                                      (format "(re-frame-pair.runtime/dispatch-with-stubs! %s %s)"
-                                              event-str (pr-str stub-fx-ids))
-                                      (format "(re-frame-pair.runtime/tagged-dispatch! %s)"
-                                              event-str)))))))
+                                    (dispatch-form :queued event-str stub-fx-ids))))))
         (catch Exception e
           (emit (tag-reinj {:ok? false :reason :dispatch-failed :message (.getMessage e)
                             :ex-data (ex-data e)})))))))
@@ -990,7 +1016,7 @@
         reinjected? (ensure-injected! build-id)]
     (try
       (let [epochs (cljs-eval-value build-id
-                                    (format "(re-frame-pair.runtime/epochs-in-last-ms %d)" ms))]
+                                    (runtime-form 'epochs-in-last-ms (str ms)))]
         (emit (cond-> {:ok? true :window-ms ms :count (count epochs) :epochs epochs}
                 reinjected? (assoc :reinjected? true))))
       (catch Exception e
@@ -1097,7 +1123,7 @@
         (with-current-nrepl-connection
           (fn [conn]
             (let [start         (System/currentTimeMillis)
-                  last-id       (atom (cljs-eval-value conn build-id "(re-frame-pair.runtime/latest-epoch-id)"))
+                  last-id       (atom (cljs-eval-value conn build-id (runtime-form 'latest-epoch-id)))
                   emitted       (atom 0)
                   last-emitted  (atom ::none) ;; nil is a real :event value, so use a sentinel
                   last-hit      (atom (System/currentTimeMillis))
@@ -1111,19 +1137,22 @@
                                   (>= elapsed hard-ms)                           [:done :hard-cap]
                                   (and stream? (>= idle idle-ms))                [:done :idle]
                                   :else nil)))
-                  fetch-form (fn [since-id]
-                               ;; One eval per poll: fetch new-epochs-since map,
-                               ;; filter matches in-runtime, return both pieces
-                               ;; so the CLI can see aged-out without a second
-                               ;; round-trip.
-                               (format
-                                "(let [r (re-frame-pair.runtime/epochs-since %s)
-                                   matches (filterv #(re-frame-pair.runtime/epoch-matches? %s %%) (:epochs r))]
-                               {:matches matches
-                                :id-aged-out? (:id-aged-out? r)
-                                :head-id (re-frame-pair.runtime/latest-epoch-id)})"
-                                (pr-str since-id)
-                                (pr-str pred)))
+                  pred-str     (pr-str pred)
+                  fetch-form   (fn [since-id]
+                                 ;; One eval per poll: fetch new-epochs-since
+                                 ;; map, filter matches in-runtime, return both
+                                 ;; pieces so aged-out status does not need a
+                                 ;; second round-trip.
+                                 (format
+                                  "(let [r %s
+                                     matches (filterv #(%s %s %%) (:epochs r))]
+                                 {:matches matches
+                                  :id-aged-out? (:id-aged-out? r)
+                                  :head-id %s})"
+                                  (runtime-form 'epochs-since (pr-str since-id))
+                                  (runtime-symbol 'epoch-matches?)
+                                  pred-str
+                                  (runtime-form 'latest-epoch-id)))
                   aged-warned? (atom false)]
               (loop []
                 (Thread/sleep poll-ms)
@@ -1255,9 +1284,7 @@
    failure (build not running, nREPL down, parse error)."
   [port build-id]
   (try
-    (let [form (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
-                       (pr-str build-id)
-                       (pr-str "re-frame-pair.runtime/session-id"))
+    (let [form (cljs-eval-form build-id (runtime-symbol 'session-id))
           resp (combine-responses (nrepl-eval-raw port form))
           v    (some-> resp :value safe-edn)
           first-result (some-> v :results first safe-edn)]
@@ -1301,8 +1328,7 @@
         ;; Accept :event or event for both args.
         kw          (fn [s]
                       (str ":" (if (str/starts-with? s ":") (subs s 1) s)))
-        form        (format "(re-frame-pair.runtime/handler-source %s %s)"
-                            (kw kind) (kw id))]
+        form        (runtime-form 'handler-source (kw kind) (kw id))]
     (try
       (let [result (cljs-eval-value build-id form)]
         (emit (cond-> result
@@ -1320,7 +1346,7 @@
   (let [build-id    (build-id-from-args args)
         reinjected? (ensure-injected! build-id)]
     (try
-      (let [result (cljs-eval-value build-id "(re-frame-pair.runtime/app-summary)")]
+      (let [result (cljs-eval-value build-id (runtime-form 'app-summary))]
         (emit (cond-> result
                 reinjected? (assoc :reinjected? true))))
       (catch Exception e
@@ -1341,10 +1367,8 @@
         who-kw      (when who
                       (str ":" (if (str/starts-with? who ":") (subs who 1) who)))
         form        (if who-kw
-                      (format "(re-frame-pair.runtime/console-tail-since %s %s)"
-                              since-id who-kw)
-                      (format "(re-frame-pair.runtime/console-tail-since %s)"
-                              since-id))]
+                      (runtime-form 'console-tail-since since-id who-kw)
+                      (runtime-form 'console-tail-since since-id))]
     (try
       (let [result (cljs-eval-value build-id form)]
         (emit (cond-> result

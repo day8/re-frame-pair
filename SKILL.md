@@ -132,6 +132,16 @@ flag surface without leaving the shell.
 - `:subs/ran` and `:subs/cache-hit` entries each carry `:subscribe/source` — `{:file :line}` of the *outer* `(rf.macros/subscribe ...)` call site that established the reaction (the view that asked for it; rf-cna). `nil` for bare-fn subscribes or pre-rf-cna re-frame. Useful for "which view subscribed to X?" — see *"Which view subscribed to X?"* below.
 - `:subs/ran` entries each carry `:input-query-sources` — vec parallel to `:input-query-vs` carrying source maps for each input dependency (rf-cna). Each slot reflects where the parent sub handler called `subscribe` to wire that input; `nil` slots for bare-fn inputs.
 
+**Trace-stream schema.** `re-frame.core/tag-schema` (re-frame 2026 release) describes the `:tags` map for every op-type re-frame emits — `:event`, `:event/handler`, `:event/do-fx`, `:sub/create`, `:sub/run`, `:sub/dispose`, `:render`, `:raf`, `:raf-end`, `:reagent/quiescent`, `:sync`. Each entry lists `:required` keys, `:optional` keys, and a one-line `:doc`. Doc-only by default; downstream tooling (re-frame-pair, custom 10x panels) reads it as a load-bearing contract for the trace stream. Adding a key is additive; renaming or removing a key is breaking and must go through a deprecation cycle.
+
+When investigating a trace-shape mismatch — e.g. a `:tags` field showing up as `nil` on coerced epochs even though the upstream feature is loaded — the user can opt into runtime validation:
+
+```
+scripts/eval-cljs.sh '(re-frame.core/set-validate-trace! true)'
+```
+
+With validation on, `finish-trace` checks `:tags` against `tag-schema` and warns via `console :warn` on missing required keys or unknown keys. Off by default; intended for dev / CI debugging. `re-frame.core/validate-trace?` returns the current state. Both surface live nil on re-frame predating the 2026 release — flag the version-floor and proceed without runtime validation.
+
 ### Console / errors
 
 A ring buffer of `js/console.{log,warn,error,info,debug}` calls captured by the runtime, tagged with `:who` so you can ask "what did MY dispatch log, vs the user's app, vs which handler threw?". Installed by `health` (idempotent, max 500 entries).
@@ -406,6 +416,49 @@ The tap> payload carries `:debux/dbg true` so a custom tap fn can branch on it.
 - **Hot-swap still required.** `dbg` instruments at macro-expansion time, so the form has to be re-eval'd through the REPL with the `dbg` wrap in place. You can't retroactively `dbg` a form that's already compiled.
 - **`:locals` is caller-supplied.** `dbg` can't introspect `&env` portably across CLJ/CLJS the way `fn-traced` does at function-arg time. If you want locals captured, pass them explicitly: `(dbg form {:locals [['db db] ['x x]]})`.
 
+### Tracing options — reducing noise
+
+Both recipes above accept a family of options on `fn-traced` / `defn-traced` / `dbg` / `dbgn` for filtering what lands on `:debux/code`. Shared across the macros (some have alias short forms): pass as a map after the body for `dbg`, as a metadata-style map directly inside `fn-traced` per debux's docs.
+
+| Option | Short | Purpose | When to reach for it |
+|---|---|---|---|
+| `:once` | `:o` | Suppress consecutive emissions whose `(form, result)` pair matches the previous one. Per call-site identity (gensym'd at expansion); state survives across handler invocations until the result actually changes. | High-frequency dispatches where the user only wants to see what's *new*. |
+| `:final` | `:f` | Emit only the outermost (indent-level 0) `:code` entry per top-level wrapping form. Every nested per-form entry is suppressed. | "Show me what each handler-body expression evaluated to as a whole" — skip the per-step zipper trace. |
+| `:msg` | `:m` | Attach a developer-supplied label to each emitted `:code` entry. Per-call dynamic — the value is evaluated at trace time, not macroexpansion. | Distinguish output from many parallel call sites. |
+| `:verbose` | `:show-all` | Wrap leaf literals (numbers, strings, booleans, keywords, chars, nil) the default zipper walker skips. `:skip-form-itself-type` (`recur` / `throw` / `var` / `quote` / `catch` / `finally`) STAYS honoured because instrumenting them corrupts evaluation semantics. | When the handler's logic hinges on a literal that the default elision skips. Resolves the `:skip-classification` open question from `docs/v0.6-roadmap.md`. |
+| `:if` | — | Guard predicate. Emit only when the predicate is truthy at trace time. | Conditional tracing — e.g. only emit when an argument matches a shape the user is debugging. Composes with all the others. |
+
+Examples:
+
+```
+;; dbg with :once and :msg — only emit when the result changes,
+;; tagged with a label so multi-site output stays distinguishable.
+scripts/eval-cljs.sh '(day8.re-frame.tracing/dbg
+                         (normalize-coupon code)
+                         {:once true :msg "in cart-handler"})'
+
+;; fn-traced with :final — only the outer per-expression results,
+;; not the inner zipper walk.
+scripts/eval-cljs.sh '(re-frame.core/reg-event-db
+                         :cart/apply-coupon
+                         (day8.re-frame.tracing/fn-traced [db [_ code]]
+                           {:final true}
+                           (-> db
+                               (assoc-in [:cart :coupon] code)
+                               (assoc-in [:cart :coupon-status] :applied))))'
+
+;; dbg with :if — only emit when the input is non-empty.
+scripts/eval-cljs.sh '(day8.re-frame.tracing/dbg
+                         (normalize-coupon code)
+                         {:if (seq code)})'
+```
+
+**Resetting `:once` dedup state.** `:once` keeps a per-call-site memory of the last `(form, result)` pair so identical re-runs are silenced. When iterating in a hot REPL session it can hide changes you actually want to see — the public reset is `(day8.re-frame.tracing/reset-once-state!)`. No args; clears every `:once` site at once. Re-introduced as a public re-export in re-frame-debux's rfd-0mj — older builds expose it under `day8.re-frame.debux.common.util/-reset-once-state!`.
+
+```
+scripts/eval-cljs.sh '(day8.re-frame.tracing/reset-once-state!)'
+```
+
 ### "Explain this dispatch"
 
 Run `trace/dispatch-and-settle` (or read a recent epoch), then narrate the six dominoes:
@@ -487,9 +540,27 @@ Call `dom/source-at` on the element (or on `:last-clicked`). Return `{:file :lin
 
 Call `handler/source` for the handler-id (e.g. `scripts/handler-source.sh :event :cart/apply-coupon`). Returns `{:ok? true :file ... :line ... :source :fn-meta}` when the handler's call site is reachable.
 
-Re-frame's reg-* macros (rf-ysy, commit `15dfc25`) capture `*file*` + `(:line (meta &form))` at expansion time and attach `{:file :line}` as metadata on the registered value via `with-meta` — interceptor chains for `:event`, fns for `:sub` / `:fx`. `(meta (registrar/get-handler kind id))` returns the location directly.
+`re-frame.macros/reg-event-db` / `reg-event-fx` / `reg-event-ctx` / `reg-sub` / `reg-fx` capture `*file*` + `(:line (meta &form))` at expansion time and attach `{:file :line}` as metadata on the registered value via `with-meta` — interceptor chains for `:event`, fns for `:sub` / `:fx`. `(meta (registrar/get-handler kind id))` returns the location directly.
 
-If the response is `:no-source-meta`, the user is on a re-frame build predating rf-ysy, or the handler was registered via the programmatic `reg-*-fn` variants (`reg-event-db-fn`, etc.) which don't capture `&form`. Say so and fall back to grepping `'(reg-event-'` for the id — don't invent a path.
+**Host-side opt-in.** `:no-source-meta` responses come from one of three causes; the first is the most common and is fixable:
+
+1. **Host registers via `re-frame.core` (function API, no source-meta capture).** Tell the user to alias-swap their `:require` in the affected ns:
+
+   ```clojure
+   ;; before — function API, no :file :line on registrations
+   (:require [re-frame.core   :as rf])
+
+   ;; after — same call shape, source-meta captured at expansion
+   (:require [re-frame.macros :as rf])
+   ```
+
+   Same call shape (`(rf/reg-event-db ...)` etc.). `re-frame.macros` is a sibling ns of macro mirrors, alias-only migration. CLJS `:advanced` strips the meta-attach branch via DCE (`goog.DEBUG=false`), so production builds carry zero allocation overhead. **Caveat:** macros can't be used in value position — for `(apply reg-sub ...)`, `(map reg-event-db ...)`, `(partial reg-fx ...)`, keep `re-frame.core`. (See `docs/handler-source-meta.md` for the design rationale and history of why the macros live in their own ns.)
+
+2. **re-frame predates the source-meta macros** (older 2026 release / pre-rf-ysy / pre-rf-hsl / pre-rf-cna). Nothing fixable host-side; flag the version-floor and move on.
+
+3. **Programmatic registration via `reg-*-fn`** (`reg-event-db-fn`, etc.) which doesn't capture `&form` — those are the value-position escape hatch and don't carry source by design.
+
+In all three cases, fall back to grepping `'(reg-event-'` for the id — don't invent a path.
 
 ### "Why did this event fire?"
 

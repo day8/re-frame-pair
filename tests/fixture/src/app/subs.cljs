@@ -1,5 +1,5 @@
 (ns app.subs
-  (:require [re-frame.core :as rf]))
+  (:require [re-frame.macros :as rf]))
 
 ;; -----------------------------------------------------------------------------
 ;; Layer 2 — direct reads from app-db.

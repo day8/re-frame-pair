@@ -41,30 +41,6 @@
     ((aget pub "epoch_count"))
     (count (ten-x/read-10x-epochs))))
 
-(defn epoch-by-id
-  "Return the coerced epoch with matching id, or nil. Prefers the
-   native-epoch-buffer (upstream rf-ybv); falls back to
-   `read-10x-epochs` when 10x is loaded and the epoch has aged out
-   of the native buffer (or the native cb has not been installed
-   yet). Returns nil — never throws — when neither source can
-   answer."
-  [id]
-  (or (when-let [raw (native-epoch/find-native-epoch-by-id id)]
-        (native-epoch/coerce-native-epoch raw))
-      (when (ten-x/ten-x-loaded?)
-        (->> (ten-x/read-10x-epochs)
-             (some #(when (= id (ten-x/match-id %)) %))
-             ten-x/coerce-epoch))))
-
-(defn last-epoch
-  "Most recently appended epoch, coerced. Prefers the native-epoch-
-   buffer; falls back to 10x when it is loaded. Nil if neither
-   source has an epoch (and never throws on missing 10x)."
-  []
-  (or (some-> (native-epoch/native-epochs) last native-epoch/coerce-native-epoch)
-      (when (ten-x/ten-x-loaded?)
-        (some-> (ten-x/read-10x-epochs) last ten-x/coerce-epoch))))
-
 (defn- ten-x-fallback-eligible?
   "True when callers should attempt the legacy 10x epoch path —
    i.e. 10x is actually reachable. Gating purely on `ten-x-loaded?`
@@ -74,6 +50,37 @@
    correct answer is 'nothing here'."
   []
   (ten-x/ten-x-loaded?))
+
+(defn- with-epoch-fallback
+  "Run the native epoch lookup first, then use the 10x fallback only
+   when 10x is reachable. Both functions must return already-coerced
+   epoch records or nil."
+  [native-fn ten-x-fn]
+  (or (native-fn)
+      (when (ten-x-fallback-eligible?)
+        (ten-x-fn))))
+
+(defn epoch-by-id
+  "Return the coerced epoch with matching id, or nil. Prefers the
+   native-epoch-buffer (upstream rf-ybv); falls back to
+   `read-10x-match-by-id` when 10x is loaded and the epoch has aged
+   out of the native buffer (or the native cb has not been installed
+   yet). Returns nil — never throws — when neither source can answer."
+  [id]
+  (with-epoch-fallback
+    #(some-> (native-epoch/find-native-epoch-by-id id)
+             native-epoch/coerce-native-epoch)
+    #(some-> (ten-x/read-10x-match-by-id id)
+             ten-x/coerce-epoch)))
+
+(defn last-epoch
+  "Most recently appended epoch, coerced. Prefers the native-epoch-
+   buffer; falls back to 10x when it is loaded. Nil if neither
+  source has an epoch (and never throws on missing 10x)."
+  []
+  (with-epoch-fallback
+    #(some-> (native-epoch/native-epochs) last native-epoch/coerce-native-epoch)
+    #(some-> (ten-x/read-10x-epochs) last ten-x/coerce-epoch)))
 
 (defn- native-epoch-context
   [raw-epochs]

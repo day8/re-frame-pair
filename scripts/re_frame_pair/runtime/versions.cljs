@@ -11,36 +11,46 @@
 
 (def version-floors
   "Floor versions from spec §3.7. `nil` means 'no enforcement yet' —
-   the check is plumbed through but does not reject. Only re-com
-   currently exposes a runtime-readable version (via `re-com.config/version`,
-   a `goog-define`); re-frame, re-frame-10x, and shadow-cljs do not.
-   Floors stay nil for those until the libs add a public version var."
-  {:re-frame       nil     ; no in-browser version var; spec placeholder "1.4"
-   :re-frame-10x   nil     ; no in-browser version var; spec placeholder "1.9"
+   the check is plumbed through but does not reject. re-com and
+   re-frame both expose a runtime-readable version
+   (`re-com.config/version` and `re-frame.config/version` — both
+   goog-defines, set by the host build's `:closure-defines`); 10x and
+   shadow-cljs do not. Floors stay nil for those until the libs add
+   a public version var."
+  {:re-frame       nil     ; readable via re-frame.config/version (2026 release); spec placeholder "1.4"
+   :re-frame-10x   nil     ; no release-version var in-browser (only api-version int via public/version); spec placeholder "1.9"
    :re-com         nil     ; readable via re-com.config/version; spec placeholder "2.20"
    :shadow-cljs    nil})   ; not a CLJS lib at runtime; spec placeholder "2.28"
 
+(defn- read-goog-global-path
+  "Walk a sequence of keys under `goog.global` and return the leaf value,
+   or nil if any segment is missing or throws. Pulled out as its own
+   defn- so tests can redef the global probe without touching js/goog."
+  [path]
+  (try
+    (let [g (some-> js/goog .-global)]
+      (reduce (fn [acc k] (when acc (aget acc k)))
+              g path))
+    (catch :default _ nil)))
+
 (defn- read-version-of
   "Best-effort version lookup per lib. Returns a string like '2.20.0',
-   or :unknown if we can't find it. Only re-com currently exposes a
-   readable runtime version (`re-com.config/version`, a `goog-define`
-   with empty default — populated only when the host build sets it via
-   shadow-cljs `:closure-defines`)."
+   or :unknown if we can't find it. re-com (`re-com.config/version`)
+   and re-frame (`re-frame.config/version`, 2026 release) both expose
+   a `goog-define` populated when the host build sets it via
+   `:closure-defines`. 10x exposes only an API version int (via
+   `day8.re-frame-10x.public/version`'s {:api <n>}), not a release
+   string — left as :unknown until 10x adds one."
   [dep]
-  (let [try-global (fn [& path]
-                     (try
-                       (let [g (some-> js/goog .-global)]
-                         (reduce (fn [acc k] (when acc (aget acc k)))
-                                 g path))
-                       (catch :default _ nil)))]
-    (or (case dep
-          :re-com       (let [v (try-global "re_com" "config" "version")]
-                          (when (and (string? v) (seq v)) v))
-          :re-frame     nil      ; no public version var in-browser
-          :re-frame-10x nil      ; no public version var in-browser
-          :shadow-cljs  nil      ; not a CLJS runtime lib
-          nil)
-        :unknown)))
+  (or (case dep
+        :re-com       (let [v (read-goog-global-path ["re_com" "config" "version"])]
+                        (when (and (string? v) (seq v)) v))
+        :re-frame     (let [v (read-goog-global-path ["re_frame" "config" "version"])]
+                        (when (and (string? v) (seq v)) v))
+        :re-frame-10x nil      ; no release-version var in-browser
+        :shadow-cljs  nil      ; not a CLJS runtime lib
+        nil)
+      :unknown))
 
 (defn version-below?
   "Compare observed to floor as dotted-number strings. Returns true if

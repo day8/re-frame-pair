@@ -1,8 +1,8 @@
 (ns app.views
-  (:require [re-frame.core :as rf]
-            [reagent.core  :as reagent]
-            [re-com.core   :refer [at v-box h-box box gap label title button
-                                   input-text line]]))
+  (:require [re-frame.macros :as rf]
+            [reagent.core    :as reagent]
+            [re-com.core     :refer [at v-box h-box box gap label title button
+                                     input-text line]]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
@@ -182,3 +182,4 @@
      [summary-panel]
      [broken-panel]
      [footer]]]])
+

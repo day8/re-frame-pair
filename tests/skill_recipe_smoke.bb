@@ -315,5 +315,24 @@
       (is (str/includes? src "(defn debux-runtime-api?")
           "debux-runtime-api? defn missing from runtime.cljs"))))
 
+(deftest tracing-options-subsection-present-in-skill
+  (testing "SKILL.md exposes the re-frame-debux call-time options
+            (:once, :final, :msg, :verbose, :if) plus reset-once-state!
+            so an agent reading the form-by-form recipe can find them
+            without leaving SKILL.md. Drift here would silently revert
+            the agent to noisy traces or hand-rolled tap> filtering."
+    (is (str/includes? skill-md "### Tracing options — reducing noise")
+        "Tracing options heading missing from SKILL.md")
+    (is (str/includes? skill-md ":once")
+        "SKILL.md must name the :once option")
+    (is (str/includes? skill-md ":final")
+        "SKILL.md must name the :final option")
+    (is (str/includes? skill-md ":msg")
+        "SKILL.md must name the :msg option")
+    (is (str/includes? skill-md ":verbose")
+        "SKILL.md must name the :verbose option")
+    (is (str/includes? skill-md "reset-once-state!")
+        "SKILL.md must name reset-once-state! so callers can clear :once memory")))
+
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))

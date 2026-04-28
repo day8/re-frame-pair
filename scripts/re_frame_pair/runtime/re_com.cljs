@@ -2,7 +2,7 @@
   (:require [clojure.string :as str]))
 
 ;; re-com awareness — name-based classification used by epoch
-;; reconstruction (renders-from-traces) and exposed publicly so
+;; reconstruction (renders-from-10x-state) and exposed publicly so
 ;; recipes can answer "which re-com inputs re-rendered this epoch?".
 ;;
 ;; This is a pure-name heuristic over the demunged component name

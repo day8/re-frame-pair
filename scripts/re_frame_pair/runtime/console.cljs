@@ -82,6 +82,68 @@
                   (append-console-entry! level args stack))
                 (.apply orig js/console (apply array args))))))))
 
+(defn console-capture-installed?
+  "True when this browser runtime has installed the console wrapper."
+  []
+  (boolean (and (exists? js/window)
+                (aget js/window "__rfp_console_capture__"))))
+
+(defn install-rf-error-handler!
+  "Register a `re-frame.core/reg-event-error-handler` that funnels
+   uncaught event-handler exceptions into the console-log ring buffer
+   tagged `:who :handler-error`. Same shape as the catch-path entry
+   `tagged-dispatch-sync!` already produces, so the *Console / errors*
+   recipe stays uniform between rfp-driven dispatches and browser-side
+   click dispatches.
+
+   Why a custom error handler rather than relying on re-frame's
+   default: re-frame.loggers caches level→fn closures over the
+   original `js/console.*` references at module-load time, BEFORE rfp
+   is injected. Wrapping `js/console` post-load doesn't redirect those
+   cached refs, so re-frame's default error logger writes to
+   DevTools but never reaches the rfp ring buffer. Replacing the
+   handler is the route that doesn't depend on internal
+   re-frame.loggers shape and doesn't race the install order.
+
+   Forwards to the original (pre-wrap) `js/console.error` after
+   capturing — DevTools still surfaces the throw and the stack —
+   bypassing the rfp wrapper to avoid double-capture into
+   `console-log`.
+
+   Probed via `goog.global` so this no-ops cleanly on re-frame builds
+   that predate `reg-event-error-handler` (the symbol simply won't
+   exist there). Idempotent — guarded by a window marker so a
+   re-inject doesn't double-register."
+  []
+  (when (and (exists? js/window)
+             (not (aget js/window "__rfp_rf_error_handler__")))
+    (when-let [g (some-> js/goog .-global)]
+      (when-let [reg-eeh (some-> g
+                                 (aget "re_frame")
+                                 (aget "core")
+                                 (aget "reg_event_error_handler"))]
+        (aset js/window "__rfp_rf_error_handler__" true)
+        (reg-eeh
+         (fn rfp-rf-error-handler [error event-v]
+           (let [stack (try (.-stack error) (catch :default _ ""))
+                 msg   (try (.-message error) (catch :default _ (str error)))]
+             (append-console-entry!
+              :error
+              [(str "[handler-threw] " (or msg (str error)))
+               (str event-v)]
+              stack
+              :handler-error))
+           (when-let [orig (aget js/window "__rfp_orig_console_error")]
+             (try (.call orig js/console error event-v)
+                  (catch :default _ nil)))))))))
+
+(defn rf-error-handler-installed?
+  "True when this browser runtime has installed the re-frame
+   error-handler bridge."
+  []
+  (boolean (and (exists? js/window)
+                (aget js/window "__rfp_rf_error_handler__"))))
+
 (defn console-tail-since
   "Return console entries with `:id >= since-id`, optionally filtered
    by `:who` (one of `:app` / `:claude` / `:handler-error`, or nil =
