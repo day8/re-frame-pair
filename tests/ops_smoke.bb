@@ -17,7 +17,11 @@
 ;;;;      via with-redefs over the nREPL / fs seams.
 ;;;;
 ;;;; Run via `npm run test:ops` (see package.json) or directly:
-;;;;   bb tests/ops_smoke.bb
+;;;;   OPS_NO_AUTO_RUN=1 bb tests/ops_smoke.bb
+;;;;
+;;;; OPS_NO_AUTO_RUN=1 is required so ops.clj's main dispatcher does
+;;;; not fire when load-file'd below; npm test:ops sets it via the
+;;;; npm-script env, but a direct bb invocation must set it inline.
 
 (require '[clojure.test :refer [deftest is testing run-tests]]
          '[clojure.java.io :as io]
@@ -68,19 +72,17 @@
       ;; deterministic across calls.
       (is (= [:app :storybook] (#'ops/list-builds-on-port 8777))))))
 
-(deftest read-port-candidates-env-override
-  (testing "SHADOW_CLJS_NREPL_PORT env var suppresses file probing"
+(deftest read-port-candidates-returns-vec-shape
+  (testing "read-port-candidates returns a vec regardless of env state"
     (with-redefs [ops/port-file-candidates ["nope/.port"]]
-      ;; Direct env-var override — tests the if-let path that reads
-      ;; SHADOW_CLJS_NREPL_PORT first.
+      ;; Mocking SHADOW_CLJS_NREPL_PORT from a JVM is impractical
+      ;; (System/setenv doesn't exist; reflection-based hacks are
+      ;; flaky across Babashka builds). The env-set branch is left
+      ;; for a future rfp bead — see read-port-candidates-file-cascade
+      ;; below for file-mode coverage. This deftest only pins the
+      ;; return-shape contract: a vec, never nil.
       (let [orig (System/getenv "SHADOW_CLJS_NREPL_PORT")]
         (try
-          ;; Setting env vars in JVM is finicky; use the underlying
-          ;; mechanism via reflection-free alternative — call the
-          ;; private helper with the env "stamped" by redefining
-          ;; getenv via System/getProperty. Simpler: redef via
-          ;; with-redefs + a local fn substitution. Skip if mocking
-          ;; getenv is impractical and rely on file-mode tests below.
           (is (vector? (#'ops/read-port-candidates))
               "read-port-candidates returns a vec regardless of env state")
           (finally nil))))))
