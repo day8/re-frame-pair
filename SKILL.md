@@ -71,7 +71,21 @@ Every op auto-reinjects the runtime namespace if a browser refresh dropped it; t
 
 ## Operations (the vocabulary)
 
-Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into `re-frame-pair.runtime`, or a dedicated script when the concern is broader than one form. Prefer the **structured ops** over `repl/eval` whenever a structured op fits.
+Each op below is either a short `scripts/eval-cljs.sh` invocation
+wrapping a call into `re-frame-pair.runtime`, or a dedicated shim
+under `scripts/`. Prefer the **structured ops** over `repl/eval`
+whenever a structured op fits.
+
+**Shim vs `eval-cljs`** — when a dedicated shim exists (e.g.
+`scripts/dispatch.sh`, `scripts/handler-source.sh`), prefer it. The
+shim removes three sources of typo (the `re-frame-pair.runtime`
+namespace name, the fn name, edn quoting) and exposes flag
+combinations the agent might want to compose (`--sync` / `--trace` /
+`--stub` on `dispatch.sh`; `--probe` on `tail-build.sh`). The
+`eval-cljs.sh '(re-frame-pair.runtime/...)'` form remains for ops
+that have no flag surface and would just duplicate the runtime
+docstring inside another file. Run `<shim> --help` to discover its
+flag surface without leaving the shell.
 
 ### Read
 
@@ -522,9 +536,9 @@ Ground console output to a specific dispatch by pairing `console/tail` with `tra
 
 `registrar/list :event` and `registrar/list :sub`. Then `trace/recent` with a large window (e.g. 60s) — or ask the user to exercise the app first. Report registered ids that never appeared. *Caveat the user that trace coverage is not exhaustive.*
 
-### Experiment loop
+### "Try a change and compare epochs"
 
-Same starting `app-db`, same event, only the code changes — any difference in the resulting epoch is attributable to your edit. Use whenever you're unsure if a change has the intended effect. Prerequisites: see *Time-travel* — 10x loaded with `:app-db-follows-events?` enabled.
+The **experiment loop** — same starting `app-db`, same event, only the code changes; any difference in the resulting epoch is attributable to your edit. Use whenever you're unsure if a change has the intended effect. Prerequisites: see *Time-travel* — 10x loaded with `:app-db-follows-events?` enabled.
 
 Canonical procedure:
 
