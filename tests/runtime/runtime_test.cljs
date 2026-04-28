@@ -2,7 +2,9 @@
   (:require [cljs.test :refer [deftest is testing use-fixtures]]
             [fixtures]
             [re-frame-pair.runtime :as rt]
-            [re-frame-pair.runtime.native-epoch :as native-epoch]))
+            [re-frame-pair.runtime.epochs :as epochs]
+            [re-frame-pair.runtime.native-epoch :as native-epoch]
+            [re-frame-pair.runtime.ten-x-adapter :as ten-x]))
 
 ;;; Unit tests for the pure fns inside re-frame-pair.runtime.
 ;;; Runs via shadow-cljs in node — no browser, no live re-frame app needed.
@@ -976,7 +978,7 @@
             {:entries  fixtures/synthetic-native-traces
              :max-size 5000})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/read-10x-epochs
+    (with-redefs [ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (let [r (rt/epochs-since 100)]
         (is (false? (:id-aged-out? r)))
@@ -990,12 +992,12 @@
             {:entries  [{:id 3} {:id 4}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/ten-x-loaded? (fn [] true)
-                  rt/read-10x-epochs (fn [] [{:id 1} {:id 2} {:id 3} {:id 4}])
-                  rt/coerce-native-epoch (fn
+    (with-redefs [ten-x/ten-x-loaded? (fn [] true)
+                  ten-x/read-10x-epochs (fn [] [{:id 1} {:id 2} {:id 3} {:id 4}])
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw) :source :native})
                                            ([raw _ctx] {:id (:id raw) :source :native}))
-                  rt/coerce-epoch (fn
+                  ten-x/coerce-epoch (fn
                                     ([raw] {:id (:id raw) :source :ten-x})
                                     ([raw _ctx] {:id (:id raw) :source :ten-x}))]
       (let [r (rt/epochs-since 1)]
@@ -1012,10 +1014,10 @@
                         {:id 2 :start 900}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/now-ms (fn [] 1000)
-                  rt/read-10x-epochs
+    (with-redefs [epochs/now-ms (fn [] 1000)
+                  ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))
-                  rt/coerce-native-epoch (fn
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw)})
                                            ([raw _ctx] {:id (:id raw)}))]
       (is (= [{:id 2}]
@@ -1031,7 +1033,7 @@
             {:entries  fixtures/synthetic-native-traces
              :max-size 5000})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/read-10x-epochs
+    (with-redefs [ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (let [e (rt/find-where #(= [:cart/apply-coupon "SPRING25"] (:event %)))]
         (is (= 100 (:id e)))
@@ -1043,12 +1045,12 @@
             {:entries  [{:id 3} {:id 4}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/ten-x-loaded? (fn [] true)
-                  rt/read-10x-epochs (fn [] [{:id 1} {:id 2} {:id 3} {:id 4}])
-                  rt/coerce-native-epoch (fn
+    (with-redefs [ten-x/ten-x-loaded? (fn [] true)
+                  ten-x/read-10x-epochs (fn [] [{:id 1} {:id 2} {:id 3} {:id 4}])
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw) :source :native})
                                            ([raw _ctx] {:id (:id raw) :source :native}))
-                  rt/coerce-epoch (fn
+                  ten-x/coerce-epoch (fn
                                     ([raw] {:id (:id raw) :source :ten-x})
                                     ([raw _ctx] {:id (:id raw) :source :ten-x}))]
       (is (= [{:id 4 :source :native}
@@ -1068,8 +1070,8 @@
                         ([raw _ctx]
                          (swap! coerced-ids conj (:id raw))
                          {:id (:id raw)}))]
-      (with-redefs [rt/read-10x-epochs (fn [] raws)
-                    rt/coerce-epoch    coerce]
+      (with-redefs [ten-x/read-10x-epochs (fn [] raws)
+                    ten-x/coerce-epoch    coerce]
         (is (= {:id 2}
                (rt/find-where #(= 2 (:id %)))))
         (is (= [3 2] @coerced-ids))))))
@@ -1085,8 +1087,8 @@
                         ([raw _ctx]
                          (swap! coerced-ids conj (:id raw))
                          {:id (:id raw)}))]
-      (with-redefs [rt/read-10x-epochs (fn [] raws)
-                    rt/coerce-epoch    coerce]
+      (with-redefs [ten-x/read-10x-epochs (fn [] raws)
+                    ten-x/coerce-epoch    coerce]
         (is (= [{:id 3} {:id 1}]
                (rt/find-all-where #(odd? (:id %)))))
         (is (= [3 2 1] @coerced-ids))))))
@@ -2251,10 +2253,10 @@
                         {:id 3 :start 300}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/coerce-native-epoch (fn
+    (with-redefs [native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw)})
                                            ([raw _ctx] {:id (:id raw)}))
-                  rt/read-10x-epochs
+                  ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (let [r (rt/epochs-since nil)]
         (is (false? (:id-aged-out? r)))
@@ -2267,10 +2269,10 @@
             {:entries  [{:id 1} {:id 2} {:id 3}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/coerce-native-epoch (fn
+    (with-redefs [native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw)})
                                            ([raw _ctx] {:id (:id raw)}))
-                  rt/read-10x-epochs
+                  ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (let [r (rt/epochs-since 3)]
         (is (false? (:id-aged-out? r)))
@@ -2283,12 +2285,12 @@
             {:entries  [{:id 10} {:id 11}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/ten-x-loaded? (fn [] true)
-                  rt/read-10x-epochs (fn [] [{:id 8} {:id 9} {:id 10} {:id 11}])
-                  rt/coerce-native-epoch (fn
+    (with-redefs [ten-x/ten-x-loaded? (fn [] true)
+                  ten-x/read-10x-epochs (fn [] [{:id 8} {:id 9} {:id 10} {:id 11}])
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] raw)
                                            ([raw _ctx] raw))
-                  rt/coerce-epoch (fn
+                  ten-x/coerce-epoch (fn
                                     ([raw] raw)
                                     ([raw _ctx] raw))]
       (let [r (rt/epochs-since :gone-forever)]
@@ -2301,8 +2303,8 @@
             {:entries  [{:id 10} {:id 11}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/ten-x-loaded? (fn [] false)
-                  rt/coerce-native-epoch (fn
+    (with-redefs [ten-x/ten-x-loaded? (fn [] false)
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] raw)
                                            ([raw _ctx] raw))]
       (let [r (rt/epochs-since :missing)]
@@ -2320,11 +2322,11 @@
                         {:id 3 :start 999}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/now-ms (fn [] 1000)
-                  rt/coerce-native-epoch (fn
+    (with-redefs [epochs/now-ms (fn [] 1000)
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw)})
                                            ([raw _ctx] {:id (:id raw)}))
-                  rt/read-10x-epochs
+                  ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (is (= [{:id 1} {:id 2} {:id 3}]
              (rt/epochs-in-last-ms 200))))))
@@ -2340,11 +2342,11 @@
                         {:id 3 :start 980}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/now-ms (fn [] 1000)
-                  rt/coerce-native-epoch (fn
+    (with-redefs [epochs/now-ms (fn [] 1000)
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw)})
                                            ([raw _ctx] {:id (:id raw)}))
-                  rt/read-10x-epochs
+                  ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (is (= [{:id 1} {:id 3}]
              (rt/epochs-in-last-ms 100))))))
@@ -2358,11 +2360,11 @@
                         {:id 2 :start 200}]
              :max-size 50})
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
-    (with-redefs [rt/now-ms (fn [] 1000)
-                  rt/coerce-native-epoch (fn
+    (with-redefs [epochs/now-ms (fn [] 1000)
+                  native-epoch/coerce-native-epoch (fn
                                            ([raw] {:id (:id raw)})
                                            ([raw _ctx] {:id (:id raw)}))
-                  rt/read-10x-epochs
+                  ten-x/read-10x-epochs
                   (fn [] (throw (ex-info "10x should not be read" {})))]
       (is (= [] (rt/epochs-in-last-ms 50))))))
 

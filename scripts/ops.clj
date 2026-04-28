@@ -236,6 +236,10 @@
    "ten_x_adapter.cljs"
    ;; native-epoch depends on ten-x-adapter (aget-path, coerce-epoch).
    "native_epoch.cljs"
+   ;; epochs depends on native-epoch + ten-x-adapter (epoch ladder).
+   "epochs.cljs"
+   ;; dom depends on epochs (latest-epoch-id for click-fire).
+   "dom.cljs"
    ;; time-travel depends on ten-x-adapter (ten-x-rf-core, ten-x-app-db-ratom).
    "time_travel.cljs"])
 

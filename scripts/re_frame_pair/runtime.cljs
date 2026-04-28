@@ -33,6 +33,8 @@
             [re-frame.registrar :as rf-registrar]
             [re-frame.trace]
             [re-frame-pair.runtime.console :as console]
+            [re-frame-pair.runtime.dom :as dom]
+            [re-frame-pair.runtime.epochs :as epochs]
             [re-frame-pair.runtime.native-epoch :as native-epoch]
             [re-frame-pair.runtime.re-com :as re-com]
             [re-frame-pair.runtime.registrar :as registrar]
@@ -151,261 +153,18 @@
     (when-let [g (some-> js/goog .-global)]
       (aget-path g ["day8" "re_frame" "debux" "common" "util" "send_trace_or_tap_BANG_"]))))
 
-(defn latest-epoch-id
-  "Id of 10x's newest match, or nil if the buffer is empty / 10x is
-   not loaded.
+;; ---------------------------------------------------------------------------
+;; Epoch ladder — re-exported from re-frame-pair.runtime.epochs
+;; ---------------------------------------------------------------------------
 
-   Cheap path: 10x keeps an ordered `:match-ids` vec at
-   `[:epochs :match-ids]` in its app-db; the head of it IS what we
-   want. Avoids `read-10x-epochs`'s full per-match map-rebuild —
-   significant for `watch-epochs.sh`, which polls this at ~100ms cadence
-   and used to construct a fresh 25-entry coerced-match vec every tick.
-
-   rf1-jum: prefers `day8.re-frame-10x.public/latest-epoch-id` when
-   loaded (also a single :match-ids head read; just removes the
-   inlined-rf-version-path coupling). Falls back for older 10x."
-  []
-  (if-let [pub (ten-x-public)]
-    ((aget pub "latest_epoch_id"))
-    (when-let [a (ten-x-app-db-ratom)]
-      (last (get-in @a [:epochs :match-ids])))))
-
-(defn epoch-count
-  "Total matches in 10x's ring buffer.
-
-   rf1-jum: prefers the public surface's `epoch-count` (cheap —
-   reads `:match-ids` length). Older 10x falls back to
-   `(count (read-10x-epochs))` which goes through the legacy path."
-  []
-  (if-let [pub (ten-x-public)]
-    ((aget pub "epoch_count"))
-    (count (read-10x-epochs))))
-
-(defn epoch-by-id
-  "Return the coerced epoch with matching id, or nil. Prefers the
-   native-epoch-buffer (upstream rf-ybv); falls back to
-   `read-10x-epochs` when re-frame predates rf-ybv or the epoch has
-   aged out of the native buffer."
-  [id]
-  (or (when-let [raw (find-native-epoch-by-id id)]
-        (coerce-native-epoch raw))
-      (when (or (ten-x-loaded?)
-                (not @native-epoch-cb-installed?))
-        (->> (read-10x-epochs)
-             (some #(when (= id (match-id %)) %))
-             coerce-epoch))))
-
-(defn last-epoch
-  "Most recently appended epoch, coerced. Prefers the native-epoch-
-   buffer; falls back to 10x. Nil if neither has any epochs."
-  []
-  (or (some-> (native-epochs) last coerce-native-epoch)
-      (when (or (ten-x-loaded?)
-                (not @native-epoch-cb-installed?))
-        (some-> (read-10x-epochs) last coerce-epoch))))
-
-(defn- ten-x-fallback-eligible?
-  "True when callers should attempt the legacy 10x epoch path. If the
-   native epoch callback is installed, missing 10x means native is the
-   only available source and callers should return the native answer
-   without leaking `read-10x-epochs`'s missing-10x exception."
-  []
-  (or (ten-x-loaded?)
-      (not @native-epoch-cb-installed?)))
-
-(defn- native-epoch-context
-  [raw-epochs]
-  {:traces     (native-traces)
-   :all-epochs raw-epochs})
-
-(defn- coerce-native-epochs
-  [raw-epochs]
-  (let [ctx (native-epoch-context raw-epochs)]
-    (mapv #(coerce-native-epoch % ctx) raw-epochs)))
-
-(defn- raw-native-epochs-after
-  [id raw-epochs]
-  (cond
-    (nil? id)
-    raw-epochs
-
-    (some #(= id (:id %)) raw-epochs)
-    (vec (rest (drop-while #(not= id (:id %)) raw-epochs)))
-
-    :else
-    ::not-found))
-
-(defn- raw-10x-epochs-after
-  [id matches]
-  (cond
-    (nil? id)
-    matches
-
-    (some #(= id (match-id %)) matches)
-    (vec (rest (drop-while #(not= id (match-id %)) matches)))
-
-    :else
-    ::not-found))
-
-(defn- coerce-10x-epochs
-  [all-matches matches]
-  (let [ctx {:all-traces  (read-10x-all-traces)
-             :all-matches all-matches}]
-    (mapv #(coerce-epoch % ctx) matches)))
-
-(defn- coerce-merged-epoch-sources
-  "Coerce chronological 10x matches plus the native-buffer tail, skipping
-   10x duplicates for ids the native buffer can answer more directly."
-  [all-10x-matches selected-10x-matches raw-native-epochs]
-  (let [native-ids (set (keep :id raw-native-epochs))
-        selected-10x-matches (remove #(contains? native-ids (match-id %))
-                                     selected-10x-matches)]
-    (vec (concat (coerce-10x-epochs all-10x-matches selected-10x-matches)
-                 (coerce-native-epochs raw-native-epochs)))))
-
-(defn epochs-since
-  "Epochs appended *after* the given id. Returns a map:
-
-     {:epochs       [...]       ;; coerced epochs
-      :id-aged-out? true|false} ;; did the requested id still exist?
-
-   Semantics:
-     - `id` nil                -> all epochs in buffer, :id-aged-out? false
-     - `id` matches head       -> [], :id-aged-out? false
-     - `id` matches some epoch -> epochs strictly after it, :id-aged-out? false
-     - `id` not found in buffer (e.g. aged out of the ring) -> [],
-                                  :id-aged-out? true
-
-   Returns a map (not a vector with metadata) because edn-via-nREPL
-   discards metadata on the round-trip; callers at the CLI need the
-   aged-out signal in the value itself."
-  [id]
-  (let [raw-native  (native-epochs)
-        native-tail (raw-native-epochs-after id raw-native)]
-    (cond
-      (and (seq raw-native) (not= ::not-found native-tail))
-      {:epochs (coerce-native-epochs native-tail)
-       :id-aged-out? false}
-
-      (ten-x-fallback-eligible?)
-      (let [matches  (read-10x-epochs)
-            tenx-tail (raw-10x-epochs-after id matches)]
-        (if (= ::not-found tenx-tail)
-          {:epochs []
-           :id-aged-out? true
-           :requested-id id}
-          {:epochs (coerce-merged-epoch-sources matches tenx-tail raw-native)
-           :id-aged-out? false}))
-
-      (not= ::not-found native-tail)
-      {:epochs (coerce-native-epochs native-tail)
-       :id-aged-out? false}
-
-      :else
-      {:epochs []
-       :id-aged-out? true
-       :requested-id id})))
-
-(defn- now-ms
-  "Same clock re-frame.trace uses for trace `:start`: `performance.now()`
-   when available (page-load-relative monotonic ms), else `Date.now()`
-   (epoch ms). Match the trace clock — comparing across the two gives
-   nonsense (perf.now is in the thousands, Date.now in the trillions)."
-  []
-  (if (and (exists? js/performance) (exists? js/performance.now))
-    (.now js/performance)
-    (.now js/Date)))
-
-(defn epochs-in-last-ms
-  "Epochs appended in the last N ms (pull). Compares against the event
-   trace's `:start` timestamp.
-
-   `:start` comes from re-frame.trace via `interop/now` — that's
-   `performance.now()` (page-load-relative) when available, not wall-clock
-   `Date.now()`. The cutoff has to be on the same clock or every epoch
-   looks ancient."
-  [ms]
-  (let [cutoff (- (now-ms) ms)]
-    (if-let [raw-native (seq (native-epochs))]
-      (let [raw-native (vec raw-native)
-            ctx        (native-epoch-context raw-native)]
-        (->> raw-native
-             (filter (fn [raw]
-                       (let [t (:start raw)]
-                         (and t (>= t cutoff)))))
-             (mapv #(coerce-native-epoch % ctx))))
-      (if (ten-x-fallback-eligible?)
-        (let [matches (read-10x-epochs)]
-          (->> matches
-               (filter (fn [m] (let [t (:start (find-trace m :event))]
-                                 (and t (>= t cutoff)))))
-               (coerce-10x-epochs matches)))
-        []))))
-
-(defn find-where
-  "Walk epoch buffers in reverse chronological order and return the first
-   epoch matching the predicate (a 1-arg fn taking a coerced epoch map),
-   or nil if no match. The native epoch buffer is checked first; 10x is
-   only consulted when it is available or when native callbacks are not.
-
-   Primary forensic op — 'find the epoch where X happened'. Examples:
-
-     ;; find the epoch where :auth-state flipped to :expired
-     (find-where
-       (fn [e] (= :expired (get-in (:only-after (:app-db/diff e))
-                                   [:auth-state]))))
-
-     ;; find the epoch that fired a 500-status xhrio
-     (find-where
-       (fn [e] (some (fn [fx] (and (= :http-xhrio (:fx-id fx))
-                                    (= 500 (get-in (:value fx) [:status]))))
-                     (:effects/fired e))))
-
-   Most recent match wins — usually what you want for 'how did I get
-   into this state?' post-mortems."
-  [pred]
-  (let [raw-native (native-epochs)
-        native-ids (set (keep :id raw-native))
-        native-ctx (native-epoch-context raw-native)]
-    (or (some (fn [raw]
-                (let [epoch (coerce-native-epoch raw native-ctx)]
-                  (when (pred epoch) epoch)))
-              (rseq raw-native))
-        (when (ten-x-fallback-eligible?)
-          (let [matches (read-10x-epochs)
-                tenx-ctx {:all-traces  (read-10x-all-traces)
-                          :all-matches matches}]
-            (some (fn [raw]
-                    (when-not (contains? native-ids (match-id raw))
-                      (let [epoch (coerce-epoch raw tenx-ctx)]
-                        (when (pred epoch) epoch))))
-                  (rseq matches)))))))
-
-(defn find-all-where
-  "Like find-where but returns every matching epoch, newest first. Use
-   when you want the full trajectory of a path — 'every epoch where
-   :cart changed' — not just the most recent transition."
-  [pred]
-  (let [raw-native (native-epochs)
-        native-ids (set (keep :id raw-native))
-        native-ctx (native-epoch-context raw-native)
-        native-hits (->> (rseq raw-native)
-                         (keep (fn [raw]
-                                 (let [epoch (coerce-native-epoch raw native-ctx)]
-                                   (when (pred epoch) epoch))))
-                         vec)
-        tenx-hits (if (ten-x-fallback-eligible?)
-                    (let [matches  (read-10x-epochs)
-                          tenx-ctx {:all-traces  (read-10x-all-traces)
-                                    :all-matches matches}]
-                      (->> (rseq matches)
-                           (remove #(contains? native-ids (match-id %)))
-                           (keep (fn [raw]
-                                   (let [epoch (coerce-epoch raw tenx-ctx)]
-                                     (when (pred epoch) epoch))))
-                           vec))
-                    [])]
-    (vec (concat native-hits tenx-hits))))
+(def latest-epoch-id   epochs/latest-epoch-id)
+(def epoch-count       epochs/epoch-count)
+(def epoch-by-id       epochs/epoch-by-id)
+(def last-epoch        epochs/last-epoch)
+(def epochs-since      epochs/epochs-since)
+(def epochs-in-last-ms epochs/epochs-in-last-ms)
+(def find-where        epochs/find-where)
+(def find-all-where    epochs/find-all-where)
 
 ;; ---------------------------------------------------------------------------
 ;; Console capture — re-exported from re-frame-pair.runtime.console
@@ -823,7 +582,7 @@
            cascaded-raws (filterv #(and (contains? ids (:dispatch-id %))
                                         (not= root-id (:dispatch-id %)))
                                   epochs)
-           ctx           (native-epoch-context epochs)]
+           ctx           {:traces (native-traces) :all-epochs epochs}]
        {:root-epoch         (some-> root-raw (coerce-native-epoch ctx))
         :cascaded-epoch-ids (mapv :dispatch-id cascaded-raws)
         :cascaded-epochs    (mapv #(coerce-native-epoch % ctx) cascaded-raws)}))))
@@ -1220,165 +979,17 @@
 (def classify-render-entry re-com/classify-render-entry)
 
 ;; ---------------------------------------------------------------------------
-;; DOM ↔ source bridge (re-com `:src`)
+;; DOM ↔ source bridge — re-exported from re-frame-pair.runtime.dom
 ;; ---------------------------------------------------------------------------
-;;
-;; Prerequisites: re-com debug instrumentation enabled, call sites
-;; pass `:src (at)`. See docs/initial-spec.md §4.3b.
 
-(defn parse-rc-src
-  "Parse re-com's `data-rc-src` attribute into {:file :line}.
-   Returns nil on malformed input.
-
-   re-com emits the attribute as a single 'file:line' string from
-   `re-com.debug` (see `(str file \":\" line)` at debug.cljs:83). No
-   column component, despite Clojure's `(at)` macro carrying one — re-com
-   discards it before serialising. Public for tests."
-  [attr-val]
-  (when (and (string? attr-val) (seq attr-val))
-    (let [idx (str/last-index-of attr-val ":")]
-      (when (and idx (pos? idx))
-        (let [file-part (subs attr-val 0 idx)
-              line-part (subs attr-val (inc idx))]
-          (when (re-matches #"\d+" line-part)
-            {:file file-part
-             :line (js/parseInt line-part 10)}))))))
-
-(defn re-com-debug-enabled?
-  "Heuristic: re-com debug is enabled if any DOM element carries a
-   `data-rc-src` attribute. Public so `discover-app.sh` can surface
-   it in the health report.
-
-   This is a DOM observation, not a config read — fine once the app
-   has rendered at least one component with `:src (at)`, but may
-   misreport on a freshly-loaded page before any render has occurred.
-
-   Returns false in non-browser environments (no `js/document`)."
-  []
-  (boolean
-    (and (exists? js/document)
-         (some? (.querySelector js/document "[data-rc-src]")))))
-
-;; Last-clicked capture — passive listener that records the element
-;; most recently clicked anywhere on the page. Installed once by
-;; `install-last-click-capture!` during injection so ops like
-;; `dom/source-at :last-clicked` have something to resolve.
-
-(defonce ^:private last-clicked (atom nil))
-
-(defn install-last-click-capture!
-  "Install a single capturing click listener on document that records
-   the most recently clicked element. Idempotent — calling twice does
-   not double-register (guard via a marker on window).
-
-   Silent no-op when there is no browser-side `js/window` /
-   `js/document` (e.g. shadow-cljs's `:node-test` build)."
-  []
-  (when (and (exists? js/window)
-             (exists? js/document)
-             (not (aget js/window "__rfp_click_capture__")))
-    (aset js/window "__rfp_click_capture__" true)
-    (.addEventListener
-     js/document
-     "click"
-     (fn [e] (reset! last-clicked (.-target e)))
-     #js {:capture true :passive true})))
-
-(defn last-clicked-element
-  "Return the DOM element most recently clicked, or nil if nothing has
-   been clicked yet this session. Driven by `install-last-click-capture!`."
-  []
-  @last-clicked)
-
-(defn- selector-or-last-clicked [selector]
-  "If selector is `:last-clicked` (or the string equivalent), return
-   the last-clicked element. Otherwise resolve via querySelector."
-  (cond
-    (or (= selector :last-clicked) (= selector "last-clicked"))
-    (last-clicked-element)
-
-    (string? selector)
-    (.querySelector js/document selector)
-
-    :else nil))
-
-(defn dom-source-at
-  "Given a CSS selector (or `:last-clicked` / `\"last-clicked\"`),
-   return the `:src` {:file :line} attached by re-com's debug path.
-   Returns a structured result."
-  [selector]
-  (if-let [el (selector-or-last-clicked selector)]
-    (if-let [src-attr (.getAttribute el "data-rc-src")]
-      {:ok? true :src (parse-rc-src src-attr) :selector selector}
-      {:ok? true :src nil :selector selector
-       :reason (if (re-com-debug-enabled?)
-                 :no-src-at-this-element
-                 :re-com-debug-disabled)})
-    {:ok? false :reason :no-element :selector selector
-     :hint (when (or (= selector :last-clicked) (= selector "last-clicked"))
-             "Nothing clicked this session; interact with the page first, or pass a CSS selector instead.")}))
-
-(defn- src-pattern-matches?
-  "True if the element's `data-rc-src` attribute contains
-   `file:line`. Used by `dom-find-by-src` and `dom-fire-click`. We
-   pull every `[data-rc-src]` and compare strings rather than
-   building a CSS selector with the file embedded — single quotes,
-   spaces, brackets etc. in real-world paths break the
-   string-interpolated selector and there's no portable escape that
-   covers every case (`CSS.escape` exists but isn't always available
-   in older webviews and doesn't escape `'` itself for attribute
-   selectors)."
-  [el pattern]
-  (when-let [v (.getAttribute el "data-rc-src")]
-    (str/includes? v pattern)))
-
-(defn dom-find-by-src
-  "Find live DOM elements whose `data-rc-src` matches file+line.
-   Returns a list of {:selector :src :tag} summaries."
-  [file line]
-  (let [pattern (str file ":" line)
-        nodes   (.querySelectorAll js/document "[data-rc-src]")]
-    (->> (array-seq nodes)
-         (filter #(src-pattern-matches? % pattern))
-         (mapv (fn [node]
-                 {:tag   (.toLowerCase (.-tagName node))
-                  :id    (not-empty (.-id node))
-                  :class (not-empty (.-className node))
-                  :src   (parse-rc-src (.getAttribute node "data-rc-src"))})))))
-
-(defn dom-fire-click
-  "Synthesise a click on the element matching file+line. Picks the
-   first match if multiple. Returns the epoch produced (if any)."
-  [file line]
-  (let [pattern (str file ":" line)
-        nodes   (array-seq (.querySelectorAll js/document "[data-rc-src]"))
-        el      (first (filter #(src-pattern-matches? % pattern) nodes))]
-    (if el
-      (let [before (latest-epoch-id)
-            ev     (js/Event. "click" #js {:bubbles true :cancelable true})]
-        (.dispatchEvent el ev)
-        {:ok?           true
-         :clicked       {:tag (.toLowerCase (.-tagName el))
-                         :id  (not-empty (.-id el))}
-         :epoch-before  before
-         ;; The epoch lands asynchronously; caller should follow up
-         ;; with `last-epoch` after a frame if they want it.
-         })
-      {:ok? false :reason :no-element-at-src :file file :line line})))
-
-(defn dom-describe
-  "Summarise a DOM element: its tag, id, classes, `data-rc-src`,
-   and the names of event handlers React has attached."
-  [selector]
-  (if-let [el (.querySelector js/document selector)]
-    {:ok?      true
-     :tag      (.toLowerCase (.-tagName el))
-     :id       (not-empty (.-id el))
-     :class    (not-empty (.-className el))
-     :src      (parse-rc-src (.getAttribute el "data-rc-src"))
-     :text     (let [t (.-textContent el)]
-                 (when (and t (< (count t) 200)) t))}
-    {:ok? false :reason :no-element :selector selector}))
+(def parse-rc-src              dom/parse-rc-src)
+(def re-com-debug-enabled?     dom/re-com-debug-enabled?)
+(def install-last-click-capture! dom/install-last-click-capture!)
+(def last-clicked-element      dom/last-clicked-element)
+(def dom-source-at             dom/dom-source-at)
+(def dom-find-by-src           dom/dom-find-by-src)
+(def dom-fire-click            dom/dom-fire-click)
+(def dom-describe              dom/dom-describe)
 
 ;; ---------------------------------------------------------------------------
 ;; Hot-reload probe support — re-exported from re-frame-pair.runtime.registrar
@@ -1387,45 +998,10 @@
 (def registrar-handler-ref  registrar/registrar-handler-ref)
 
 ;; ---------------------------------------------------------------------------
-;; Watch predicate matching
+;; Watch predicate matching — re-exported from re-frame-pair.runtime.epochs
 ;; ---------------------------------------------------------------------------
 
-(defn epoch-matches?
-  "Test a (coerced) epoch against a predicate map built from
-   `watch-epochs.sh` CLI args.
-
-   Prefix matching uses `str` on both sides so `:cart` matches
-   `:cart/apply-coupon` (and `:cart/` matches `:cart/apply-coupon`
-   when passed as a string from the shell). Keep this string-based
-   to avoid depending on keyword lexer edge cases."
-  [pred epoch]
-  (let [{:keys [event-id event-id-prefix effects timing-ms touches-path sub-ran render]} pred
-        ev (:event epoch)]
-    (boolean
-     (and
-      (if event-id        (= event-id (first ev)) true)
-      (if event-id-prefix (some-> (first ev) str (str/starts-with? (str event-id-prefix))) true)
-      (if effects         (some #(= effects (:fx-id %)) (:effects/fired epoch)) true)
-      (if timing-ms       ;; expects [:> n] or [:< n]
-        (let [[op n] timing-ms]
-          (case op
-            :> (> (:time-ms epoch 0) n)
-            :< (< (:time-ms epoch 0) n)
-            true))
-        true)
-      (if touches-path
-        (let [{:keys [only-before only-after]} (:app-db/diff epoch)]
-          (if (empty? touches-path)
-            ;; Empty path = "the root touched at all" — any non-empty
-            ;; diff matches. Without this special-case, `(get-in nil
-            ;; [])` returns nil and the predicate always fails for the
-            ;; root path, which is surprising.
-            (or (seq only-before) (seq only-after))
-            (or (some? (get-in only-before touches-path))
-                (some? (get-in only-after touches-path)))))
-        true)
-      (if sub-ran         (some #(= sub-ran (first (:query-v %))) (:subs/ran epoch)) true)
-      (if render          (some #(= render (:component %)) (:renders epoch)) true)))))
+(def epoch-matches? epochs/epoch-matches?)
 
 ;; ---------------------------------------------------------------------------
 ;; Time-travel adapter — re-exported from re-frame-pair.runtime.time-travel
