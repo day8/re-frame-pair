@@ -1353,10 +1353,10 @@
    reachable on the loaded re-frame build."
   []
   (when-let [traces-ref (traces-atom)]
-    (->> @traces-ref
-         reverse
-         (some (fn [t] (when (= :event (:op-type t))
-                         (-> t :tags :dispatch-id)))))))
+    (let [traces @traces-ref]
+      (->> (if (vector? traces) (rseq traces) (reverse traces))
+           (some (fn [t] (when (= :event (:op-type t))
+                           (-> t :tags :dispatch-id))))))))
 
 (defn tagged-dispatch!
   "Dispatch an event (queued) — the handler runs out of band, so the
