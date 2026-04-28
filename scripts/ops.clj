@@ -226,7 +226,8 @@
    re-exports the symbols ops.clj / tests reach through. Submodules
    come first so their nses exist when the facade's :require fires at
    REPL time."
-  ["registrar.cljs"
+  ["console.cljs"
+   "registrar.cljs"
    "re_com.cljs"
    "session.cljs"
    "versions.cljs"])
