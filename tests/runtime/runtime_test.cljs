@@ -213,7 +213,7 @@
               :input-query-vs is nil here because the synthetic
               all-traces fixture has no :sub/run traces — under live
               fixture conditions it carries the dep graph from
-              re-frame's :input-query-vs tag (rfp-fxv / rf-3p7 item 3).
+              re-frame's :input-query-vs tag (upstream rf-3p7 item 3).
               :subscribe/source + :input-query-sources nil because the
               synthetic query-v carries no :re-frame/source meta (rf-cna)."
       (is (= [{:query-v             [:cart/total]
@@ -400,7 +400,7 @@
 ;; -----------------------------------------------------------------------------
 ;; coerce-native-epoch — translate a register-epoch-cb-delivered native
 ;; epoch (re-frame.trace/assemble-epochs output) into the §4.3a shape.
-;; rfp-zl8 / rf-ybv. Pure fn, takes context explicitly.
+;; Upstream rf-ybv. Pure fn, takes context explicitly.
 ;; -----------------------------------------------------------------------------
 
 (deftest coerce-native-epoch-shape
@@ -1122,7 +1122,7 @@
       (is (boolean? (:native-trace-cb? h))))))
 
 ;; -----------------------------------------------------------------------------
-;; rfp-4ew / rf-4mr — dispatch-and-settle bridge for the bash shim.
+;; Upstream rf-4mr — dispatch-and-settle bridge for the bash shim.
 ;; -----------------------------------------------------------------------------
 ;;
 ;; The runtime-test build pins re-frame 1.4.5 (predates rf-4mr) so the
@@ -1385,7 +1385,7 @@
           (is (some #(re-find #"handler-threw" %) (:args entry))))))))
 
 ;; -----------------------------------------------------------------------------
-;; rfp-zml / rf-ge8 — dispatch-with bridge for safe iteration with
+;; Upstream rf-ge8 — dispatch-with bridge for safe iteration with
 ;; record-only stubs. The runtime-test build pins re-frame 1.4.5 so
 ;; the real dispatch-with! path can't run; we cover the helpers and
 ;; the feature-detect fallback.
@@ -1678,7 +1678,7 @@
       (is (= [:db] (:unstubbable r))))))
 
 ;; -----------------------------------------------------------------------------
-;; rfp-12p / rfd-btn — dbg-macro-available? feature probe.
+;; dbg-macro-available? feature probe (debux dbg integration).
 ;; The runtime-test build doesn't bundle re-frame-debux at all, so the
 ;; probe should report false. Mirrors debux-runtime-api?'s shape.
 ;; -----------------------------------------------------------------------------
@@ -1717,7 +1717,7 @@
       (is (false? (:ok? r))))))
 
 ;; -----------------------------------------------------------------------------
-;; Edge cases (rfp-czf H) — cheap pure-fn coverage so future shape
+;; Edge cases — cheap pure-fn coverage so future shape
 ;; drifts (re-com namespace tweaks, re-frame cache-key changes,
 ;; new component categories, etc.) get caught at unit-test time.
 ;; -----------------------------------------------------------------------------
@@ -1851,13 +1851,14 @@
     (is (false? (rt/version-below? "1.0" :unknown)))))
 
 ;; ---------------------------------------------------------------------------
-;; Tests for rfp-r5s A: console.* capture
+;; Tests for console.* capture
 ;; ---------------------------------------------------------------------------
 ;;
-;; These tests exist because rfp-r5s A shipped without them, and the rfp-r5s
-;; D forward-reference regression demonstrated that a green `npm test` is no
-;; guarantee a code addition is exercised. See tests/ops_smoke.bb for the
-;; babashka-side load-smoke partner.
+;; These tests exist because the console-capture surface shipped without
+;; them initially, and a forward-reference regression in the same arc
+;; demonstrated that a green `npm test` is no guarantee a code addition
+;; is exercised. See tests/ops_smoke.bb for the babashka-side load-smoke
+;; partner.
 
 (deftest console-tail-since-empty-buffer
   (testing "console-tail-since on a fresh buffer returns no entries"
@@ -1968,7 +1969,7 @@
           ":note must mention the queued-path so callers can self-document"))))
 
 ;; ---------------------------------------------------------------------------
-;; Tests for rfp-r5s B: app/summary
+;; Tests for app/summary
 ;; ---------------------------------------------------------------------------
 
 (deftest value-shape-tag-dispatch
@@ -2059,7 +2060,7 @@
           (reset! re-frame.db/app-db orig))))))
 
 ;; ---------------------------------------------------------------------------
-;; Tests for rfp-r5s C: handler/source
+;; Tests for handler/source
 ;; ---------------------------------------------------------------------------
 ;;
 ;; handler-source reads the {:file :line} meta that re-frame's reg-*

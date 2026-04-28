@@ -326,7 +326,7 @@
    second form would otherwise survive into the keyword name —
    `(keyword \":app\")` produces a keyword whose NAME is the literal
    string \":app\", not the regular `:app` — so explicit build
-   selection silently missed the right build (rfp-jfp)."
+   selection silently missed the right build."
   [args]
   (or (some-> (some #(when (str/starts-with? % "--build=") %) args)
               (str/replace-first "--build=" "")
@@ -360,8 +360,9 @@
 ;; the JVM-side reader chokes mid-form with a CompilerException, the
 ;; response carries :ex / :err — and the OLD inject-path discarded the
 ;; response, reporting success. Defns past the truncation boundary never
-;; landed; downstream ops returned nil. This bit rfp-r5s: app-summary
-;; and handler-source weren't reachable at all on the live fixture.
+;; landed; downstream ops returned nil. The fix here recovered
+;; app-summary and handler-source which weren't reachable at all on
+;; the live fixture before.
 ;;
 ;; Two changes here, working together:
 ;;   1. `inject-failure` inspects the cljs-eval response shape and
@@ -554,7 +555,7 @@
 ;; the rest of the discover-list machinery. Babashka/sci does no
 ;; forward-symbol resolution at analysis time, so without this declare
 ;; loading ops.clj throws "Unable to resolve symbol" and every shim
-;; breaks (rfp-xhx).
+;; breaks.
 (declare list-builds-on-port)
 
 (defn- discover [args]
@@ -1170,7 +1171,7 @@
 
    Note: shadow-cljs returns a SET (e.g. `#{:app}`), not a vector —
    accept both shapes (and any other coll? value, defensively) so a
-   single-build setup doesn't read as 'no builds active' (rfp-j2i)."
+   single-build setup doesn't read as 'no builds active'."
   [port]
   (try
     (let [resp (combine-responses

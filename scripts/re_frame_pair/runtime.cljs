@@ -10,9 +10,9 @@
 ;;;;     commit 4a53afb), runtime installs its own epoch-cb +
 ;;;;     trace-cb to consume assembled epochs and the trace stream
 ;;;;     directly. Falls back to reading 10x's epoch buffer when
-;;;;     re-frame predates rf-ybv. (rfp-zl8 retired the old "no
-;;;;     second register-trace-cb" rule — that was load-bearing on
-;;;;     10x being the trace substrate, which native epoch-cb
+;;;;     re-frame predates rf-ybv. (The native path retired the old
+;;;;     "no second register-trace-cb" rule — that was load-bearing
+;;;;     on 10x being the trace substrate, which native epoch-cb
 ;;;;     supersedes.)
 ;;;;   - The `session-id` sentinel below is re-read on every op. If
 ;;;;     it's gone, a full page refresh happened and the shim
@@ -207,8 +207,8 @@
 ;;
 ;; `(meta (registrar/get-handler kind id))` returns the location
 ;; directly — no side-table, no opt-in registration macro needed.
-;; Earlier rfp-rsg local side-table (reg-event-db et al. macros in
-;; the sibling .clj) is retired by rfp-hpu now that rf-ysy dominates.
+;; The earlier local side-table (reg-event-db et al. macros in the
+;; sibling .clj) was retired now that upstream rf-ysy dominates.
 
 (defn handler-source
   "Source location of a registered handler, read from re-frame's
@@ -518,7 +518,7 @@
 (defn- sub-input-deps
   "Map of query-v → `{:input-query-vs ... :input-query-sources ...}`,
    sourced from `:sub/run` trace tags in the live trace stream.
-   rfp-fxv / rf-3p7 item 3 (re-frame commit fa90f70) added
+   Upstream rf-3p7 item 3 (re-frame commit fa90f70) added
    `:input-query-vs` alongside `:input-signals` on every `:sub/run`;
    rf-cna's subscribe macro additionally attaches
    `:re-frame/source {:file :line}` to each input query-v's meta when
@@ -557,7 +557,7 @@
    epoch. We pick those whose value *changed* — `:sub/traits
    :unchanged?` not set — and expose the user-facing query-v plus
    the dep-graph edges from the matching :sub/run trace's
-   `:input-query-vs` tag (rfp-fxv / rf-3p7 item 3 — re-frame commit
+   `:input-query-vs` tag (upstream rf-3p7 item 3 — re-frame commit
    fa90f70).
 
    `:time-ms` is not stored per-sub at this layer; omit it rather than
@@ -793,7 +793,7 @@
         :parent-dispatch-id (:parent-dispatch-id tags)}))))
 
 ;; ---------------------------------------------------------------------------
-;; Native epoch path (rfp-zl8 / re-frame rf-ybv)
+;; Native epoch path (upstream re-frame rf-ybv)
 ;; ---------------------------------------------------------------------------
 ;;
 ;; re-frame core's `register-epoch-cb` (commit 4a53afb) ships assembled
@@ -1194,7 +1194,7 @@
 
 (defn epoch-by-id
   "Return the coerced epoch with matching id, or nil. Prefers the
-   native-epoch-buffer (rfp-zl8 / rf-ybv); falls back to
+   native-epoch-buffer (upstream rf-ybv); falls back to
    `read-10x-epochs` when re-frame predates rf-ybv or the epoch has
    aged out of the native buffer."
   [id]
