@@ -1198,11 +1198,10 @@
    Most recent match wins — usually what you want for 'how did I get
    into this state?' post-mortems."
   [pred]
-  (->> (read-10x-epochs)
-       (map coerce-epoch)
-       reverse
-       (filter pred)
-       first))
+  (some (fn [raw]
+          (let [epoch (coerce-epoch raw)]
+            (when (pred epoch) epoch)))
+        (rseq (read-10x-epochs))))
 
 (defn find-all-where
   "Like find-where but returns every matching epoch, newest first. Use
@@ -1210,9 +1209,11 @@
    :cart changed' — not just the most recent transition."
   [pred]
   (->> (read-10x-epochs)
-       (map coerce-epoch)
-       reverse
-       (filterv pred)))
+       rseq
+       (keep (fn [raw]
+               (let [epoch (coerce-epoch raw)]
+                 (when (pred epoch) epoch))))
+       vec))
 
 ;; ---------------------------------------------------------------------------
 ;; Console capture

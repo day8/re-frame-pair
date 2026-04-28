@@ -689,6 +689,40 @@
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
     (is (nil? (rt/last-claude-epoch)))))
 
+(deftest find-where-coerces-until-newest-match
+  (testing "find-where reverses raw epochs before coercion and stops after the first match"
+    (let [coerced-ids (atom [])
+          raws        [{:id 1} {:id 2} {:id 3}]
+          coerce      (fn
+                        ([raw]
+                         (swap! coerced-ids conj (:id raw))
+                         {:id (:id raw)})
+                        ([raw _ctx]
+                         (swap! coerced-ids conj (:id raw))
+                         {:id (:id raw)}))]
+      (with-redefs [rt/read-10x-epochs (fn [] raws)
+                    rt/coerce-epoch    coerce]
+        (is (= {:id 2}
+               (rt/find-where #(= 2 (:id %)))))
+        (is (= [3 2] @coerced-ids))))))
+
+(deftest find-all-where-coerces-in-search-order
+  (testing "find-all-where filters in newest-first order without a pre-coerced buffer"
+    (let [coerced-ids (atom [])
+          raws        [{:id 1} {:id 2} {:id 3}]
+          coerce      (fn
+                        ([raw]
+                         (swap! coerced-ids conj (:id raw))
+                         {:id (:id raw)})
+                        ([raw _ctx]
+                         (swap! coerced-ids conj (:id raw))
+                         {:id (:id raw)}))]
+      (with-redefs [rt/read-10x-epochs (fn [] raws)
+                    rt/coerce-epoch    coerce]
+        (is (= [{:id 3} {:id 1}]
+               (rt/find-all-where #(odd? (:id %)))))
+        (is (= [3 2 1] @coerced-ids))))))
+
 (deftest install-native-epoch-cb-noop-without-register-fn
   (testing "install-native-epoch-cb! is a silent no-op when re-frame
             predates rf-ybv (the runtime-test build pins re-frame
