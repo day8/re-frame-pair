@@ -24,8 +24,8 @@
          '[clojure.string :as str])
 (import '(java.io File))
 
-;; Load ops.clj as a library — auto-run is gated on OPS_NO_AUTO_RUN.
-(System/setProperty "OPS_NO_AUTO_RUN" "1") ;; belt-and-suspenders alongside env
+;; Load ops.clj as a library; package.json sets OPS_NO_AUTO_RUN in the
+;; test environment so the script dispatcher does not auto-run.
 (spit "/dev/null" "") ;; touch fs to ensure cwd is sane
 (load-file (str (System/getProperty "user.dir") "/scripts/ops.clj"))
 
