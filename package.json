@@ -25,8 +25,9 @@
   "license": "MIT",
   "author": "day8 (https://github.com/day8)",
   "scripts": {
-    "test": "shadow-cljs compile runtime-test && node out/runtime-test.js && OPS_NO_AUTO_RUN=1 bb tests/ops_smoke.bb",
+    "test": "shadow-cljs compile runtime-test && node out/runtime-test.js && OPS_NO_AUTO_RUN=1 bb tests/ops_smoke.bb && bb tests/skill_recipe_smoke.bb",
     "test:ops": "OPS_NO_AUTO_RUN=1 bb tests/ops_smoke.bb",
+    "test:skill-recipe": "bb tests/skill_recipe_smoke.bb",
     "prepublishOnly": "npm test"
   },
   "devDependencies": {
