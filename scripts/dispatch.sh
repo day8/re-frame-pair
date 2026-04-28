@@ -19,6 +19,7 @@
 #   scripts/dispatch.sh '[:cart/apply-coupon "SPRING25"]' --sync
 #   scripts/dispatch.sh '[:cart/apply-coupon "SPRING25"]' --trace
 set -euo pipefail
+case "${1:-}" in --help|-h) sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 command -v bb >/dev/null 2>&1 || {
   echo '{:ok? false :reason :babashka-missing :hint "Install babashka: https://babashka.org"}' >&2
