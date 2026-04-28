@@ -82,6 +82,12 @@
                   (append-console-entry! level args stack))
                 (.apply orig js/console (apply array args))))))))
 
+(defn console-capture-installed?
+  "True when this browser runtime has installed the console wrapper."
+  []
+  (boolean (and (exists? js/window)
+                (aget js/window "__rfp_console_capture__"))))
+
 (defn console-tail-since
   "Return console entries with `:id >= since-id`, optionally filtered
    by `:who` (one of `:app` / `:claude` / `:handler-error`, or nil =

@@ -1191,6 +1191,19 @@
       (is (boolean? (:native-epoch-cb? h)))
       (is (boolean? (:native-trace-cb? h))))))
 
+(deftest health-can-skip-capture-installs
+  (testing "discover --no-capture can avoid console and native trace overhead"
+    (let [installed (atom [])]
+      (with-redefs [rt/install-last-click-capture! (fn [] (swap! installed conj :last-click))
+                    rt/install-native-epoch-cb!   (fn [] (swap! installed conj :native-epoch))
+                    rt/install-console-capture!   (fn [] (swap! installed conj :console))
+                    rt/install-native-trace-cb!   (fn [] (swap! installed conj :native-trace))
+                    rt/console-capture-installed? (fn [] false)]
+        (let [h (rt/health {:capture? false})]
+          (is (= [:last-click :native-epoch] @installed))
+          (is (false? (:console-capture? h)))
+          (is (false? (:native-trace-cb? h))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Upstream rf-4mr — dispatch-and-settle bridge for the bash shim.
 ;; -----------------------------------------------------------------------------

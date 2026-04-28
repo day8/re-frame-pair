@@ -187,6 +187,25 @@
     (is (= :app (#'ops/build-id-from-args ["[:event/foo]" "--build=:app" "--sync"])))
     (is (= :app (#'ops/build-id-from-args ["--sync" "--build=app" "[:foo]"])))))
 
+(deftest discover-no-capture-passes-health-option
+  (testing "--no-capture asks runtime health to skip console/native trace installs"
+    (let [seen    (atom nil)
+          emitted (atom nil)]
+      (with-redefs [ops/ensure-port!         (fn [] true)
+                    ops/inject-runtime!      (fn [_build-id opts]
+                                               (reset! seen opts)
+                                               {:ok? true
+                                                :ten-x-loaded? true
+                                                :trace-enabled? true
+                                                :re-com-debug? true
+                                                :versions {:by-dep {}}})
+                    ops/read-port            (fn [] 8777)
+                    ops/list-builds-on-port  (fn [_] [:app])
+                    ops/emit                 (fn [m] (reset! emitted m))]
+        (#'ops/discover ["--no-capture"])
+        (is (= {:capture? false} @seen))
+        (is (true? (:capture-skipped? @emitted)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; rfp-zml: --stub flag parsing for dispatch-with bridge
 ;; ---------------------------------------------------------------------------

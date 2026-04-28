@@ -175,6 +175,7 @@
 (def current-who             console/current-who)
 (def append-console-entry!   console/append-console-entry!)
 (def install-console-capture! console/install-console-capture!)
+(def console-capture-installed? console/console-capture-installed?)
 (def console-tail-since      console/console-tail-since)
 
 ;; ---------------------------------------------------------------------------
@@ -277,31 +278,35 @@
    `discover-app.sh` to confirm the environment is healthy.
 
    Side effect: installs the last-clicked capture listener and the
-   console capture wrapper if they aren't already installed. Both
-   are idempotent."
-  []
-  (install-last-click-capture!)
-  (install-console-capture!)
-  (install-native-epoch-cb!)
-  (install-native-trace-cb!)
-  ;; epoch-count throws when 10x isn't loaded (or when running outside
-  ;; the browser, e.g. shadow-cljs's node-test build). Health is meant
-  ;; to be a best-effort summary; catch and fall back to nil so the
-  ;; rest of the report still surfaces.
-  (let [ec (try (epoch-count) (catch :default _ nil))]
-    {:ok?                 true
-     :session-id          session-id
-     :ten-x-loaded?       (ten-x-loaded?)
-     :trace-enabled?      (trace-enabled?-fn)
-     :re-com-debug?       (re-com-debug-enabled?)
-     :last-click-capture? true
-     :console-capture?    true
-     :native-epoch-cb?    @native-epoch-cb-installed?
-     :native-trace-cb?    @native-trace-cb-installed?
-     :app-db-initialised? (map? @db/app-db)
-     :versions            (version-report)
-     :epoch-count         ec
-     :claude-epoch-count  (:total-count @claude-dispatch-ids)}))
+   native epoch callback if they aren't already installed. With
+   `{:capture? false}`, skips the console wrapper and native trace
+   callback so discovery-only sessions do not pay per-console-call or
+   per-trace overhead. All installs are idempotent."
+  ([] (health {:capture? true}))
+  ([{:keys [capture?] :or {capture? true}}]
+   (install-last-click-capture!)
+   (install-native-epoch-cb!)
+   (when capture?
+     (install-console-capture!)
+     (install-native-trace-cb!))
+   ;; epoch-count throws when 10x isn't loaded (or when running outside
+   ;; the browser, e.g. shadow-cljs's node-test build). Health is meant
+   ;; to be a best-effort summary; catch and fall back to nil so the
+   ;; rest of the report still surfaces.
+   (let [ec (try (epoch-count) (catch :default _ nil))]
+     {:ok?                 true
+      :session-id          session-id
+      :ten-x-loaded?       (ten-x-loaded?)
+      :trace-enabled?      (trace-enabled?-fn)
+      :re-com-debug?       (re-com-debug-enabled?)
+      :last-click-capture? true
+      :console-capture?    (console-capture-installed?)
+      :native-epoch-cb?    @native-epoch-cb-installed?
+      :native-trace-cb?    @native-trace-cb-installed?
+      :app-db-initialised? (map? @db/app-db)
+      :versions            (version-report)
+      :epoch-count         ec
+      :claude-epoch-count  (:total-count @claude-dispatch-ids)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Session-bootstrap summary

@@ -4,6 +4,7 @@
 #
 # Usage:
 #   scripts/discover-app.sh [--build=:app]
+#   scripts/discover-app.sh --no-capture  # skip console/native trace capture
 #   scripts/discover-app.sh --list   # list all candidate ports + active builds
 #                                    # without injecting; surfaces multi-build
 #                                    # setups so you can pick deliberately

@@ -590,38 +590,43 @@
    chunk index, error, and a hint.
 
    When a re-ship happens, follows up with one `health` call to install
-   the native epoch / trace callbacks, the console-capture wrapper, and
-   the last-click capture listener. Without this follow-up, the runtime
-   ns lands but its capture cbs are never invoked — every post-refresh
-   op that reads `native-epochs` / `native-traces` returns empty, and
-   `console-tail` stops receiving entries. The four installs are guarded
-   by idempotency atoms / window markers, so calling health a second
-   time (e.g. through `inject-runtime!` for `discover`) is a no-op for
-   side effects."
-  [build-id]
-  (if (runtime-already-injected? build-id)
-    false
-    (let [results (chunked-inject! build-id (runtime-cljs-paths))
-          last-result (last results)]
-      (if (and last-result (:reason (second last-result)))
-        (let [[idx fail] last-result]
-          (die :inject-failed
-               :stage         (:stage fail)
-               :chunk-index   idx
-               :chunk-count   (:chunk-count fail)
-               :ex            (:ex fail)
-               :err           (:err fail)
-               :hint          (:hint fail)))
-        (do
-          (cljs-eval-value build-id (runtime-form 'health))
-          true)))))
+   the runtime captures requested by `opts`. Without this follow-up, the
+   runtime ns lands but its callbacks are never invoked. Installs are
+   guarded by idempotency atoms / window markers, so calling health a
+   second time (e.g. through `inject-runtime!` for `discover`) is a no-op
+   for side effects."
+  ([build-id] (ensure-injected! build-id {:capture? true}))
+  ([build-id {:keys [capture?] :or {capture? true}}]
+   (if (runtime-already-injected? build-id)
+     false
+     (let [results (chunked-inject! build-id (runtime-cljs-paths))
+           last-result (last results)]
+       (if (and last-result (:reason (second last-result)))
+         (let [[idx fail] last-result]
+           (die :inject-failed
+                :stage         (:stage fail)
+                :chunk-index   idx
+                :chunk-count   (:chunk-count fail)
+                :ex            (:ex fail)
+                :err           (:err fail)
+                :hint          (:hint fail)))
+         (do
+           (cljs-eval-value build-id
+                            (if capture?
+                              (runtime-form 'health)
+                              (runtime-form 'health (pr-str {:capture? false}))))
+           true))))))
 
 (defn- inject-runtime!
   "Ensure scripts/runtime.cljs is loaded and return the health map.
    Used by `discover` for its full health report."
-  [build-id]
-  (ensure-injected! build-id)
-  (cljs-eval-value build-id (runtime-form 'health)))
+  ([build-id] (inject-runtime! build-id {:capture? true}))
+  ([build-id {:keys [capture?] :or {capture? true}}]
+   (ensure-injected! build-id {:capture? capture?})
+   (cljs-eval-value build-id
+                    (if capture?
+                      (runtime-form 'health)
+                      (runtime-form 'health (pr-str {:capture? false}))))))
 
 (defn- version-failure
   "If the health report's version block names a below-floor dep,
@@ -647,12 +652,13 @@
 (defn- discover [args]
   (ensure-port!)
   (let [build-id        (build-id-from-args args)
+        capture?        (not (some #{"--no-capture"} args))
         ;; If the operator named a build (--build= or env), we don't
         ;; warn about multi-build — they made the choice.
         explicit-build? (or (some #(str/starts-with? % "--build=") args)
                             (boolean (System/getenv "SHADOW_CLJS_BUILD_ID")))]
     (try
-      (let [health      (inject-runtime! build-id)
+      (let [health      (inject-runtime! build-id {:capture? capture?})
             version-err (version-failure health)
             ;; Multi-build awareness: probe active builds on the
             ;; chosen port. Failure is non-fatal — `discover` still
@@ -686,6 +692,7 @@
           :else
           (emit (cond-> health
                   true                          (assoc :ok? true :build-id build-id)
+                  (not capture?)                (assoc :capture-skipped? true)
                   (not (:re-com-debug? health)) (assoc :warning :re-com-debug-disabled
                                                        :note    "DOM ↔ source ops will degrade; otherwise functional.")
                   ;; Multi-build wins as the structured :warning when
