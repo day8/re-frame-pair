@@ -1,5 +1,5 @@
 (ns runtime-test
-  (:require [cljs.test :refer [deftest is testing]]
+  (:require [cljs.test :refer [deftest is testing use-fixtures]]
             [fixtures]
             [re-frame-pair.runtime :as rt]))
 
@@ -17,6 +17,24 @@
   "Read a private runtime atom without direct private-symbol access."
   [runtime-var]
   (deref @runtime-var))
+
+(defn- reset-all-runtime-atoms!
+  "Reset every shared runtime atom to its defonce starting value.
+   Mirrored against runtime.cljs — keep in sync if a defonce default
+   ever changes. Without this fixture, a deftest that mutates one of
+   these and forgets to reset would leak into every later deftest."
+  []
+  (reset-runtime-atom! #'rt/native-epoch-buffer        {:entries [] :max-size 50})
+  (reset-runtime-atom! #'rt/native-trace-buffer        {:entries [] :max-size 5000})
+  (reset-runtime-atom! #'rt/native-epoch-cb-installed? false)
+  (reset-runtime-atom! #'rt/native-trace-cb-installed? false)
+  (reset-runtime-atom! #'rt/console-log                {:entries [] :next-id 0 :max-size 500})
+  (reset-runtime-atom! #'rt/current-who                :app)
+  (reset-runtime-atom! #'rt/claude-dispatch-ids        #{})
+  (reset-runtime-atom! #'rt/settle-pending             {})
+  (reset-runtime-atom! #'rt/stub-effect-log            []))
+
+(use-fixtures :each (fn [t] (reset-all-runtime-atoms!) (t)))
 
 (deftest re-com-classification
   (testing "re-com namespaces are detected by the :re-com? helpers"
