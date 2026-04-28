@@ -103,7 +103,9 @@ When `handler/source` returns `:no-source-meta`, the cause is most often that th
 
 - **Read live state before guessing.** `app-db/snapshot`, `trace/last-epoch` first; hypothesis after.
 - **Probe, don't speculate.** When an answer isn't obvious, evaluate against live data.
-- **Two modes; know which you're in.** REPL changes (hot-swap, eval form, reset app-db) are **ephemeral** — survive hot-reloads of unaffected nses, lost on full page refresh. Source edits via `Edit` / `Write` are **permanent**. After any source edit, run `scripts/tail-build.sh --probe '<form>'` before dispatching or tracing — otherwise you're interacting with the pre-reload code.
+- **REPL access is your second mode.** You can hot-swap a handler / sub / fx, redefine a `defn`, or `reset!` `app-db` directly through `repl/eval` — the change takes effect immediately in the running app, no source edit and no recompile. That makes probing cheap: try a fix, dispatch the event, watch the resulting epoch, throw it away. When a REPL-only patch turns out to be the right shape, transfer it to source. Two practical points to remember:
+  - REPL changes are **ephemeral** — survive hot-reloads of unaffected nses, lost on full page refresh. Source edits via `Edit` / `Write` are **permanent**.
+  - After any source edit, run `scripts/tail-build.sh --probe '<form>'` before dispatching or tracing — otherwise you're interacting with the pre-reload code.
 - **Connect first, every session.** Run `scripts/discover-app.sh` then `scripts/app-summary.sh` before any other op. discover-app finds the nREPL port, switches to `:cljs` mode, verifies preconditions, and injects the runtime ns. app-summary is a one-round-trip bootstrap (versions + registrar + live subs + app-db shape + health). If discover fails it returns `{:ok? false :reason ...}` — surface verbatim, don't guess workarounds.
 - **Surface failures verbatim.** Every script returns structured edn. Translate `:reason` to plain English; don't paper over it.
 - **Validate before proposing.** When a hot-swap or suggestion is on the table, compose the form and run it against current state first.

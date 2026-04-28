@@ -303,8 +303,7 @@
   ;; std_interceptors/db-handler->interceptor binds to the inner
   ;; :event/handler trace at handler-call time. coerce-epoch should
   ;; reach into match-info, find that :event/handler entry, and surface
-  ;; its :tags :code under the debux-namespaced :debux/code key. See
-  ;; docs/inspirations-debux.md §3b.
+  ;; its :tags :code under the debux-namespaced :debux/code key.
   (let [code-payload [{:form '(let [n (* 2 x)] (assoc db :n n))
                        :result {:n 10}
                        :indent-level 0

@@ -38,7 +38,7 @@ re-frame-10x has no immediate use for it.
 > (`c40cb82`), rf-ybv (`4a53afb`), rf-ge8 (`2651a30`), rf-4mr
 > (`f8f0f59`), and rf-556 (`b68318b`) shipped during the same window
 > but address surfaces this doc didn't enumerate — see
-> `docs/inspirations-debux.md` and `STATUS.md` for those.
+> `STATUS.md` *Post-spike additions* for those.
 
 ## 1. What re-frame currently emits
 
@@ -471,11 +471,8 @@ order.
 
 - `docs/handler-source-meta.md` — the structural-cause analysis for
   the §3.5 gap (path 1, 2, 3 trade-offs).
-- `docs/inspirations-debux.md` — companion survey of re-frame-debux's
-  shape, especially §6 (the improvement plan that shipped
-  `wrap-handler!` / `unwrap-handler!`) and §7 (the top-N
-  ranked-takeaways structure mirrored here).
-- `STATUS.md` *Post-spike additions* (`rfp-hjj` Phase 1) and *Next
-  actions / v0.2 deferred backlog* (`rfp-rsg` and the cross-rig
-  pointer to the upstream `rfd-8g9` work that this document is the
-  re-frame-side counterpart to).
+- `docs/recipes/debux.md` — the REPL-driven recipes that consume
+  what this document proposes upstream (`wrap-handler!` /
+  `unwrap-handler!` / `dbg`).
+- `STATUS.md` *Post-spike additions* and *Next actions / v0.2
+  deferred backlog* — for the re-frame-pair-side land detail.

@@ -115,7 +115,7 @@ The runtime API is a thin wrapper over the same `fn-traced` macro; you can still
 - **Same-shape arity.** The wrapped form has to match the original handler's argument shape (`[db ev]` for `reg-event-db`, `[ctx ev]` for `reg-event-fx`, etc.). Look up `registrar/describe :event :foo/bar` first to confirm — `:reg-event-db` vs `:reg-event-fx` lives in the response's `:kind`.
 - **Restore is critical.** A wrapped handler stays wrapped for the rest of the REPL session (until full page reload). Always pair wrap with unwrap (or the manual restore) in the same turn.
 
-This recipe is the on-demand half of the integration described in [`../inspirations-debux.md`](../inspirations-debux.md) §3.0. The bridge half (surfacing `:code` as `:debux/code` in the epoch) is automatic.
+This recipe is the on-demand half of the integration. The bridge half — surfacing `:code` as `:debux/code` on each coerced epoch — is automatic.
 
 ## "Trace a single expression at the REPL"
 

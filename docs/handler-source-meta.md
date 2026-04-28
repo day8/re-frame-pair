@@ -191,9 +191,9 @@ The retired `handler-source` implementation checked the side-table first and fel
 
 **Original effort estimate:** ~80 LOC (macro file + side-table + handler-source rewire + SKILL.md recipe + 4-5 deftests). Half a day.
 
-## Cross-reference: Appendix A item A7 (superseded by rf-ysy)
+## Cross-reference: spec Appendix A item A7 (superseded by rf-ysy)
 
-`docs/companion-re-frame.md` § A7 proposes that re-frame retain handler source forms in dev builds, gated by `debug-enabled?`. rf-ysy did not land exactly as A7: it does not retain full source forms. It did land the part `handler/source` needs, though: call-site metadata on registered handlers. That makes Path 3 obsolete by mechanism even though A7's fuller `:source-form` idea remains a possible future enhancement.
+Spec Appendix A item A7 (in `docs/initial-spec.md`) proposed that re-frame retain handler source forms in dev builds, gated by `debug-enabled?`. rf-ysy did not land exactly as A7: it does not retain full source forms. It did land the part `handler/source` needs, though: call-site metadata on registered handlers. That makes Path 3 obsolete by mechanism even though A7's fuller `:source-form` idea remains a possible future enhancement.
 
 ## Recommendation (current)
 

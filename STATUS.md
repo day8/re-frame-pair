@@ -160,7 +160,7 @@ Work landed after the §8a ground-truth resolution that's not part of the spec's
 
 ### `rfp-hjj` — Phase 1 `re-frame-debux` integration (2026-04-26)
 
-Surface `re-frame-debux`'s per-form value trace as a first-class field on epoch records — without taking a hard dependency on `day8.re-frame/tracing` and without re-implementing its zipper machinery. See `docs/inspirations-debux.md` for the design rationale; §3.0 (on-demand REPL-driven `fn-traced` wrapping) is the load-bearing recipe. Four commits:
+Surface `re-frame-debux`'s per-form value trace as a first-class field on epoch records — without taking a hard dependency on `day8.re-frame/tracing` and without re-implementing its zipper machinery. The on-demand REPL-driven `fn-traced` / `wrap-handler!` recipe is the load-bearing piece (now in `docs/recipes/debux.md`). Four commits:
 
 | Item | Commit | Change |
 |---|---|---|
@@ -214,7 +214,7 @@ Shipped — was previously deferred. `re-frame-debux` (Tier 2: `rfd-8g9`, `rfd-b
 | `rfp-mkf` | `ff6dbf2` | Fixture wired into `day8.re-frame/tracing` via `:local/root` (`../../../re-frame-debux`). `:counter/inc` wrapped with `fn-traced` as a worked example — the SKILL.md recipe finally has a live call site emitting non-nil `:debux/code`. |
 | `rfp-6z2` | `a285c1d` | SKILL.md *Trace a handler/sub/fx form-by-form* recipe branches: PREFERRED (3 steps via `wrap-handler!` / `unwrap-handler!` from rfd-8g9), FALLBACK (5-step manual `fn-traced` rewrite, kept verbatim for older debux). `debux-runtime-api?` predicate detects which surface is loaded. |
 | `ci-hpg` Phase 2 | `c498dc7` | `debux-runtime-api?` switched to probe upstream's dedicated `day8.re-frame.tracing.runtime/runtime-api?` var (re-frame-debux commit `6b04e6b`) — durable feature-detection contract owned by the library. |
-| `rfp-12p` | `c81234a` | New SKILL.md recipe: *Trace a single expression at the REPL* (rfd-btn's `dbg` macro). Lower-friction alternative to handler-level `fn-traced` when the agent only wants to instrument one form. `dbg-macro-available?` probe mirrors `debux-runtime-api?`'s shape. `docs/inspirations-debux.md` §3.0 also gains a "Single-expression variant" paragraph. |
+| `rfp-12p` | `c81234a` | New SKILL.md recipe: *Trace a single expression at the REPL* (rfd-btn's `dbg` macro). Lower-friction alternative to handler-level `fn-traced` when the agent only wants to instrument one form. `dbg-macro-available?` probe mirrors `debux-runtime-api?`'s shape. |
 
 ### `rfp-3es` — SKILL.md cardinal rule names a real op (2026-04-27)
 

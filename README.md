@@ -101,15 +101,15 @@ Starting fresh? [`re-frame-template`](https://github.com/day8/re-frame-template)
 
 ### Optional: per-form trace via re-frame-debux
 
-Add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) to your dev classpath and the skill can drive it on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. **Not** transitive via `re-frame-10x` — add the dep explicitly. See [`docs/inspirations-debux.md`](docs/inspirations-debux.md) for the integration shape; the REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
+Add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) to your dev classpath and the skill can drive it on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. **Not** transitive via `re-frame-10x` — add the dep explicitly. The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
 
 ## Two modes
 
-Without this skill, Claude writes edits to source files and shadow-cljs hot-reloads them.
+A normal coding agent can only modify source files. re-frame-pair gives Claude a second mode: **ephemeral changes via the REPL**. Claude can hot-swap an event handler, redefine a subscription, swap an effect handler, or `reset!` `app-db` directly — the change takes effect immediately in the running app, with no source edit, no recompile, no commit.
 
-re-frame-pair adds a second mode: **ephemeral** changes via the REPL — hot-swap an event handler or a subscription, try it, discard if it didn't work. REPL changes survive hot-reloads of unaffected namespaces but are lost on full page reload. Source edits stick.
+That makes probing and iteration cheap: try a fix, dispatch the event, watch the resulting epoch, throw it away and try something else. When a REPL-only patch turns out to be the right shape, transfer it to source.
 
-Knowing which mode you're in is the cardinal rule.
+REPL changes survive hot-reloads of unaffected namespaces, but are lost on full page reload. Source edits stick.
 
 ## Install
 

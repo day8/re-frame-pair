@@ -1108,9 +1108,9 @@
         poll-ms     (Long/parseLong (flag-value args "--poll-ms" (str default-watch-poll-ms)))
         ;; --dedupe-by :event suppresses consecutive duplicate emissions
         ;; whose :event vec matches the previous emitted one. Cribbed
-        ;; from debux's :once option (docs/inspirations-debux.md §3c).
-        ;; Only :event is accepted today; the flag shape leaves room for
-        ;; future :event-id, :touches-path etc. without breaking the CLI.
+        ;; from debux's :once option. Only :event is accepted today; the
+        ;; flag shape leaves room for future :event-id, :touches-path
+        ;; etc. without breaking the CLI.
         dedupe-by   (->kw (flag-value args "--dedupe-by" nil))
         reinjected? (when-not stop? (ensure-injected! build-id))]
     (cond

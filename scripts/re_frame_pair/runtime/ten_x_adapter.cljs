@@ -591,8 +591,7 @@
    so `*current-trace*` at the moment debux emits is the inner
    `:event/handler` trace — not the outer `:event` trace. Read it from
    the `:event/handler`-typed entry in `:match-info`; absent → `nil`.
-   See docs/inspirations-debux.md §3b for the bridge rationale and
-   §3.0 for the on-demand-wrap recipe."
+   See docs/recipes/debux.md for the on-demand-wrap recipe."
   ([raw]
    (coerce-epoch raw {:all-traces  (read-10x-all-traces)
                       :all-matches (when (ten-x-app-db-ratom)
