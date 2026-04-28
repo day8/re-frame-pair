@@ -268,6 +268,7 @@
                        :start    (:start raw)
                        :duration (:duration raw)
                        :tags     {:event              (:event raw)
+                                  :event/original     (get raw :event/original (:event raw))
                                   :app-db-before      (:app-db/before raw)
                                   :app-db-after       (:app-db/after raw)
                                   :coeffects          (:coeffects raw)

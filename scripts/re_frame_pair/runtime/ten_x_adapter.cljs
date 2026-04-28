@@ -549,6 +549,13 @@
         :t                 (:start event-trace)
         :time-ms           (:duration event-trace)
         :event             (:event tags)
+        ;; Pinned at re-frame.events/handle entry, before any
+        ;; interceptor (trim-v / unwrap / path / inject-cofx, …)
+        ;; rewrote :event for the handler. Always present on
+        ;; re-frame core's :event traces post-2026 release; older
+        ;; re-frame degrades to the same value as :event since no
+        ;; rewrite was tracked.
+        :event/original    (get tags :event/original (:event tags))
         :coeffects         (:coeffects tags)
         :effects           (:effects tags)
         :effects/fired     (flatten-fx (:effects tags))

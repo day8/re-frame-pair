@@ -2533,3 +2533,60 @@
       (is (nil? (:src entry))
           "missing :src in :re-com/render tags must not crash and must not
            manufacture a fake :src on the render entry"))))
+
+(deftest event-original-flattened-onto-coerced-epoch
+  ;; re-frame 2026 added :event/original on :event traces — the
+  ;; dispatched event vector pinned at re-frame.events/handle entry,
+  ;; before any interceptor rewrites :event for the handler. Recipes
+  ;; like *Why did this event fire?* benefit from the dispatch-site
+  ;; shape staying available even when :event has been trimmed/wrapped
+  ;; by the time the handler sees it. Both coerce paths must surface
+  ;; it, and degrade to the existing :event value when re-frame's
+  ;; trace stream predates the additive tag.
+  (testing "10x match path: :event/original on the event trace's tags
+            surfaces on the coerced epoch when present (interceptor
+            stripped one element from :event, but :event/original
+            preserves the original 2-element dispatch vec)"
+    (let [original-event   [:cart/apply-coupon "SPRING25"]
+          handler-saw      [:cart/apply-coupon]              ; trim-v stripped the args
+          match            (assoc-in fixtures/synthetic-match
+                                     [:match-info 0 :tags :event]
+                                     handler-saw)
+          match            (assoc-in match
+                                     [:match-info 0 :tags :event/original]
+                                     original-event)
+          coerced          (rt/coerce-epoch match)]
+      (is (= handler-saw    (:event coerced)))
+      (is (= original-event (:event/original coerced)))))
+
+  (testing "10x match path: missing :event/original tag (older re-frame)
+            → :event/original equals :event (additive tag — backwards
+            compatible, no NPE, recipes that read :event/original still
+            get a sane value)"
+    (let [coerced (rt/coerce-epoch fixtures/synthetic-match)]
+      (is (= (:event coerced) (:event/original coerced)))
+      (is (some? (:event/original coerced))
+          "older re-frame's :event was non-nil → :event/original mirrors it, never nil")))
+
+  (testing "Native rf-ybv path: raw native epoch carries :event/original
+            as a sibling field to :event (assemble-epochs delivers it
+            from the :event trace's tags). coerce-native-epoch flattens
+            it onto the §4.3a record."
+    (let [original-event [:cart/apply-coupon "SPRING25"]
+          handler-saw    [:cart/apply-coupon]
+          raw            (-> fixtures/synthetic-native-epoch
+                             (assoc :event handler-saw)
+                             (assoc :event/original original-event))
+          ctx            {:traces fixtures/synthetic-native-traces
+                          :all-epochs [raw]}
+          coerced        (rt/coerce-native-epoch raw ctx)]
+      (is (= handler-saw    (:event coerced)))
+      (is (= original-event (:event/original coerced)))))
+
+  (testing "Native rf-ybv path: pre-2026 raw native epoch (no
+            :event/original sibling) → :event/original equals :event"
+    (let [raw     fixtures/synthetic-native-epoch
+          ctx     {:traces fixtures/synthetic-native-traces
+                   :all-epochs [raw]}
+          coerced (rt/coerce-native-epoch raw ctx)]
+      (is (= (:event coerced) (:event/original coerced))))))
