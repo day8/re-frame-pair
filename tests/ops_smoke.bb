@@ -248,6 +248,62 @@
     (is (= [] (#'ops/parse-stub-fx-ids ["[:ev]" "--trace"])))))
 
 ;; ---------------------------------------------------------------------------
+;; parse-predicate-args — watch-epochs.sh predicate map builder.
+;; ---------------------------------------------------------------------------
+
+(deftest parse-predicate-args-each-flag
+  (testing "individual watch predicate flags produce the runtime map shape"
+    (is (= {:event-id :cart/add}
+           (#'ops/parse-predicate-args ["--event-id" ":cart/add"])))
+    (is (= {:event-id-prefix ":cart/"}
+           (#'ops/parse-predicate-args ["--event-id-prefix" "cart/"])))
+    (is (= {:event-id-prefix ":cart/"}
+           (#'ops/parse-predicate-args ["--event-id-prefix" ":cart/"])))
+    (is (= {:effects :http-xhrio}
+           (#'ops/parse-predicate-args ["--effects" "http-xhrio"])))
+    (is (= {:timing-ms [:> 100]}
+           (#'ops/parse-predicate-args ["--timing-ms" ">100"])))
+    (is (= {:timing-ms [:< 5]}
+           (#'ops/parse-predicate-args ["--timing-ms" "<5"])))
+    (is (= {:touches-path [:cart :items]}
+           (#'ops/parse-predicate-args ["--touches-path" "[:cart :items]"])))
+    (is (= {:sub-ran :cart/total}
+           (#'ops/parse-predicate-args ["--sub-ran" "cart/total"])))
+    (is (= {:render "re-com.buttons/button"}
+           (#'ops/parse-predicate-args ["--render" "re-com.buttons/button"])))))
+
+(deftest parse-predicate-args-combines-flags
+  (testing "flags compose into one predicate map; later duplicate flags win"
+    (is (= {:event-id-prefix ":cart/"
+            :effects :dispatch
+            :timing-ms [:> 25]
+            :sub-ran :cart/total}
+           (#'ops/parse-predicate-args
+            ["--event-id-prefix" "cart/"
+             "--effects" ":dispatch"
+             "--timing-ms" ">25"
+             "--sub-ran" ":cart/total"])))
+    (is (= {:render "new"}
+           (#'ops/parse-predicate-args ["--render" "old" "--render" "new"])))))
+
+(deftest parse-predicate-args-rejects-bad-timing-and-custom
+  (testing "bad timing syntax and deferred custom predicate flag die cleanly"
+    (with-redefs [ops/die (fn [reason & {:as data}]
+                            (throw (ex-info "die" (assoc data :reason reason))))]
+      (is (= :bad-timing-ms
+             (try (#'ops/parse-predicate-args ["--timing-ms" ">=100"])
+                  (catch clojure.lang.ExceptionInfo e
+                    (:reason (ex-data e))))))
+      (is (= :bad-timing-ms
+             (try (#'ops/parse-predicate-args ["--timing-ms" "><100"])
+                  (catch clojure.lang.ExceptionInfo e
+                    (:reason (ex-data e))))))
+      (is (= :flag-not-supported
+             (try (#'ops/parse-predicate-args ["--custom" "(fn [_] true)"])
+                  (catch clojure.lang.ExceptionInfo e
+                    (:reason (ex-data e)))))))))
+
+;; ---------------------------------------------------------------------------
 ;; partition-dispatch-args — order-independent split of dispatch.sh args.
 ;;
 ;; The docstring promises three invocations parse identically:
@@ -700,6 +756,27 @@
         (is (= 1 @opened))
         (is (= 2 (count @eval-conns)))
         (is (= 1 (count (distinct @eval-conns))))))))
+
+(deftest await-settle-loop-times-out-while-pending
+  (testing "pending responses past the wall-clock budget return :poll-timeout"
+    (let [calls (atom 0)]
+      (with-redefs [ops/settle-poll-ms        0
+                    ops/settle-poll-budget-ms 0
+                    ops/with-current-nrepl-connection
+                    (fn [f] (f {:conn-id 1}))
+                    ops/cljs-eval-value
+                    (fn
+                      ([_build-id _form]
+                       (throw (ex-info "non-persistent eval path used" {})))
+                      ([_conn _build-id _form]
+                       (swap! calls inc)
+                       {:pending? true}))]
+        (is (= {:ok? false
+                :reason :poll-timeout
+                :handle "handle-1"
+                :budget-ms 0}
+               (#'ops/await-settle-loop :app "handle-1")))
+        (is (= 1 @calls))))))
 
 (deftest watch-op-reuses-single-nrepl-connection
   (testing "watch-op uses one persistent connection for the initial head
