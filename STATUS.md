@@ -2,7 +2,7 @@
 
 A living record of what's actually implemented, what's scaffolded, and what's blocked on the spike. Updated per release. See `docs/initial-spec.md` for the design this is measured against.
 
-**Last updated:** 2026-04-27 (post-rfp-3es — native epoch path + new dispatch / source surfaces on `main`)
+**Last updated:** 2026-04-28 (post-rfp-t3bp — auto-reinject / legacy-stub fixes plus recipe-smoke and test-count refreshes)
 
 ---
 
@@ -21,7 +21,7 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app; bundled bootstrap + re-com CSS for self-contained rendering; wired into `re-frame-debux` via `:local/root` (rfp-mkf) so the worked example for the form-by-form trace recipe carries a non-nil `:debux/code` |
 | End-to-end against a live re-frame app | **Verified** — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 predicate filters validated; time-travel rolls userland app-db correctly. v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs #1, #2). |
 
-v0.1.0-beta.2 is on `main` (un-tagged). All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, and CI is green on both PRs. Significant work has landed since the last STATUS refresh — see *Post-spike additions* below — including: Phase 1 + Phase 2 of `re-frame-debux` integration (`:debux/code` field, wrap-handler!/unwrap-handler! recipe, dbg single-form recipe), native epoch path (`re-frame/register-epoch-cb` via rf-ybv replaces 10x as primary epoch source; 10x kept as fallback), `dispatch-and-settle` --trace path (rf-4mr), `dispatch-with --stub` for record-only fx stubs (rf-ge8), `:event/source` (rf-hsl) and `:subscribe/source` + `:input-query-sources` on `:subs/ran` (rf-cna) flattened onto coerced epoch records, and `day8.re-frame-10x.public` preferred over inlined-rf walking (rf1-jum). The next tag will reflect this body of work, not just beta.2.
+v0.1.0-beta.2 is on `main` (un-tagged). All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, and CI is green on both PRs. Significant work has landed since the last STATUS refresh — see *Post-spike additions* below — including: Phase 1 + Phase 2 of `re-frame-debux` integration (`:debux/code` field, wrap-handler!/unwrap-handler! recipe, dbg single-form recipe), native epoch path (`re-frame/register-epoch-cb` via rf-ybv replaces 10x as primary epoch source; 10x kept as fallback), `dispatch-and-settle` --trace path (rf-4mr), `dispatch-with --stub` for record-only fx stubs (rf-ge8), post-refresh auto-reinject callback reinstallation (rfp-5k7), legacy `--trace --stub` safety on pre-rf-4mr builds (rfp-ajn), `:event/source` (rf-hsl) and `:subscribe/source` + `:input-query-sources` on `:subs/ran` (rf-cna) flattened onto coerced epoch records, and `day8.re-frame-10x.public` preferred over inlined-rf walking (rf1-jum). The next tag will reflect this body of work, not just beta.2.
 
 ---
 
@@ -220,6 +220,14 @@ Shipped — was previously deferred. `re-frame-debux` (Tier 2: `rfd-8g9`, `rfd-b
 
 Line 42's cardinal rule was telling the LLM to call `hot-reload/wait` — a label that exists only in comments and the historical `docs/initial-spec.md`. Replaced with the real surface: `scripts/tail-build.sh --probe '<form>'`, with a pointer to the *Hot-reload coordination* section. Prevents an LLM following the cardinal rule from attempting a non-existent invocation on the very first source edit.
 
+### `rfp-5k7` — auto-reinject re-installs runtime callbacks (2026-04-27)
+
+`ensure-injected!` now follows a post-refresh `runtime.cljs` re-ship with `(re-frame-pair.runtime/health)` so the freshly-loaded runtime installs native epoch / trace callbacks plus console and last-click capture before the next op runs. This closes the silent data-loss path where a browser refresh followed by `dispatch.sh --trace` could return `:epoch nil` despite a successful dispatch because the native buffers had not been wired back up.
+
+### `rfp-ajn` — legacy `--trace --stub` keeps fx overrides (2026-04-27)
+
+When re-frame predates `dispatch-and-settle` (rf-4mr), the legacy `--trace` fallback now routes through `dispatch-sync-with-stubs!` whenever `--stub` flags are present. That keeps record-only fx overrides active on old re-frame builds instead of silently dropping `--stub` and firing the real handler. If rf-ge8 is also absent, the op returns a structured `:dispatch-sync-with-unavailable` failure rather than pretending the safety wrapper ran.
+
 ---
 
 ## Next actions
@@ -250,4 +258,11 @@ Line 42's cardinal rule was telling the LLM to call `hot-reload/wait` — a labe
 
 ### Tracking
 
-City-level umbrella bead `ci-8rn` ("drive re-frame-pair to v0.1.0-beta.1") closed 2026-04-26 — beta.1 + beta.2 squash-merged to `main`, all §8a unknowns resolved. Open work beads on the rig as of this refresh: doc-refresh chain (`rfp-jv3` STATUS, `rfp-q2q` SKILL recipes, `rfp-4x8` README, `rfp-1cj` inspirations + upstream-instrumentation, `rfp-kx0` companion-* banners, `rfp-6c6` initial-spec, `rfp-2oj` handler-source.sh docstring, `rfp-nvs` TESTING, `rfp-eft` README beta-1 label, `rfp-8yu` registrar/schema in SKILL ops tables) plus a small test-coverage backlog (`rfp-5g6` chunked-inject tests, `rfp-1p7` forensic/hot-path ops tests, `rfp-u9z` legacy 10x sub-runs inconsistency, `rfp-bqa` epoch-by-id fallback bug). Cross-rig follow-ups: upstream `rfd-8g9` shipped (commits `4ed07c9` + `6b04e6b`); `rfd-iqz` (toolchain modernisation) and `rfd-2nd` (CD dry-run) remain.
+City-level umbrella bead `ci-8rn` ("drive re-frame-pair to v0.1.0-beta.1") closed 2026-04-26 — beta.1 + beta.2 squash-merged to `main`, all §8a unknowns resolved. `bd list --status=open --limit 0` now mostly shows structural Gas City sling / molecule beads plus this user-facing backlog:
+
+- Correctness / bug backlog: `rfp-u9z`, `rfp-adk`, `rfp-aab`, `rfp-hi5`, `rfp-3fr`, `rfp-yte`, `rfp-agg`, `rfp-sc1q`, `rfp-mh2`, `rfp-yi7u`, `rfp-hgd`, `rfp-bhkk`, `rfp-wvph`, `rfp-83ow`, `rfp-fh3`, `rfp-hw4`, `rfp-eb9`, `rfp-1im`, `rfp-7m9`, `rfp-bqa`.
+- Test coverage backlog: `rfp-ctg`, `rfp-5g6`, `rfp-sjdg`, `rfp-66n`, `rfp-h49`, `rfp-vfn`, `rfp-1p7`, `rfp-z6k`.
+- Docs / clarity / polish backlog: `rfp-92q`, `rfp-kkl7`, `rfp-e0d`, `rfp-5xd`, `rfp-hmw`, `rfp-815p`, `rfp-ieql`, `rfp-txs`, `rfp-srn`, `rfp-j4dq`, `rfp-gwd`, `rfp-sr6`, `rfp-2i8t`, `rfp-19m`, `rfp-xjdr`.
+- Completeness / best-practice backlog: `rfp-wzz`, `rfp-duz`.
+
+Cross-rig follow-ups: upstream `rfd-8g9` shipped (commits `4ed07c9` + `6b04e6b`); `rfd-iqz` (toolchain modernisation) and `rfd-2nd` (CD dry-run) remain.
