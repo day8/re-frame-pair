@@ -21,4 +21,23 @@
    :ns-regexp        "-test$"
    :compiler-options
    {:closure-defines {re-frame.trace.trace-enabled? true
-                      goog.DEBUG                    true}}}}}
+                      goog.DEBUG                    true}}}
+
+  ;; Consumer-side verification: builds re-frame-pair.runtime in
+  ;; :advanced together with day8.re-frame-10x.public, then asserts the
+  ;; documented un-suffixed contract path
+  ;; (goog.global.day8.re_frame_10x.public.<name>) resolves — i.e. that
+  ;; the upstream `public$` mirror block survives :advanced compilation
+  ;; of the *consumer* build. The :public-advanced probe inside
+  ;; re-frame-10x covers the producer build separately; this one closes
+  ;; the loop on re-frame-pair's side. Activate the deps.edn
+  ;; :probe-advanced alias when running:
+  ;;   npx shadow-cljs -A:probe-advanced compile probe-advanced
+  ;;   node out/probe-advanced.js
+  :probe-advanced
+  {:target           :node-script
+   :main             probe-advanced/-main
+   :output-to        "out/probe-advanced.js"
+   :compiler-options {:optimizations :advanced
+                      :closure-defines {re-frame.trace.trace-enabled? true
+                                        goog.DEBUG                    true}}}}}
