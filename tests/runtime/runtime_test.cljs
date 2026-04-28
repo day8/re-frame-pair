@@ -219,10 +219,11 @@
                :input-query-sources nil}]
              (:subs/ran e))))
     (testing "subs/cache-hit — reactions that re-ran but value was
-              :unchanged? (closest signal 10x exposes to a 'cache hit');
-              query-v meta surfaces as :subscribe/source"
+              :unchanged?; query-v meta surfaces as :subscribe/source
+              and reason keeps it distinct from subscribe cache hits"
       (is (= [{:query-v          [:cart/items]
-               :subscribe/source fixtures/cart-items-cache-source}]
+               :subscribe/source fixtures/cart-items-cache-source
+               :cache-hit/reason :sub/run-unchanged}]
              (:subs/cache-hit e))))
     (testing "renders — pulled from the full trace stream filtered by
               the match's id range, with munged component names
@@ -242,6 +243,31 @@
         (is (contains? fx-ids :http-xhrio))))
     (testing ":debux/code is nil when re-frame-debux didn't write a :code tag"
       (is (nil? (:debux/code e))))))
+
+(deftest coerce-epoch-normalizes-public-10x-shape
+  (testing "public 10x aliases (:sub-state-raw, :timings) feed the same
+            legacy-shaped coercion path, so sub partitions are not
+            silently dropped"
+    (let [public-match  (-> fixtures/synthetic-match
+                            (assoc :sub-state-raw (:sub-state fixtures/synthetic-match)
+                                   :timings       (:timing fixtures/synthetic-match))
+                            (dissoc :sub-state :timing))
+          public-render (-> fixtures/synthetic-render-burst
+                            (assoc :sub-state-raw (:sub-state fixtures/synthetic-render-burst)
+                                   :timings       (:timing fixtures/synthetic-render-burst))
+                            (dissoc :sub-state :timing))
+          ctx           {:all-traces  fixtures/synthetic-traces
+                         :all-matches [public-match public-render]}
+          e             (rt/coerce-epoch public-match ctx)]
+      (is (= [{:query-v             [:cart/total]
+               :subscribe/source    nil
+               :input-query-vs      nil
+               :input-query-sources nil}]
+             (:subs/ran e)))
+      (is (= [{:query-v          [:cart/items]
+               :subscribe/source fixtures/cart-items-cache-source
+               :cache-hit/reason :sub/run-unchanged}]
+             (:subs/cache-hit e))))))
 
 (deftest coerce-epoch-surfaces-debux-code-when-present
   ;; When a fn-traced-wrapped handler runs, debux's send-trace! lands
@@ -364,7 +390,8 @@
                :input-query-sources nil}]
              (:subs/ran e)))
       (is (= [{:query-v          [:cart/items]
-               :subscribe/source fixtures/cart-items-cache-source}]
+               :subscribe/source fixtures/cart-items-cache-source
+               :cache-hit/reason :sub/run-unchanged}]
              (:subs/cache-hit e))))))
 
 ;; -----------------------------------------------------------------------------
@@ -405,11 +432,11 @@
                :input-query-sources [nil]}]
              (:subs/ran e))))
     (testing "subs/cache-hit is sourced from :sub/create traces with
-              :cached? true (re-frame.subs's own signal) — closer to
-              §4.3a's 'subs dereffed but cached' than 10x's :unchanged?
-              heuristic; query-v meta surfaces as :subscribe/source"
+              :cached? true; query-v meta surfaces as
+              :subscribe/source and reason names the signal"
       (is (= [{:query-v          [:cart/items]
-               :subscribe/source fixtures/cart-items-cache-source}]
+               :subscribe/source fixtures/cart-items-cache-source
+               :cache-hit/reason :sub/create-cached}]
              (:subs/cache-hit e))))
     (testing "renders are bounded by the next epoch's id (200) — the
               outside-of-range render at id 200 doesn't appear here"
@@ -473,6 +500,108 @@
                         [:event-handler :tags :code] code-payload)
           e   (rt/coerce-native-epoch raw fixtures/native-context)]
       (is (= code-payload (:debux/code e))))))
+
+(deftest native-and-legacy-sub-semantics-parity
+  (testing "equivalent legacy and native inputs produce identical sub
+            partitions: changed reruns stay in :subs/ran, unchanged
+            reruns and subscribe-time cache hits stay in :subs/cache-hit
+            with explicit reasons"
+    (let [event         [:cart/apply-coupon "SPRING25"]
+          before-db     {:cart {:items []}}
+          after-db      {:cart {:items [] :coupon "SPRING25"}}
+          effects       {:db after-db}
+          interceptors  [{:id :coeffects} {:id :db-handler}]
+          changed-q     [:cart/total]
+          unchanged-q   fixtures/cart-items-cache-query
+          cached-q      [:cart/discount]
+          legacy-match  {:match-info
+                         [{:id 100 :op-type :event
+                           :start 1700000000000
+                           :duration 12.5
+                           :tags {:event              event
+                                  :app-db-before      before-db
+                                  :app-db-after       after-db
+                                  :coeffects          {:db before-db}
+                                  :effects            effects
+                                  :interceptors       interceptors
+                                  :dispatch-id        "dispatch-1"
+                                  :parent-dispatch-id nil}}
+                          {:id 110 :op-type :sync}]
+                         :sub-state {:reaction-state {}}}
+          legacy-render {:match-info
+                         [{:id 120 :op-type :event :tags {}}
+                          {:id 130 :op-type :reagent/quiescent}]
+                         :sub-state
+                         {:reaction-state
+                          {"rx-changed"   {:subscription changed-q
+                                           :order [:sub/run]}
+                           "rx-unchanged" {:subscription unchanged-q
+                                           :order [:sub/run]
+                                           :sub/traits {:unchanged? true}}}}}
+          traces        [{:id 90 :op-type :sub/run
+                          :tags {:query-v changed-q
+                                 :reaction "rx-changed"
+                                 :value 10
+                                 :input-query-vs [[:cart/items]]}}
+                         {:id 91 :op-type :sub/run
+                          :tags {:query-v unchanged-q
+                                 :reaction "rx-unchanged"
+                                 :value [:a]
+                                 :input-query-vs []}}
+                         {:id 122 :op-type :sub/run
+                          :tags {:query-v changed-q
+                                 :reaction "rx-changed"
+                                 :value 20
+                                 :input-query-vs [[:cart/items]]}}
+                         {:id 123 :op-type :sub/run
+                          :tags {:query-v unchanged-q
+                                 :reaction "rx-unchanged"
+                                 :value [:a]
+                                 :input-query-vs []}}
+                         {:id 124 :op-type :sub/create
+                          :tags {:query-v cached-q
+                                 :cached? true}}
+                         {:id 125 :op-type :render :duration 0.6
+                          :tags {:component-name "app.views.cart_panel"
+                                 :reaction "rxn-1"}}]
+          native-raw    {:id                 100
+                         :event              event
+                         :dispatch-id        "dispatch-1"
+                         :parent-dispatch-id nil
+                         :app-db/before      before-db
+                         :app-db/after       after-db
+                         :coeffects          {:db before-db}
+                         :effects            effects
+                         :interceptors       interceptors
+                         :sub-runs           []
+                         :sub-creates        []
+                         :event-handler      {:id 105 :op-type :event/handler
+                                              :tags {} :child-of 100}
+                         :event-do-fx        {:id 108 :op-type :event/do-fx
+                                              :tags {} :child-of 100}
+                         :start              1700000000000
+                         :end                1700000000012
+                         :duration           12.5}
+          legacy-e      (rt/coerce-epoch legacy-match
+                                         {:all-traces traces
+                                          :all-matches [legacy-match
+                                                        legacy-render]})
+          native-e      (rt/coerce-native-epoch native-raw
+                                               {:traces traces
+                                                :all-epochs [native-raw]})]
+      (is (= legacy-e native-e))
+      (is (= [{:query-v             changed-q
+               :subscribe/source    nil
+               :input-query-vs      [[:cart/items]]
+               :input-query-sources [nil]}]
+             (:subs/ran native-e)))
+      (is (= [{:query-v          unchanged-q
+               :subscribe/source fixtures/cart-items-cache-source
+               :cache-hit/reason :sub/run-unchanged}
+              {:query-v          cached-q
+               :subscribe/source nil
+               :cache-hit/reason :sub/create-cached}]
+             (:subs/cache-hit native-e))))))
 
 (deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
   ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source

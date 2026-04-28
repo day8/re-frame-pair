@@ -389,6 +389,21 @@
   []
   (boolean (ten-x-app-db-ratom)))
 
+(defn- normalize-10x-match
+  "Return `match` with the legacy 10x keys that `coerce-epoch` consumes.
+   `day8.re-frame-10x.public` intentionally exposes renamed fields
+   (`:sub-state-raw`, `:timings`) so its public shape can evolve without
+   promising internal names. The runtime keeps one coercion path by
+   normalising those aliases back to the match shape used below."
+  [match]
+  (when match
+    (cond-> match
+      (contains? match :sub-state-raw)
+      (assoc :sub-state (:sub-state-raw match))
+
+      (contains? match :timings)
+      (assoc :timing (:timings match)))))
+
 (defn read-10x-epochs
   "Matches from 10x's epoch buffer in chronological order. Throws
    ex-info with `:reason :ten-x-missing` if 10x isn't loaded.
@@ -401,13 +416,12 @@
    the renamed sub-state / timings keys are the public contract.
    When it isn't (older 10x), falls back to the legacy inlined-rf
    path which returns 10x's internal shape
-   `{:match-info :sub-state :timing}`. Both shapes preserve
-   `:match-info`, which is what `coerce-epoch` and `match-id`
-   walk — so callers don't have to branch on which 10x they're
-   talking to."
+   `{:match-info :sub-state :timing}`. Public-shape aliases are
+   normalised before return so downstream coercion uses the same
+   intermediate regardless of which 10x surface supplied it."
   []
   (if-let [pub (ten-x-public)]
-    ((aget pub "epochs"))
+    (mapv normalize-10x-match ((aget pub "epochs")))
     (let [a (ten-x-app-db-ratom)]
       (when-not a
         (throw (ex-info "re-frame-10x epoch buffer unreachable"
@@ -426,12 +440,13 @@
       (let [db    @a
             ids   (get-in db [:epochs :match-ids] [])
             by-id (get-in db [:epochs :matches-by-id] {})]
-        (mapv #(get by-id %) ids)))))
+        (mapv #(normalize-10x-match (get by-id %)) ids)))))
 
 (defn- match-id
   "10x's id for a match — the id of the first trace in :match-info."
   [match]
-  (-> match :match-info first :id))
+  (or (:id match)
+      (-> match :match-info first :id)))
 
 (defn- find-trace [match op-type]
   (some #(when (= op-type (:op-type %)) %) (:match-info match)))
@@ -569,23 +584,45 @@
                     ;; that input was subscribed via the bare fn.
                     :input-query-sources (:input-query-sources info)}))))))
 
-(defn- sub-cache-hits-from-state
-  "§4.3a :subs/cache-hit. Re-frame doesn't trace genuine cache hits
-   (deref-without-recompute), but we surface the closest signal 10x
-   exposes: subs that re-ran AND produced an equal value
-   (`:sub/traits {:unchanged? true}`). These are the subs whose
-   downstream short-circuited because the result was `=` to the prior
-   value — semantically what `:subs/cache-hit` is documenting in §4.3a
-   (sub did its work but didn't propagate change)."
+(defn- sub-cache-hit-entry [q reason]
+  {:query-v          q
+   :subscribe/source (some-> q meta :re-frame/source)
+   :cache-hit/reason reason})
+
+(defn- unchanged-sub-runs-from-state
   [match]
   (->> (-> match :sub-state :reaction-state)
        (filter (fn [[_ sub]]
                  (and (some #{:sub/run} (:order sub))
                       (get-in sub [:sub/traits :unchanged?]))))
        (mapv (fn [[_ sub]]
-               (let [q (:subscription sub)]
-                 {:query-v          q
-                  :subscribe/source (some-> q meta :re-frame/source)})))))
+               (sub-cache-hit-entry (:subscription sub)
+                                    :sub/run-unchanged)))))
+
+(defn- cached-sub-creates-from-traces
+  [match all-traces]
+  (when-let [[first-id last-id] (match-trace-ids match)]
+    (->> (traces-in-id-range all-traces first-id last-id)
+         (filter #(= :sub/create (:op-type %)))
+         (filter #(true? (-> % :tags :cached?)))
+         (keep #(-> % :tags :query-v))
+         distinct
+         (mapv #(sub-cache-hit-entry % :sub/create-cached)))))
+
+(defn- sub-cache-hits-from-state
+  "§4.3a :subs/cache-hit. Two signals land here:
+
+   * `:sub/run` reactions whose final value was `=` to their prior value
+     (`:sub/traits {:unchanged? true}`), so downstream subscriptions and
+     views short-circuited.
+   * `:sub/create` traces tagged `:cached? true`, where subscribe reused
+     an existing reaction and did not re-run the computation.
+
+   `:cache-hit/reason` keeps those cases distinguishable for consumers
+   that need the sharper diagnostic."
+  [match all-traces]
+  (vec (concat (unchanged-sub-runs-from-state match)
+               (cached-sub-creates-from-traces match all-traces))))
 
 (defn- renders-from-traces
   "§4.3a :renders. Reagent records each component render as a
@@ -704,7 +741,9 @@
                                      (read-10x-epochs))}))
   ([raw {:keys [all-traces all-matches]}]
    (when raw
-     (let [event-trace   (find-trace raw :event)
+     (let [raw           (normalize-10x-match raw)
+           all-matches   (some->> all-matches (mapv normalize-10x-match))
+           event-trace   (find-trace raw :event)
            tags          (:tags event-trace)
            handler-trace (find-trace raw :event/handler)
            render-src    (resolve-render-source raw all-matches)]
@@ -723,7 +762,7 @@
         :interceptor-chain (mapv :id (:interceptors tags))
         :app-db/diff       (diff-app-db event-trace)
         :subs/ran          (when render-src (sub-runs-from-state render-src all-traces))
-        :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src))
+        :subs/cache-hit    (when render-src (sub-cache-hits-from-state render-src all-traces))
         :renders           (when render-src (renders-from-traces render-src all-traces))
         ;; Per-form trace from re-frame-debux's fn-traced — nil when
         ;; debux isn't on the classpath OR the handler wasn't wrapped.
@@ -891,71 +930,140 @@
                             (or (nil? next-id) (< id next-id)))))
              traces)))
 
-(defn- subs-ran-from-native-traces
-  "Walk a trace-stream slice for `:sub/run` entries; emit one
-   `{:query-v ... :subscribe/source ... :input-query-vs ...
-   :input-query-sources ...}` per unique query-v (latest run wins).
-   Native analogue of `sub-runs-from-state`, driven off the trace
-   stream because most `:sub/run` traces fire from render-time
-   derefs (with `:child-of nil`) and so don't make it onto the
-   native epoch's `:sub-runs` vec — that vec only carries direct
-   `:child-of` children of the `:event` trace.
+(defn- subscription-trace?
+  [trace]
+  (contains? #{:sub/create :sub/run :sub/dispose} (:op-type trace)))
 
-   `:subscribe/source` and `:input-query-sources` are populated
-   from `:re-frame/source` meta on the query vectors (rf-cna).
-   Nil when the corresponding subscribe call used the bare
-   `re-frame.core/subscribe` fn or re-frame predates rf-cna."
-  [traces]
-  (->> traces
-       (filter #(= :sub/run (:op-type %)))
-       (reduce (fn [m t]
-                 (let [tags (:tags t)]
-                   (if-let [q (:query-v tags)]
-                     (assoc m q (:input-query-vs tags))
-                     m)))
-               {})
-       (mapv (fn [[q input-qvs]]
-               {:query-v             q
-                :subscribe/source    (some-> q meta :re-frame/source)
-                :input-query-vs      input-qvs
-                :input-query-sources (when input-qvs
-                                       (mapv #(some-> % meta :re-frame/source)
-                                             input-qvs))}))))
+(defn- sub-trace-key
+  "Stable key for a subscription trace. Live re-frame tags `:sub/run`
+   with the reaction id after the reaction has been constructed; older
+   or synthetic traces may not, so query-v is the fallback."
+  [trace]
+  (let [tags (:tags trace)]
+    (or (:reaction tags)
+        (:query-v tags)
+        (:query tags))))
 
-(defn- subs-cache-hit-from-native-traces
-  "Walk a trace-stream slice for `:sub/create` entries with
-   `:cached? true` tag; emit one `{:query-v ...
-   :subscribe/source ...}` per unique
-   query-v. Native analogue of `sub-cache-hits-from-state` — but
-   driven off re-frame core's own `:cached?` signal (set in
-   `re-frame.subs/subscribe` when `cache-lookup` finds an existing
-   reaction). Matches §4.3a's 'subs dereffed but cached' definition
-   more precisely than 10x's `:unchanged?` heuristic did."
-  [traces]
-  (->> traces
-       (filter #(= :sub/create (:op-type %)))
-       (filter #(true? (-> % :tags :cached?)))
-       (keep #(-> % :tags :query-v))
-       distinct
-       (mapv (fn [q]
-               {:query-v          q
-                :subscribe/source (some-> q meta :re-frame/source)}))))
+(defn- reset-sub-reaction-state
+  [state]
+  (into {}
+        (comp
+         (filter (fn [[_ sub]] (not (:disposed? sub))))
+         (map (fn [[k sub]]
+                [k (dissoc sub
+                           :order :created? :run? :disposed?
+                           :previous-value :sub/traits)])))
+        state))
 
-(defn- renders-from-native-traces
-  "Walk a trace-stream slice for `:render` entries; emit one render
-   entry per `:render` trace, classified for re-com awareness via
-   `classify-render-entry`. Native analogue of `renders-from-traces`."
-  [traces]
-  (->> traces
-       (filter #(= :render (:op-type %)))
-       (mapv (fn [t]
-               (let [tags (:tags t)
-                     comp (demunge-component-name
-                           (or (:component-name tags) (str (:operation t))))]
-                 {:component comp
-                  :time-ms   (:duration t)
-                  :reaction  (:reaction tags)})))
-       (mapv classify-render-entry)))
+(defn- apply-sub-trace
+  [state trace]
+  (let [tags (:tags trace)
+        k    (sub-trace-key trace)
+        q    (or (:query-v tags) (:query tags))]
+    (if (and k q)
+      (let [state (-> state
+                      (update-in [k :order] (fnil conj []) (:op-type trace))
+                      (assoc-in [k :subscription] q))]
+        (case (:op-type trace)
+          :sub/create
+          (cond-> state
+            (false? (:cached? tags)) (assoc-in [k :created?] true))
+
+          :sub/run
+          (update state k
+                  (fn [sub]
+                    (let [sub (or sub {})
+                          sub (if (contains? tags :value)
+                                (cond-> sub
+                                  (contains? sub :value)
+                                  (assoc :previous-value (:value sub))
+
+                                  true
+                                  (assoc :value (:value tags)))
+                                sub)]
+                      (assoc sub :run? true))))
+
+          :sub/dispose
+          (assoc-in state [k :disposed?] true)
+
+          state))
+      state)))
+
+(defn- mark-unchanged-sub-runs
+  [state]
+  (reduce-kv
+   (fn [m k sub]
+     (if (and (contains? sub :previous-value)
+              (contains? sub :value)
+              (= (:previous-value sub) (:value sub)))
+       (assoc-in m [k :sub/traits :unchanged?] true)
+       m))
+   state
+   state))
+
+(defn- process-sub-traces
+  [state traces]
+  (-> (reduce apply-sub-trace state traces)
+      mark-unchanged-sub-runs))
+
+(defn- native-sub-state
+  "Reconstruct the legacy 10x `:sub-state` shape for a native epoch.
+   Native `register-epoch-cb` epochs do not carry render-time sub runs,
+   so we rebuild the same reaction-state projection from the trace ring:
+   previous runs before the epoch establish prior values, then in-epoch
+   runs set `:sub/traits :unchanged?` when the final value did not
+   change."
+  [traces first-id last-id]
+  (let [sub-traces   (filterv subscription-trace? traces)
+        before       (filterv (fn [t]
+                                (let [id (:id t)]
+                                  (and id (< id first-id))))
+                              sub-traces)
+        in-epoch     (filterv (fn [t]
+                                (let [id (:id t)]
+                                  (and id (<= first-id id last-id))))
+                              sub-traces)
+        before-state (process-sub-traces {} before)]
+    {:reaction-state (process-sub-traces
+                      (reset-sub-reaction-state before-state)
+                      in-epoch)}))
+
+(defn- native-epoch->match
+  "Normalise a native `register-epoch-cb` epoch to the legacy match shape
+   consumed by `coerce-epoch`. This keeps native and 10x fallback epochs
+   on one semantic path for `:subs/ran`, `:subs/cache-hit`, renders,
+   source metadata, and effect flattening."
+  [raw all-epochs traces]
+  (let [in-range      (traces-in-native-epoch-range raw all-epochs traces)
+        trace-ids     (keep :id (concat in-range
+                                        [(:event-handler raw)
+                                         (:event-do-fx raw)]))
+        first-id      (:id raw)
+        last-id       (reduce max first-id trace-ids)
+        event-trace   {:id       first-id
+                       :op-type  :event
+                       :start    (:start raw)
+                       :duration (:duration raw)
+                       :tags     {:event              (:event raw)
+                                  :app-db-before      (:app-db/before raw)
+                                  :app-db-after       (:app-db/after raw)
+                                  :coeffects          (:coeffects raw)
+                                  :effects            (:effects raw)
+                                  :interceptors       (:interceptors raw)
+                                  :dispatch-id        (:dispatch-id raw)
+                                  :parent-dispatch-id (:parent-dispatch-id raw)}}
+        handler-trace (some-> (:event-handler raw)
+                              (assoc :op-type :event/handler))
+        do-fx-trace   (some-> (:event-do-fx raw)
+                              (assoc :op-type :event/do-fx))
+        close-trace   {:id last-id :op-type :reagent/quiescent}]
+    {:id         first-id
+     :match-info (vec (remove nil? [event-trace
+                                    handler-trace
+                                    do-fx-trace
+                                    close-trace]))
+     :sub-state  (native-sub-state traces first-id last-id)
+     :timing     {:re-frame/event-time (:duration raw)}}))
 
 (defn coerce-native-epoch
   "Translate a `register-epoch-cb`-delivered native epoch into the
@@ -969,12 +1077,10 @@
    :sub-runs :sub-creates :event-handler :event-do-fx :start :end
    :duration}`.
 
-   `:subs/ran`, `:subs/cache-hit`, and `:renders` are derived from
-   the trace-stream slice in this epoch's id range, NOT from the
-   native epoch's `:sub-runs` / `:sub-creates` vecs — those only
-   carry direct `:child-of` children of the `:event` trace, which
-   misses render-time sub recomputes and (per `assemble-epochs`'s
-   own docstring) all renders.
+   The native epoch is first normalised to the legacy match shape and
+   then passed through `coerce-epoch`; `:subs/ran`, `:subs/cache-hit`,
+   and `:renders` therefore share the same semantics as the 10x
+   fallback path.
 
    `:debux/code` is read from the `:event-handler` trace's `:tags`
    (debux's `merge-trace!` lands on `*current-trace*`, which is
@@ -991,32 +1097,9 @@
                              :all-epochs (native-epochs)}))
   ([raw {:keys [traces all-epochs]}]
    (when raw
-     (let [in-range (traces-in-native-epoch-range raw all-epochs traces)
-           [only-before only-after _both] (data/diff (:app-db/before raw)
-                                                    (:app-db/after raw))]
-       {:id                 (:id raw)
-        :t                  (:start raw)
-        :time-ms            (:duration raw)
-        :event              (:event raw)
-        :coeffects          (:coeffects raw)
-        :effects            (:effects raw)
-        :effects/fired      (flatten-fx (:effects raw))
-        :interceptor-chain  (mapv :id (:interceptors raw))
-        :app-db/diff        {:before      (:app-db/before raw)
-                             :after       (:app-db/after raw)
-                             :only-before only-before
-                             :only-after  only-after}
-        :subs/ran           (subs-ran-from-native-traces in-range)
-        :subs/cache-hit     (subs-cache-hit-from-native-traces in-range)
-        :renders            (renders-from-native-traces in-range)
-        :debux/code         (-> raw :event-handler :tags :code)
-        ;; Dispatch-site source (file/line) lifted from the event
-        ;; vector's meta — same surface as the legacy 10x path. Nil
-        ;; for events dispatched via the bare dispatch fn. See
-        ;; coerce-epoch above for the rf-hsl rationale.
-        :event/source       (some-> (:event raw) meta :re-frame/source)
-        :dispatch-id        (:dispatch-id raw)
-        :parent-dispatch-id (:parent-dispatch-id raw)}))))
+     (let [match (native-epoch->match raw all-epochs traces)]
+       (coerce-epoch match {:all-traces  traces
+                            :all-matches [match]})))))
 
 (defn debux-runtime-api?
   "True iff `day8.re-frame.tracing.runtime/runtime-api?` is loaded
