@@ -603,6 +603,104 @@
                :cache-hit/reason :sub/create-cached}]
              (:subs/cache-hit native-e))))))
 
+(deftest coerce-parity
+  ;; STATUS.md §4.3a single-shape contract: coerce-epoch (legacy 10x)
+  ;; and coerce-native-epoch (native rf-ybv) MUST emit the same record
+  ;; for the same logical event so downstream consumers
+  ;; (coerce-cascade-from-buffer, last-claude-epoch,
+  ;; dispatch-and-settle!'s reconstitute-from-buffer, every SKILL.md
+  ;; recipe) don't have to branch on epoch source.
+  ;;
+  ;; Build both shapes from one source-of-truth payload and walk the
+  ;; UNION of emitted keys. Any future rename or addition that lands
+  ;; on only one path surfaces as a per-key mismatch with the offending
+  ;; key in the failure message — sharper than the wall-of-map equality
+  ;; failure you get from `(= legacy-e native-e)` alone, and resilient
+  ;; to a path quietly growing a key the other side does not.
+  (let [event-vec    [:cart/apply-coupon "SPRING25"]
+        before-db    {:cart {:items []} :user/profile {:id 1}}
+        after-db     {:cart {:items [] :coupon "SPRING25"}
+                      :user/profile {:id 1}}
+        coeffects    {:db before-db}
+        effects      {:db after-db
+                      :fx [[:dispatch [:analytics/track :coupon-applied]]
+                           [:http-xhrio {:method :post :uri "/coupon"}]]}
+        interceptors [{:id :coeffects} {:id :db-handler}]
+        dispatch-id  "11111111-1111-1111-1111-111111111111"
+        start-t      1700000000000
+        duration     12.5
+        sub-q        [:cart/total]
+        sub-input-vs [[:cart/items]]
+        ;; Common trace stream — both paths read renders + sub-runs from
+        ;; this. ids land in [100..130], inside both legacy and native
+        ;; epoch ranges. One :sub/run produces a changed entry; one
+        ;; :render contributes to :renders.
+        traces       [{:id 122 :op-type :sub/run
+                       :tags {:query-v        sub-q
+                              :reaction       "rxn-1"
+                              :input-query-vs sub-input-vs}}
+                      {:id 125 :op-type :render :duration 0.6
+                       :tags {:component-name "app.views.cart_panel"
+                              :reaction       "rxn-1"}}]
+        legacy-match  {:match-info
+                       [{:id 100 :op-type :event
+                         :start start-t :duration duration
+                         :tags {:event              event-vec
+                                :app-db-before      before-db
+                                :app-db-after       after-db
+                                :coeffects          coeffects
+                                :effects            effects
+                                :interceptors       interceptors
+                                :dispatch-id        dispatch-id
+                                :parent-dispatch-id nil}}
+                        {:id 110 :op-type :sync}]
+                       :sub-state {:reaction-state {}}}
+        legacy-render {:match-info
+                       [{:id 120 :op-type :event :tags {}}
+                        {:id 130 :op-type :reagent/quiescent}]
+                       :sub-state
+                       {:reaction-state
+                        {"rxn-1" {:subscription sub-q :order [:sub/run]}}}}
+        legacy-ctx    {:all-traces  traces
+                       :all-matches [legacy-match legacy-render]}
+        native-raw    {:id                 100
+                       :event              event-vec
+                       :dispatch-id        dispatch-id
+                       :parent-dispatch-id nil
+                       :app-db/before      before-db
+                       :app-db/after       after-db
+                       :coeffects          coeffects
+                       :effects            effects
+                       :interceptors       interceptors
+                       :sub-runs           []
+                       :sub-creates        []
+                       :event-handler      {:id 105 :op-type :event/handler
+                                            :tags {} :child-of 100}
+                       :event-do-fx        {:id 108 :op-type :event/do-fx
+                                            :tags {} :child-of 100}
+                       :start              start-t
+                       :end                (+ start-t (long duration))
+                       :duration           duration}
+        native-ctx    {:traces traces :all-epochs [native-raw]}
+        legacy-e      (rt/coerce-epoch legacy-match legacy-ctx)
+        native-e      (rt/coerce-native-epoch native-raw native-ctx)
+        legacy-keys   (set (keys legacy-e))
+        native-keys   (set (keys native-e))
+        legacy-only   (set (remove native-keys legacy-keys))
+        native-only   (set (remove legacy-keys native-keys))]
+    (testing "key sets match — neither path may carry a key the other does not"
+      (is (= legacy-keys native-keys)
+          (str "drift in emitted keys: legacy-only=" (pr-str legacy-only)
+               " native-only=" (pr-str native-only))))
+    (testing "every key in the union matches across paths"
+      (doseq [k (sort-by str (into legacy-keys native-keys))]
+        (is (= (get legacy-e k) (get native-e k))
+            (str "drift on key " (pr-str k)
+                 ": legacy=" (pr-str (get legacy-e k))
+                 " native="  (pr-str (get native-e k))))))
+    (testing "full-record equality (catch-all backstop)"
+      (is (= legacy-e native-e)))))
+
 (deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
   ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source
   ;; {:file ... :line ...}} to the query-v's meta at the call site.
