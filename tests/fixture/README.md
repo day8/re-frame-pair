@@ -91,6 +91,27 @@ those, `fn-traced` expands to a plain `fn` and emits nothing.
 > `npm test` suite (synthetic data) verifies the bridge logic itself; the
 > live-fixture validation needs a fresh watch.
 
+### Operator-runnable smoke for the wrap-handler! recipe
+
+`src/app/wrap_handler_smoke.cljs` exercises the wrap → dispatch-sync →
+unwrap cycle against the live `day8.re-frame.tracing.runtime` API.
+SKILL.md prescribes that recipe as the primary path for "trace a whole
+handler / sub / fx form-by-form"; the smoke is the operator-runnable
+counterpart to the textual contract test that runs in `npm test` (see
+`tests/skill_recipe_smoke.bb`).
+
+```bash
+scripts/eval-cljs.sh '(do (require (quote app.wrap-handler-smoke))
+                          (app.wrap-handler-smoke/smoke!))'
+;; => {:ok? true :id [:event :app.wrap-handler-smoke/probe]
+;;     :runtime-api? true :hint "wrap → dispatch-sync → unwrap round-tripped cleanly"}
+```
+
+Returns `{:ok? false :reason ...}` if any step in the cycle breaks
+(wrap returns the wrong shape, registrar drops the handler, unwrap
+returns false, etc.) — each `:reason` keyword is enumerated in the
+source.
+
 ## Validating against the fixture
 
 From the project root, with the watch running and a browser tab open:
