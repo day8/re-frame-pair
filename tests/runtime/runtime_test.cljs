@@ -2534,6 +2534,79 @@
           "missing :src in :re-com/render tags must not crash and must not
            manufacture a fake :src on the render entry"))))
 
+(deftest undo-prefers-public-event-ids-when-ten-x-public-loaded
+  ;; rf1-jum: when day8.re-frame-10x.public is loaded, prefer its
+  ;; durable string event-id constants and dispatch! bridge over the
+  ;; internal `day8.re-frame-10x.navigation.epochs.events` keywords.
+  ;; The string heads are the contract; internal kws are volatile.
+  (testing "undo-step-back routes [previous-epoch] through public dispatch!"
+    (let [last-call (atom nil)
+          stub-pub  #js {:previous_epoch "day8.re-frame-10x.public/previous-epoch"
+                         :dispatch_BANG_ (fn [event-vec-js]
+                                           (reset! last-call event-vec-js)
+                                           nil)}]
+      (with-redefs [ten-x/ten-x-public (fn [] stub-pub)]
+        (let [r (rt/undo-step-back)]
+          (is (true? (:ok? r)))
+          (is (= ["day8.re-frame-10x.public/previous-epoch"]
+                 (js->clj @last-call)))))))
+
+  (testing "undo-step-forward routes [next-epoch] through public dispatch!"
+    (let [last-call (atom nil)
+          stub-pub  #js {:next_epoch "day8.re-frame-10x.public/next-epoch"
+                         :dispatch_BANG_ (fn [event-vec-js]
+                                           (reset! last-call event-vec-js))}]
+      (with-redefs [ten-x/ten-x-public (fn [] stub-pub)]
+        (rt/undo-step-forward)
+        (is (= ["day8.re-frame-10x.public/next-epoch"]
+               (js->clj @last-call))))))
+
+  (testing "undo-most-recent routes [most-recent-epoch] through public dispatch!"
+    (let [last-call (atom nil)
+          stub-pub  #js {:most_recent_epoch "day8.re-frame-10x.public/most-recent-epoch"
+                         :dispatch_BANG_ (fn [event-vec-js]
+                                           (reset! last-call event-vec-js))}]
+      (with-redefs [ten-x/ten-x-public (fn [] stub-pub)]
+        (rt/undo-most-recent)
+        (is (= ["day8.re-frame-10x.public/most-recent-epoch"]
+               (js->clj @last-call))))))
+
+  (testing "undo-replay routes [replay-epoch] through public dispatch!"
+    (let [last-call (atom nil)
+          stub-pub  #js {:replay_epoch "day8.re-frame-10x.public/replay-epoch"
+                         :dispatch_BANG_ (fn [event-vec-js]
+                                           (reset! last-call event-vec-js))}]
+      (with-redefs [ten-x/ten-x-public (fn [] stub-pub)]
+        (rt/undo-replay)
+        (is (= ["day8.re-frame-10x.public/replay-epoch"]
+               (js->clj @last-call)))))))
+
+(deftest undo-falls-back-to-internal-kw-when-public-surface-missing
+  ;; Pre-rf1-jum 10x: only the internal-kw path is available.
+  ;; ten-x-public returns nil (no `loaded?` export); the dispatch
+  ;; routes through the inlined re-frame.core/dispatch using
+  ;; `:day8.re-frame-10x.navigation.epochs.events/<local>` heads.
+  (testing "undo-step-back falls back to ::previous keyword when public missing"
+    (let [last-call    (atom nil)
+          stub-rf-core #js {:dispatch (fn [event-vec]
+                                        (reset! last-call event-vec))}]
+      (with-redefs [ten-x/ten-x-public (fn [] nil)
+                    ten-x/ten-x-rf-core (fn [] stub-rf-core)]
+        (let [r (rt/undo-step-back)]
+          (is (true? (:ok? r)))
+          (is (= [:day8.re-frame-10x.navigation.epochs.events/previous]
+                 @last-call))))))
+
+  (testing "undo-step-forward falls back to ::next keyword"
+    (let [last-call    (atom nil)
+          stub-rf-core #js {:dispatch (fn [event-vec]
+                                        (reset! last-call event-vec))}]
+      (with-redefs [ten-x/ten-x-public (fn [] nil)
+                    ten-x/ten-x-rf-core (fn [] stub-rf-core)]
+        (rt/undo-step-forward)
+        (is (= [:day8.re-frame-10x.navigation.epochs.events/next]
+               @last-call))))))
+
 (deftest event-original-flattened-onto-coerced-epoch
   ;; re-frame 2026 added :event/original on :event traces — the
   ;; dispatched event vector pinned at re-frame.events/handle entry,

@@ -77,6 +77,13 @@ next tag's body of work.
   registered through `re-frame.core/reg-*`, no opt-in required).
 - **Trace-table heading** in SKILL.md updated for the native epoch
   path replacing 10x as primary read source.
+- **One-time deprecation warning on inlined-rf fallback.** When
+  re-frame-10x is loaded but its `day8.re-frame-10x.public` ns
+  (upstream `rf1-jum`) isn't, the runtime now emits a single
+  `console.warn` the first time it falls back to the inlined-rf
+  walker. The fallback still works; the warning is the signal that
+  upgrading 10x to rf1-jum or newer is the supported path and that
+  the legacy walker may be removed in a future release.
 
 ### Fixed
 

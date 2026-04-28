@@ -74,6 +74,27 @@
       (when (and pub (aget pub "loaded_QMARK_"))
         pub))))
 
+(defonce ^:private inlined-rf-fallback-warned? (atom false))
+
+(defn- warn-on-inlined-rf-fallback!
+  "One-time `console.warn` when 10x is loaded but its public ns
+   (rf1-jum) isn't — i.e. re-frame-pair has had to take the legacy
+   inlined-rf walk. Idempotent (compare-and-set! gate) so a busy
+   epoch read loop doesn't spam. Telemetry hook: lets us observe
+   whether the pre-rf1-jum fallback is hit in real consumer builds
+   before we commit to deleting it (rfp-xjdr)."
+  []
+  (when (compare-and-set! inlined-rf-fallback-warned? false true)
+    (try
+      (js/console.warn
+        (str "[re-frame-pair] re-frame-10x is loaded but its public "
+             "namespace `day8.re-frame-10x.public` is missing — "
+             "using the legacy inlined-rf fallback. Upgrade "
+             "re-frame-10x to rf1-jum or newer to silence this; "
+             "the fallback may be removed in a future re-frame-pair "
+             "release."))
+      (catch :default _ nil))))
+
 (defn- ten-x-inlined-rf
   "Legacy path: the JS object for 10x's inlined `re-frame` package.
    Used when `ten-x-public` returns nil (older 10x JARs that don't
@@ -87,21 +108,31 @@
    code change — `read-10x-epochs` no longer throws `:ten-x-missing`
    just because we shipped before the slug got added to the known
    list. Once every supported 10x carries `public`, both this fn
-   and `inlined-rf-known-version-paths` can be deleted."
+   and `inlined-rf-known-version-paths` can be deleted.
+
+   Emits a one-time `console.warn` (`warn-on-inlined-rf-fallback!`)
+   the first time we resolve via this path on a runtime where
+   `ten-x-public` is nil — telemetry to observe whether the
+   pre-rf1-jum fallback is still load-bearing in practice."
   []
   (when-let [g (some-> js/goog .-global)]
-    (let [base (aget-path g ["day8" "re_frame_10x" "inlined_deps" "re_frame"])
+    (let [base      (aget-path g ["day8" "re_frame_10x" "inlined_deps" "re_frame"])
           via-known (some (fn [ver] (aget-path base [ver "re_frame"]))
-                          inlined-rf-known-version-paths)]
-      (or via-known
-          ;; Fallback: enumerate any child key and look for one that
-          ;; carries the expected `re_frame.db.app_db` shape.
-          (when base
-            (some (fn [k]
-                    (let [candidate (aget-path base [k "re_frame"])]
-                      (when (aget-path candidate ["db" "app_db"])
-                        candidate)))
-                  (array-seq (or (js-keys-array base) #js []))))))))
+                          inlined-rf-known-version-paths)
+          result    (or via-known
+                        ;; Fallback: enumerate any child key and look for one
+                        ;; that carries the expected `re_frame.db.app_db` shape.
+                        (when base
+                          (some (fn [k]
+                                  (let [candidate (aget-path base [k "re_frame"])]
+                                    (when (aget-path candidate ["db" "app_db"])
+                                      candidate)))
+                                (array-seq (or (js-keys-array base) #js [])))))]
+      (when (and result
+                 (not @inlined-rf-fallback-warned?)
+                 (nil? (ten-x-public)))
+        (warn-on-inlined-rf-fallback!))
+      result)))
 
 (defn ten-x-app-db-ratom
   "The Reagent ratom holding 10x's internal app-db. Nil if 10x missing.
