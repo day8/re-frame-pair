@@ -233,7 +233,11 @@
    "versions.cljs"
    ;; ten-x-adapter depends on re-com (classify-render-entry); load
    ;; after the re-com submodule.
-   "ten_x_adapter.cljs"])
+   "ten_x_adapter.cljs"
+   ;; native-epoch depends on ten-x-adapter (aget-path, coerce-epoch).
+   "native_epoch.cljs"
+   ;; time-travel depends on ten-x-adapter (ten-x-rf-core, ten-x-app-db-ratom).
+   "time_travel.cljs"])
 
 (defn- runtime-cljs-paths
   "Source files comprising the re-frame-pair.runtime namespace tree,
