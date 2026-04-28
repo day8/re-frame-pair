@@ -229,6 +229,110 @@
     (is (= [] (#'ops/parse-stub-fx-ids ["[:ev]" "--trace"])))))
 
 ;; ---------------------------------------------------------------------------
+;; partition-dispatch-args — order-independent split of dispatch.sh args.
+;;
+;; The docstring promises three invocations parse identically:
+;;   dispatch.sh '[:ev]' --trace
+;;   dispatch.sh --trace '[:ev]'
+;;   dispatch.sh --trace '[:ev]' --build=app
+;; Pin those plus a few edge cases so a regression that drops --build= when
+;; it appears before the event-vec breaks the test, not the live shim.
+;; ---------------------------------------------------------------------------
+
+(deftest partition-dispatch-args-event-only
+  (testing "single edn vec, no flags"
+    (is (= ["[:ev]" '()]
+           (#'ops/partition-dispatch-args ["[:ev]"])))))
+
+(deftest partition-dispatch-args-event-then-flags
+  (testing "event-vec first, flags after — flags preserved"
+    (let [[ev rest-args] (#'ops/partition-dispatch-args ["[:ev]" "--trace"])]
+      (is (= "[:ev]" ev))
+      (is (= ["--trace"] (vec rest-args))))))
+
+(deftest partition-dispatch-args-flags-then-event
+  (testing "flags before event-vec — order-independent extraction"
+    (let [[ev rest-args] (#'ops/partition-dispatch-args ["--trace" "[:ev]"])]
+      (is (= "[:ev]" ev))
+      (is (= ["--trace"] (vec rest-args))))))
+
+(deftest partition-dispatch-args-flags-around-event
+  (testing "flags both before AND after event-vec — both preserved"
+    (let [[ev rest-args] (#'ops/partition-dispatch-args
+                          ["--trace" "[:ev :foo]" "--build=app"])]
+      (is (= "[:ev :foo]" ev))
+      (is (= 2 (count rest-args)))
+      (is (some #{"--trace"} rest-args))
+      (is (some #{"--build=app"} rest-args)))))
+
+(deftest partition-dispatch-args-no-event
+  (testing "no edn vec at all — event is nil; flags still surface"
+    (let [[ev rest-args] (#'ops/partition-dispatch-args ["--trace" "--build=app"])]
+      (is (nil? ev))
+      (is (= ["--trace" "--build=app"] (vec rest-args))))))
+
+(deftest partition-dispatch-args-multiple-edn-vecs
+  (testing "multiple edn-vec args — first is the event; subsequent vecs
+            are surfaced as 'other args' so the caller can decide. The
+            current behaviour is documented (group-by + first), and we
+            pin it so a refactor doesn't silently merge or drop them."
+    (let [[ev rest-args] (#'ops/partition-dispatch-args
+                          ["[:ev1]" "[:ev2]" "--flag"])]
+      (is (= "[:ev1]" ev))
+      ;; rest-args = others ++ (rest events) = ["--flag" "[:ev2]"]
+      (is (some #{"[:ev2]"} rest-args))
+      (is (some #{"--flag"} rest-args)))))
+
+;; ---------------------------------------------------------------------------
+;; bencode / bdecode — hand-rolled nREPL transport. Static-fixture roundtrip
+;; covers the four bencode shapes (int, string, list, dict) plus the empty
+;; collections and a string with a colon (the bencode delimiter).
+;; ---------------------------------------------------------------------------
+
+(defn- bencode-roundtrip
+  "Encode v with bencode, then decode the bytes via bdecode. Returns
+   the decoded value. Helper for the deftests below."
+  [v]
+  (let [encoded (#'ops/bencode v)
+        in      (java.io.PushbackInputStream.
+                  (java.io.ByteArrayInputStream. (.getBytes encoded "UTF-8")))]
+    (#'ops/bdecode in)))
+
+(deftest bencode-bdecode-roundtrip-integer
+  (is (= 0     (bencode-roundtrip 0)))
+  (is (= 42    (bencode-roundtrip 42)))
+  (is (= -1    (bencode-roundtrip -1)))
+  (is (= 99999 (bencode-roundtrip 99999))))
+
+(deftest bencode-bdecode-roundtrip-string
+  (is (= ""               (bencode-roundtrip "")))
+  (is (= "hello"          (bencode-roundtrip "hello")))
+  (is (= "with spaces"    (bencode-roundtrip "with spaces")))
+  (is (= "has:a:colon"    (bencode-roundtrip "has:a:colon")))
+  (is (= "newline\n here" (bencode-roundtrip "newline\n here"))))
+
+(deftest bencode-bdecode-roundtrip-list
+  (is (= []          (bencode-roundtrip [])))
+  (is (= ["a" "b"]   (bencode-roundtrip ["a" "b"])))
+  (is (= [1 "two" 3] (bencode-roundtrip [1 "two" 3]))))
+
+(deftest bencode-bdecode-roundtrip-dict
+  (testing "bencode keys are sorted on encode; round-trip preserves shape
+            but the keys come back as strings (bencode has no kw type)"
+    (is (= {} (bencode-roundtrip {})))
+    (is (= {"k" "v"} (bencode-roundtrip {"k" "v"})))
+    (is (= {"a" 1 "b" 2} (bencode-roundtrip {"a" 1 "b" 2})))
+    ;; keyword keys round-trip to strings (one-way demunge)
+    (is (= {"op" "eval" "code" "(+ 1 2)"}
+           (bencode-roundtrip {:op "eval" :code "(+ 1 2)"})))))
+
+(deftest bencode-bdecode-roundtrip-nested
+  (testing "lists of dicts and dicts of lists round-trip cleanly"
+    (let [v {"items" [{"id" 1 "name" "a"} {"id" 2 "name" "b"}]
+             "count" 2}]
+      (is (= v (bencode-roundtrip v))))))
+
+;; ---------------------------------------------------------------------------
 ;; --trace legacy fallback honours --stub.
 ;;
 ;; When re-frame predates rf-4mr (commit f8f0f59 — dispatch-and-settle), the
