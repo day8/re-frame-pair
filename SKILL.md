@@ -132,6 +132,16 @@ flag surface without leaving the shell.
 - `:subs/ran` and `:subs/cache-hit` entries each carry `:subscribe/source` — `{:file :line}` of the *outer* `(rf.macros/subscribe ...)` call site that established the reaction (the view that asked for it; rf-cna). `nil` for bare-fn subscribes or pre-rf-cna re-frame. Useful for "which view subscribed to X?" — see *"Which view subscribed to X?"* below.
 - `:subs/ran` entries each carry `:input-query-sources` — vec parallel to `:input-query-vs` carrying source maps for each input dependency (rf-cna). Each slot reflects where the parent sub handler called `subscribe` to wire that input; `nil` slots for bare-fn inputs.
 
+**Trace-stream schema.** `re-frame.core/tag-schema` (re-frame 2026 release) describes the `:tags` map for every op-type re-frame emits — `:event`, `:event/handler`, `:event/do-fx`, `:sub/create`, `:sub/run`, `:sub/dispose`, `:render`, `:raf`, `:raf-end`, `:reagent/quiescent`, `:sync`. Each entry lists `:required` keys, `:optional` keys, and a one-line `:doc`. Doc-only by default; downstream tooling (re-frame-pair, custom 10x panels) reads it as a load-bearing contract for the trace stream. Adding a key is additive; renaming or removing a key is breaking and must go through a deprecation cycle.
+
+When investigating a trace-shape mismatch — e.g. a `:tags` field showing up as `nil` on coerced epochs even though the upstream feature is loaded — the user can opt into runtime validation:
+
+```
+scripts/eval-cljs.sh '(re-frame.core/set-validate-trace! true)'
+```
+
+With validation on, `finish-trace` checks `:tags` against `tag-schema` and warns via `console :warn` on missing required keys or unknown keys. Off by default; intended for dev / CI debugging. `re-frame.core/validate-trace?` returns the current state. Both surface live nil on re-frame predating the 2026 release — flag the version-floor and proceed without runtime validation.
+
 ### Console / errors
 
 A ring buffer of `js/console.{log,warn,error,info,debug}` calls captured by the runtime, tagged with `:who` so you can ask "what did MY dispatch log, vs the user's app, vs which handler threw?". Installed by `health` (idempotent, max 500 entries).
