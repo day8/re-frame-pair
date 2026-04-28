@@ -1037,6 +1037,22 @@
    :interceptors []
    :start 0 :end id :duration id})
 
+(defn- resolving-thenable [value]
+  (let [p (js-obj)]
+    (aset p "then" (fn [resolve]
+                     (resolve value)
+                     p))
+    (aset p "catch" (fn [_reject] p))
+    p))
+
+(defn- rejecting-thenable [err]
+  (let [p (js-obj)]
+    (aset p "then" (fn [_resolve] p))
+    (aset p "catch" (fn [reject]
+                      (reject err)
+                      p))
+    p))
+
 (deftest collect-cascade-from-buffer-walks-parent-chains
   (testing "linear cascade: root → child → grandchild — walks the whole chain"
     (let [epochs [(minimal-native-epoch {:id 1 :event [:root]
@@ -1174,6 +1190,90 @@
       (is (= :dispatch-and-settle-unavailable (:reason r)))
       (is (string? (:hint r))))))
 
+(deftest dispatch-and-settle-bang-success-reconstitutes-native-cascade
+  (testing "rf-4mr success path resolves from native-epoch-buffer so keywords survive"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [(minimal-native-epoch {:id 10 :event [:root]
+                                                :dispatch-id "ROOT"})
+                        (minimal-native-epoch {:id 11 :event [:child]
+                                                :dispatch-id "CHILD"
+                                                :parent-dispatch-id "ROOT"})
+                        (minimal-native-epoch {:id 12 :event [:noise]
+                                                :dispatch-id "NOISE"})
+                        (minimal-native-epoch {:id 13 :event [:grandchild]
+                                                :dispatch-id "GRANDCHILD"
+                                                :parent-dispatch-id "CHILD"})]
+             :max-size 50})
+    (let [calls (atom [])]
+      (with-redefs [rt/dispatch-and-settle-fn
+                    (fn []
+                      (fn [event opts]
+                        (swap! calls conj {:event event
+                                           :opts  opts
+                                           :who   (runtime-atom-value #'rt/current-who)})
+                        (resolving-thenable (clj->js {:ok? true}))))
+                    rt/recent-dispatch-id (fn [] "ROOT")]
+        (let [r       (rt/dispatch-and-settle!
+                       [:test/root]
+                       {:timeout-ms 15 :stub-fx-ids [:dispatch]})
+              call    (first @calls)
+              settled (rt/await-settle (:handle r))]
+          (is (true? (:ok? r)))
+          (is (true? (:pending? r)))
+          (is (= [:dispatch] (:stubbed-fx-ids r)))
+          (is (= {:timeout-ms 15} (:opts call)))
+          (is (= :claude (:who call)))
+          (is (fn? (-> call :event meta :re-frame/fx-overrides :dispatch)))
+          (is (= :app (runtime-atom-value #'rt/current-who)))
+          (is (contains? (runtime-atom-value #'rt/claude-dispatch-ids) "ROOT"))
+
+          (is (true? (:settled? settled)))
+          (is (true? (:ok? settled)))
+          (is (= [:root] (-> settled :epoch :event)))
+          (is (= 10 (:epoch-id settled)))
+          (is (= ["CHILD" "GRANDCHILD"] (:cascaded-epoch-ids settled)))
+          (is (= [[:child] [:grandchild]]
+                 (mapv :event (:cascaded-epochs settled))))
+          (is (= :unknown-handle (:reason (rt/await-settle (:handle r))))))))))
+
+(deftest dispatch-and-settle-bang-records-promise-rejection
+  (testing "rf-4mr Promise rejection settles the handle with :promise-rejected"
+    (with-redefs [rt/dispatch-and-settle-fn
+                  (fn []
+                    (fn [_event _opts]
+                      (rejecting-thenable (js/Error. "settle exploded"))))
+                  rt/recent-dispatch-id (fn [] "ROOT")]
+      (let [r       (rt/dispatch-and-settle! [:test/root])
+            settled (rt/await-settle (:handle r))]
+        (is (true? (:ok? r)))
+        (is (true? (:settled? settled)))
+        (is (false? (:ok? settled)))
+        (is (= :promise-rejected (:reason settled)))
+        (is (= [:test/root] (:event settled)))
+        (is (= "ROOT" (:dispatch-id settled)))
+        (is (re-find #"settle exploded" (:error settled)))
+        (is (= :app (runtime-atom-value #'rt/current-who)))))))
+
+(deftest dispatch-and-settle-bang-catches-synchronous-handler-throw
+  (testing "rf-4mr accessor throw returns :handler-threw and logs handler-error"
+    (with-redefs [rt/dispatch-and-settle-fn
+                  (fn []
+                    (fn [_event _opts]
+                      (throw (ex-info "handler boom" {:phase :dispatch-and-settle}))))]
+      (let [r    (rt/dispatch-and-settle! [:test/throws])
+            tail (rt/console-tail-since 0 :handler-error)]
+        (is (false? (:ok? r)))
+        (is (= :handler-threw (:reason r)))
+        (is (= [:test/throws] (:event r)))
+        (is (re-find #"handler boom" (:error r)))
+        (is (empty? (runtime-atom-value #'rt/settle-pending)))
+        (is (= :app (runtime-atom-value #'rt/current-who)))
+        (is (= 1 (count (:entries tail))))
+        (let [entry (first (:entries tail))]
+          (is (= :error (:level entry)))
+          (is (= :handler-error (:who entry)))
+          (is (some #(re-find #"handler-threw" %) (:args entry))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; rfp-zml / rf-ge8 — dispatch-with bridge for safe iteration with
 ;; record-only stubs. The runtime-test build pins re-frame 1.4.5 so
@@ -1272,6 +1372,70 @@
       (is (false? (:ok? r)))
       (is (= :dispatch-sync-with-unavailable (:reason r))))))
 
+(deftest dispatch-with-bang-success-calls-rf-ge8-accessor
+  (testing "dispatch-with! flips current-who for the synchronous enqueue"
+    (let [calls (atom [])]
+      (with-redefs [rt/dispatch-with-fn
+                    (fn []
+                      (fn [event overrides]
+                        (swap! calls conj {:event        event
+                                           :override-ids (set (keys overrides))
+                                           :who          (runtime-atom-value #'rt/current-who)})))]
+        (let [r (rt/dispatch-with! [:test/queued]
+                                   {:navigate   (fn [_] nil)
+                                    :http-xhrio (fn [_] nil)})]
+          (is (true? (:ok? r)))
+          (is (true? (:queued? r)))
+          (is (= [:test/queued] (:event r)))
+          (is (= #{:http-xhrio :navigate} (set (:stubbed-fx-ids r))))
+          (is (= [{:event        [:test/queued]
+                   :override-ids #{:http-xhrio :navigate}
+                   :who          :claude}]
+                 @calls))
+          (is (= :app (runtime-atom-value #'rt/current-who))))))))
+
+(deftest dispatch-sync-with-bang-success-captures-dispatch-id
+  (testing "dispatch-sync-with! records the dispatch id and restores current-who"
+    (let [calls (atom [])]
+      (with-redefs [rt/dispatch-sync-with-fn
+                    (fn []
+                      (fn [event overrides]
+                        (swap! calls conj {:event        event
+                                           :override-ids (set (keys overrides))
+                                           :who          (runtime-atom-value #'rt/current-who)})))
+                    rt/recent-dispatch-id (fn [] "SYNC-ROOT")]
+        (let [r (rt/dispatch-sync-with! [:test/sync]
+                                        {:dispatch (fn [_] nil)})]
+          (is (true? (:ok? r)))
+          (is (= "SYNC-ROOT" (:dispatch-id r)))
+          (is (= #{:dispatch} (set (:stubbed-fx-ids r))))
+          (is (= [{:event        [:test/sync]
+                   :override-ids #{:dispatch}
+                   :who          :claude}]
+                 @calls))
+          (is (contains? (runtime-atom-value #'rt/claude-dispatch-ids) "SYNC-ROOT"))
+          (is (= :app (runtime-atom-value #'rt/current-who))))))))
+
+(deftest dispatch-sync-with-bang-catches-handler-throw
+  (testing "dispatch-sync-with! mirrors tagged-dispatch-sync!'s handler error shape"
+    (with-redefs [rt/dispatch-sync-with-fn
+                  (fn []
+                    (fn [_event _overrides]
+                      (throw (ex-info "sync boom" {:phase :dispatch-sync-with}))))]
+      (let [r    (rt/dispatch-sync-with! [:test/sync-throws]
+                                         {:dispatch (fn [_] nil)})
+            tail (rt/console-tail-since 0 :handler-error)]
+        (is (false? (:ok? r)))
+        (is (= :handler-threw (:reason r)))
+        (is (= [:test/sync-throws] (:event r)))
+        (is (re-find #"sync boom" (:error r)))
+        (is (= :app (runtime-atom-value #'rt/current-who)))
+        (is (= 1 (count (:entries tail))))
+        (let [entry (first (:entries tail))]
+          (is (= :error (:level entry)))
+          (is (= :handler-error (:who entry)))
+          (is (some #(re-find #"handler-threw" %) (:args entry))))))))
+
 (deftest dispatch-with-stubs-bang-builds-overrides
   (testing "dispatch-with-stubs! threads through dispatch-with! — same
             fallback path under runtime-test (no rf-ge8). Use :dispatch
@@ -1288,10 +1452,17 @@
   (testing "empty input returns ok — nothing to validate"
     (is (= {:ok? true} (rt/validate-fx-ids []))))
 
-  (testing "every id registered (re-frame ships :dispatch / :db / :fx
-            etc. as builtins) → ok"
+  (testing "registered stubbable ids pass validation"
     (is (= {:ok? true} (rt/validate-fx-ids [:dispatch])))
-    (is (= {:ok? true} (rt/validate-fx-ids [:dispatch :db :fx]))))
+    (is (= {:ok? true} (rt/validate-fx-ids [:dispatch :fx]))))
+
+  (testing ":db is registered but not safe to stub"
+    (let [r (rt/validate-fx-ids [:dispatch :db])]
+      (is (false? (:ok? r)))
+      (is (= :unstubbable-fx (:reason r)))
+      (is (= [:db] (:unstubbable r)))
+      (is (= [:dispatch :db] (:requested r)))
+      (is (string? (:hint r)))))
 
   (testing "all ids unknown → :reason :unregistered-fx with both
             :unknown and :requested populated"
@@ -1304,10 +1475,10 @@
 
   (testing "mixed input: only the unregistered ids land in :unknown,
             while :requested mirrors the full input"
-    (let [r (rt/validate-fx-ids [:dispatch :nope/not-a-thing :db])]
+    (let [r (rt/validate-fx-ids [:dispatch :nope/not-a-thing :fx])]
       (is (false? (:ok? r)))
       (is (= [:nope/not-a-thing] (:unknown r)))
-      (is (= [:dispatch :nope/not-a-thing :db] (:requested r))))))
+      (is (= [:dispatch :nope/not-a-thing :fx] (:requested r))))))
 
 (deftest dispatch-with-stubs-bang-validates-fx-ids
   (testing "dispatch-with-stubs! short-circuits on a typoed fx-id —
@@ -1322,7 +1493,18 @@
   (testing "dispatch-sync-with-stubs! mirrors"
     (let [r (rt/dispatch-sync-with-stubs! [:test/foo] [:http-xhr])]
       (is (= :unregistered-fx (:reason r)))
-      (is (= [:http-xhr] (:unknown r))))))
+      (is (= [:http-xhr] (:unknown r)))))
+
+  (testing "dispatch-with-stubs! rejects :db before an app-db update can be suppressed"
+    (let [r (rt/dispatch-with-stubs! [:test/foo] [:db])]
+      (is (false? (:ok? r)))
+      (is (= :unstubbable-fx (:reason r)))
+      (is (= [:db] (:unstubbable r)))))
+
+  (testing "dispatch-sync-with-stubs! mirrors :db rejection"
+    (let [r (rt/dispatch-sync-with-stubs! [:test/foo] [:db])]
+      (is (= :unstubbable-fx (:reason r)))
+      (is (= [:db] (:unstubbable r))))))
 
 (deftest dispatch-and-settle-bang-validates-stub-fx-ids
   (testing ":stub-fx-ids is validated before the rf-4mr capability
@@ -1337,7 +1519,13 @@
   (testing "no :stub-fx-ids → validation skipped, falls through to the
             unavailable response under runtime-test (no rf-4mr)"
     (let [r (rt/dispatch-and-settle! [:test/foo])]
-      (is (= :dispatch-and-settle-unavailable (:reason r))))))
+      (is (= :dispatch-and-settle-unavailable (:reason r)))))
+
+  (testing ":stub-fx-ids rejects :db before the rf-4mr capability check"
+    (let [r (rt/dispatch-and-settle! [:test/foo] {:stub-fx-ids [:db]})]
+      (is (false? (:ok? r)))
+      (is (= :unstubbable-fx (:reason r)))
+      (is (= [:db] (:unstubbable r))))))
 
 ;; -----------------------------------------------------------------------------
 ;; rfp-12p / rfd-btn — dbg-macro-available? feature probe.

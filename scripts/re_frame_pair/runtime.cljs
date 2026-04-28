@@ -2089,8 +2089,7 @@
 (defn validate-fx-ids
   "Verify every fx-id keyword in `fx-ids` names a registered :fx
    handler. Returns `{:ok? true}` when every id resolves; otherwise
-   `{:ok? false :reason :unregistered-fx :unknown [...] :requested [...]
-   :hint ...}` listing the unrecognised ids alongside the full request.
+   a structured error listing the bad ids alongside the full request.
 
    Driven by `--stub` callers (`dispatch-with-stubs!` /
    `dispatch-sync-with-stubs!` / `dispatch-and-settle!`'s `:stub-fx-ids`
@@ -2100,13 +2099,23 @@
    stubbed-fx-ids vec would still claim the substitution applied. Public
    for tests."
   [fx-ids]
-  (let [unknown (filterv #(nil? (registrar/get-handler :fx %)) fx-ids)]
-    (if (seq unknown)
+  (let [unstubbable (filterv #{:db} fx-ids)
+        unknown     (filterv #(nil? (registrar/get-handler :fx %)) fx-ids)]
+    (cond
+      (seq unstubbable)
+      {:ok?         false
+       :reason      :unstubbable-fx
+       :unstubbable unstubbable
+       :requested   (vec fx-ids)
+       :hint        ":db is re-frame's app-db effect. Stubbing it would suppress state updates for the probed dispatch."}
+
+      (seq unknown)
       {:ok?       false
        :reason    :unregistered-fx
        :unknown   unknown
        :requested (vec fx-ids)
        :hint      "Unknown fx-id(s) — pass an id registered with reg-fx. Inspect available ids with `(re-frame-pair.runtime/registrar-list :fx)`."}
+      :else
       {:ok? true})))
 
 (defn stubbed-effects-since
