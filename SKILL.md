@@ -78,6 +78,8 @@ Each op below is a short `scripts/eval-cljs.sh` invocation wrapping a call into 
 | Op | Invocation | Returns |
 |---|---|---|
 | `app/summary` | `scripts/app-summary.sh` | Bootstrap bundle: versions, registrar inventory, live subs, app-db top-level keys + one-level shape, health. Use this as the first call after `discover-app.sh`. |
+| `health` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/health)'` | Idempotent install of last-click + console-capture + native epoch-cb + native trace-cb listeners; returns `{:ok? :session-id :ten-x-loaded? :trace-enabled? :native-epoch-cb? :native-trace-cb? ...}`. Use after a long-idle session, after a tab refresh, or whenever you want to re-arm listeners without going through full `discover-app.sh` injection. Lighter than `app/summary` when you only need the health summary. |
+| `versions/report` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/version-report)'` | Per-dep observed/floor version analysis with `:all-ok?` and `:enforcement-live?`. Distinct from `app/summary`'s bundled `:versions` field because it explicitly surfaces `:enforcement-live?` — distinguishes "all floors satisfied" from "no floors set, vacuous OK". Use when validating a CI gate or post-upgrade hot-reload. |
 | `app-db/snapshot` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/snapshot)'` | Current `@app-db` |
 | `app-db/get` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/app-db-at [:path :to :value])'` | Path-scoped value |
 | `app-db/schema` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/schema)'` | Opt-in schema or nil |
