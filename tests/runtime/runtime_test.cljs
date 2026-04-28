@@ -4,7 +4,9 @@
             [re-frame-pair.runtime :as rt]
             [re-frame-pair.runtime.epochs :as epochs]
             [re-frame-pair.runtime.native-epoch :as native-epoch]
-            [re-frame-pair.runtime.ten-x-adapter :as ten-x]))
+            [re-frame-pair.runtime.registrar :as registrar]
+            [re-frame-pair.runtime.ten-x-adapter :as ten-x]
+            [re-frame.subs :as rf-subs]))
 
 ;;; Unit tests for the pure fns inside re-frame-pair.runtime.
 ;;; Runs via shadow-cljs in node — no browser, no live re-frame app needed.
@@ -1858,6 +1860,36 @@
     (is (= [] (rt/extract-query-vs [])))
     (is (= [] (rt/extract-query-vs nil)))))
 
+(deftest subs-live-prefers-public-accessor
+  (testing "uses re-frame.core/live-query-vs when probe resolves it"
+    (with-redefs [registrar/live-query-vs-fn
+                  (fn [] (fn [] [[:cart/total] [:user/profile 42]]))]
+      (is (= [[:cart/total] [:user/profile 42]] (rt/subs-live)))))
+
+  (testing "result is sorted by string-coercion of query-v (matches legacy walk)"
+    (with-redefs [registrar/live-query-vs-fn
+                  (fn [] (fn [] [[:zzz/x] [:aaa/x] [:mmm/x]]))]
+      (is (= [[:aaa/x] [:mmm/x] [:zzz/x]] (rt/subs-live)))))
+
+  (testing "empty live-query-vs returns empty vec"
+    (with-redefs [registrar/live-query-vs-fn
+                  (fn [] (fn [] []))]
+      (is (= [] (rt/subs-live))))))
+
+(deftest subs-live-falls-back-to-cache-walk-when-public-accessor-missing
+  (testing "walks query->reaction when probe returns nil (re-frame predates rf-5rpc)"
+    (with-redefs [registrar/live-query-vs-fn (fn [] nil)
+                  rf-subs/query->reaction
+                  (atom {[{:re-frame/query-v   [:cart/total]
+                           :re-frame/q         :cart/total
+                           :re-frame/lifecycle :reactive} []]
+                         :rxn1
+                         [{:re-frame/query-v   [:user/profile 42]
+                           :re-frame/q         :user/profile
+                           :re-frame/lifecycle :reactive} []]
+                         :rxn2})]
+      (is (= [[:cart/total] [:user/profile 42]] (rt/subs-live))))))
+
 (deftest version-below-edges
   (testing "strict-below dotted-number comparison"
     (is (true?  (rt/version-below? "1.4" "1.5")))
@@ -2435,3 +2467,69 @@
           "early epoch's :input-query-sources must NOT carry the late epoch's
            input meta — pre-fix the late entry's value won the unscoped reduce
            in sub-input-deps and clobbered this epoch's attribution"))))
+
+(deftest renders-surface-re-com-render-src-when-present
+  ;; rc-aeh: re-com 2.29.3+ emits a sibling :re-com/render trace per
+  ;; ->attr call carrying {:src {:file :line}} on its tags. The :render
+  ;; trace from Reagent's wrap-funs only carries :component-name. Coerced
+  ;; render entries should attach :src from the matching :re-com/render
+  ;; sibling so the *Which view rendered?* recipe gets file:line precision
+  ;; instead of just munged component-name.
+  (testing "render entry gets :src from the sibling :re-com/render trace
+            in the same id-range when component-name matches"
+    (let [src         {:file "src/views/cart_panel.cljs" :line 42}
+          render      {:id 122 :op-type :render :duration 0.6
+                       :tags {:component-name "re_com.buttons.button"
+                              :reaction "rxn-2"}}
+          rc-render   {:id 123 :op-type :re-com/render :duration 0.05
+                       :tags {:component-name "re-com.buttons.button"
+                              :src src}}
+          render-only {:id 124 :op-type :render :duration 0.4
+                       :tags {:component-name "app.views.cart_panel"
+                              :reaction "rxn-3"}}
+          all-traces  [render rc-render render-only
+                       ;; Out-of-range :re-com/render — must be ignored.
+                       {:id 999 :op-type :re-com/render
+                        :tags {:component-name "re-com.buttons.button"
+                               :src {:file "DIFFERENT.cljs" :line 1}}}]
+          ctx         {:all-traces  all-traces
+                       :all-matches [fixtures/synthetic-match
+                                     fixtures/synthetic-render-burst]}
+          renders     (:renders (rt/coerce-epoch fixtures/synthetic-match ctx))
+          by-comp     (into {} (map (juxt :component identity) renders))]
+      (is (= src (-> by-comp (get "re-com.buttons.button") :src))
+          "re-com render entry must carry :src from its :re-com/render sibling")
+      (is (nil? (-> by-comp (get "app.views.cart_panel") :src))
+          "non-re-com render has no :re-com/render sibling — :src stays nil")
+      (is (true? (-> by-comp (get "re-com.buttons.button") :re-com?))
+          "classify-render-entry's :re-com? annotation still fires alongside :src")))
+
+  (testing "pre-rc-aeh trace stream (no :re-com/render sibling) coerces
+            without :src on any render entry — backwards compatible"
+    (let [render      {:id 122 :op-type :render :duration 0.6
+                       :tags {:component-name "re_com.buttons.button"
+                              :reaction "rxn-2"}}
+          all-traces  [render]
+          ctx         {:all-traces  all-traces
+                       :all-matches [fixtures/synthetic-match
+                                     fixtures/synthetic-render-burst]}
+          [entry]     (:renders (rt/coerce-epoch fixtures/synthetic-match ctx))]
+      (is (nil? (:src entry)))
+      (is (true? (:re-com? entry))
+          ":re-com? still fires from classify-render-entry's component-name prefix check")))
+
+  (testing ":re-com/render trace whose :tags carry no :src (defensive —
+            re-com only emits :re-com/render when :src is present, but
+            tooling shouldn't NPE if a stub fires one without :src)"
+    (let [render      {:id 122 :op-type :render :duration 0.6
+                       :tags {:component-name "re_com.buttons.button"}}
+          rc-render   {:id 123 :op-type :re-com/render
+                       :tags {:component-name "re-com.buttons.button"}}
+          all-traces  [render rc-render]
+          ctx         {:all-traces  all-traces
+                       :all-matches [fixtures/synthetic-match
+                                     fixtures/synthetic-render-burst]}
+          [entry]     (:renders (rt/coerce-epoch fixtures/synthetic-match ctx))]
+      (is (nil? (:src entry))
+          "missing :src in :re-com/render tags must not crash and must not
+           manufacture a fake :src on the render entry"))))

@@ -1,7 +1,8 @@
 (ns re-frame-pair.runtime.registrar
   (:require [re-frame.core :as rf]
             [re-frame.registrar :as registrar]
-            [re-frame.subs :as subs]))
+            [re-frame.subs :as subs]
+            [re-frame-pair.runtime.ten-x-adapter :as ten-x]))
 
 ;; The registrar is `re-frame.registrar/kind->id->handler`, an atom
 ;; of `{kind {id handler}}`. Verified against current re-frame source.
@@ -89,10 +90,31 @@
        (sort-by str)
        vec))
 
-(defn subs-live
-  "Query vectors currently held in re-frame's subscription cache."
+(defn live-query-vs-fn
+  "JS-interop accessor for `re-frame.core/live-query-vs` — re-frame's
+   public, cache-shape-stable enumeration of currently-cached
+   subscriptions (rf-5rpc, 2026 release). Returns nil when re-frame
+   predates the public accessor; callers fall back to walking
+   `re-frame.subs/query->reaction` directly via `extract-query-vs`.
+
+   Routed through `goog.global` so this file still compiles against
+   pre-rf-5rpc re-frame builds where the var simply isn't there."
   []
-  (extract-query-vs (some-> subs/query->reaction deref keys)))
+  (when-let [g (some-> js/goog .-global)]
+    (ten-x/aget-path g ["re_frame" "core" "live_query_vs"])))
+
+(defn subs-live
+  "Query vectors currently held in re-frame's subscription cache.
+
+   Prefers `re-frame.core/live-query-vs` (rf-5rpc) — the public,
+   cache-shape-stable accessor. Falls back to walking the internal
+   `re-frame.subs/query->reaction` cache atom when re-frame predates
+   the public accessor; the cache-key shape that `extract-query-vs`
+   unpacks is not a public contract."
+  []
+  (if-let [f (live-query-vs-fn)]
+    (->> (f) (sort-by str) vec)
+    (extract-query-vs (some-> subs/query->reaction deref keys))))
 
 (defn subs-sample
   "Subscribe to query-v and deref once. See docs/initial-spec.md §4.1
