@@ -230,7 +230,10 @@
    "registrar.cljs"
    "re_com.cljs"
    "session.cljs"
-   "versions.cljs"])
+   "versions.cljs"
+   ;; ten-x-adapter depends on re-com (classify-render-entry); load
+   ;; after the re-com submodule.
+   "ten_x_adapter.cljs"])
 
 (defn- runtime-cljs-paths
   "Source files comprising the re-frame-pair.runtime namespace tree,
