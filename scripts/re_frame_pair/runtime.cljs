@@ -818,7 +818,7 @@
   (atom {:entries [] :max-size 50}))
 
 (defonce ^:private native-trace-buffer
-  (atom {:entries [] :max-size 5000}))
+  (atom {:entries #queue [] :max-size 5000}))
 
 (defonce ^:private native-epoch-cb-installed? (atom false))
 (defonce ^:private native-trace-cb-installed? (atom false))
@@ -834,11 +834,21 @@
 
 (defn- receive-native-traces!
   "register-trace-cb callback. Appends raw traces from each delivery
-   batch to the trace ring buffer."
+   batch to the trace ring buffer.
+
+   `:entries` is a `PersistentQueue` rather than a vector so the FIFO
+   trim is O(overflow) pop-from-head, not the O(max-size) vec rebuild
+   the prior `(vec (take-last max-size ...))` shape did every batch.
+   The cb fires on every re-frame.trace flush (RAF tick + handler
+   boundaries), so a 5000-element rebuild per call dominated the
+   runtime's in-browser hot path."
   [batch]
   (swap! native-trace-buffer
          (fn [{:keys [entries max-size]}]
-           {:entries  (vec (take-last max-size (into entries batch)))
+           {:entries  (loop [q (into entries batch)]
+                        (if (> (count q) max-size)
+                          (recur (pop q))
+                          q))
             :max-size max-size})))
 
 (defn- register-epoch-cb-fn

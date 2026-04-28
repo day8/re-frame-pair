@@ -25,7 +25,7 @@
    these and forgets to reset would leak into every later deftest."
   []
   (reset-runtime-atom! #'rt/native-epoch-buffer        {:entries [] :max-size 50})
-  (reset-runtime-atom! #'rt/native-trace-buffer        {:entries [] :max-size 5000})
+  (reset-runtime-atom! #'rt/native-trace-buffer        {:entries #queue [] :max-size 5000})
   (reset-runtime-atom! #'rt/native-epoch-cb-installed? false)
   (reset-runtime-atom! #'rt/native-trace-cb-installed? false)
   (reset-runtime-atom! #'rt/console-log                {:entries [] :next-id 0 :max-size 500})
@@ -883,7 +883,7 @@
       (is (= (vec (range 5 5005))
              (entry-ids entries)))))
   (testing "receive-native-traces! applies the same FIFO rule across deliveries"
-    (reset-runtime-atom! #'rt/native-trace-buffer {:entries [] :max-size 5000})
+    (reset-runtime-atom! #'rt/native-trace-buffer {:entries #queue [] :max-size 5000})
     (#'rt/receive-native-traces! (mapv buffer-entry (range 4998)))
     (#'rt/receive-native-traces! (mapv buffer-entry (range 4998 5003)))
     (let [entries (rt/native-traces)]
