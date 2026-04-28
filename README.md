@@ -30,6 +30,8 @@ Designed for web apps built from the following stack — see [`STATUS.md`](STATU
 
 You don't need to make any changes to your code/project to use it, but you will need [`babashka`](https://babashka.org) installed because the skill's shell shims use it. See the [babashka install guide](https://github.com/babashka/babashka#installation).
 
+Starting fresh? [`re-frame-template`](https://github.com/day8/re-frame-template) scaffolds a project that satisfies this stack out of the box — `lein new re-frame your-app +10x +re-com` produces an app re-frame-pair can attach to without further changes.
+
 #### Optional: per-form trace via `re-frame-debux`
 
 If you add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) (the artifact published by the `re-frame-debux` repo) to your dev classpath, the skill can drive it on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. This is **not** transitive via `re-frame-10x` — you must add the dep explicitly. See [`docs/inspirations-debux.md`](docs/inspirations-debux.md) for the integration shape and the REPL-driven recipes.
