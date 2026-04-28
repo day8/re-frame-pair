@@ -1203,6 +1203,65 @@
                 (not @native-epoch-cb-installed?))
         (some-> (read-10x-epochs) last coerce-epoch))))
 
+(defn- ten-x-fallback-eligible?
+  "True when callers should attempt the legacy 10x epoch path. If the
+   native epoch callback is installed, missing 10x means native is the
+   only available source and callers should return the native answer
+   without leaking `read-10x-epochs`'s missing-10x exception."
+  []
+  (or (ten-x-loaded?)
+      (not @native-epoch-cb-installed?)))
+
+(defn- native-epoch-context
+  [raw-epochs]
+  {:traces     (native-traces)
+   :all-epochs raw-epochs})
+
+(defn- coerce-native-epochs
+  [raw-epochs]
+  (let [ctx (native-epoch-context raw-epochs)]
+    (mapv #(coerce-native-epoch % ctx) raw-epochs)))
+
+(defn- raw-native-epochs-after
+  [id raw-epochs]
+  (cond
+    (nil? id)
+    raw-epochs
+
+    (some #(= id (:id %)) raw-epochs)
+    (vec (rest (drop-while #(not= id (:id %)) raw-epochs)))
+
+    :else
+    ::not-found))
+
+(defn- raw-10x-epochs-after
+  [id matches]
+  (cond
+    (nil? id)
+    matches
+
+    (some #(= id (match-id %)) matches)
+    (vec (rest (drop-while #(not= id (match-id %)) matches)))
+
+    :else
+    ::not-found))
+
+(defn- coerce-10x-epochs
+  [all-matches matches]
+  (let [ctx {:all-traces  (read-10x-all-traces)
+             :all-matches all-matches}]
+    (mapv #(coerce-epoch % ctx) matches)))
+
+(defn- coerce-merged-epoch-sources
+  "Coerce chronological 10x matches plus the native-buffer tail, skipping
+   10x duplicates for ids the native buffer can answer more directly."
+  [all-10x-matches selected-10x-matches raw-native-epochs]
+  (let [native-ids (set (keep :id raw-native-epochs))
+        selected-10x-matches (remove #(contains? native-ids (match-id %))
+                                     selected-10x-matches)]
+    (vec (concat (coerce-10x-epochs all-10x-matches selected-10x-matches)
+                 (coerce-native-epochs raw-native-epochs)))))
+
 (defn epochs-since
   "Epochs appended *after* the given id. Returns a map:
 
@@ -1220,14 +1279,25 @@
    discards metadata on the round-trip; callers at the CLI need the
    aged-out signal in the value itself."
   [id]
-  (let [epochs (read-10x-epochs)]
+  (let [raw-native  (native-epochs)
+        native-tail (raw-native-epochs-after id raw-native)]
     (cond
-      (nil? id)
-      {:epochs (mapv coerce-epoch epochs)
+      (and (seq raw-native) (not= ::not-found native-tail))
+      {:epochs (coerce-native-epochs native-tail)
        :id-aged-out? false}
 
-      (some #(= id (match-id %)) epochs)
-      {:epochs (mapv coerce-epoch (rest (drop-while #(not= id (match-id %)) epochs)))
+      (ten-x-fallback-eligible?)
+      (let [matches  (read-10x-epochs)
+            tenx-tail (raw-10x-epochs-after id matches)]
+        (if (= ::not-found tenx-tail)
+          {:epochs []
+           :id-aged-out? true
+           :requested-id id}
+          {:epochs (coerce-merged-epoch-sources matches tenx-tail raw-native)
+           :id-aged-out? false}))
+
+      (not= ::not-found native-tail)
+      {:epochs (coerce-native-epochs native-tail)
        :id-aged-out? false}
 
       :else
@@ -1255,15 +1325,27 @@
    looks ancient."
   [ms]
   (let [cutoff (- (now-ms) ms)]
-    (->> (read-10x-epochs)
-         (filter (fn [m] (let [t (:start (find-trace m :event))]
-                           (and t (>= t cutoff)))))
-         (mapv coerce-epoch))))
+    (if-let [raw-native (seq (native-epochs))]
+      (let [raw-native (vec raw-native)
+            ctx        (native-epoch-context raw-native)]
+        (->> raw-native
+             (filter (fn [raw]
+                       (let [t (:start raw)]
+                         (and t (>= t cutoff)))))
+             (mapv #(coerce-native-epoch % ctx))))
+      (if (ten-x-fallback-eligible?)
+        (let [matches (read-10x-epochs)]
+          (->> matches
+               (filter (fn [m] (let [t (:start (find-trace m :event))]
+                                 (and t (>= t cutoff)))))
+               (coerce-10x-epochs matches)))
+        []))))
 
 (defn find-where
-  "Walk 10x's epoch buffer in reverse chronological order and return
-   the first epoch matching the predicate (a 1-arg fn taking a coerced
-   epoch map), or nil if no match.
+  "Walk epoch buffers in reverse chronological order and return the first
+   epoch matching the predicate (a 1-arg fn taking a coerced epoch map),
+   or nil if no match. The native epoch buffer is checked first; 10x is
+   only consulted when it is available or when native callbacks are not.
 
    Primary forensic op — 'find the epoch where X happened'. Examples:
 
@@ -1281,22 +1363,48 @@
    Most recent match wins — usually what you want for 'how did I get
    into this state?' post-mortems."
   [pred]
-  (some (fn [raw]
-          (let [epoch (coerce-epoch raw)]
-            (when (pred epoch) epoch)))
-        (rseq (read-10x-epochs))))
+  (let [raw-native (native-epochs)
+        native-ids (set (keep :id raw-native))
+        native-ctx (native-epoch-context raw-native)]
+    (or (some (fn [raw]
+                (let [epoch (coerce-native-epoch raw native-ctx)]
+                  (when (pred epoch) epoch)))
+              (rseq raw-native))
+        (when (ten-x-fallback-eligible?)
+          (let [matches (read-10x-epochs)
+                tenx-ctx {:all-traces  (read-10x-all-traces)
+                          :all-matches matches}]
+            (some (fn [raw]
+                    (when-not (contains? native-ids (match-id raw))
+                      (let [epoch (coerce-epoch raw tenx-ctx)]
+                        (when (pred epoch) epoch))))
+                  (rseq matches)))))))
 
 (defn find-all-where
   "Like find-where but returns every matching epoch, newest first. Use
    when you want the full trajectory of a path — 'every epoch where
    :cart changed' — not just the most recent transition."
   [pred]
-  (->> (read-10x-epochs)
-       rseq
-       (keep (fn [raw]
-               (let [epoch (coerce-epoch raw)]
-                 (when (pred epoch) epoch))))
-       vec))
+  (let [raw-native (native-epochs)
+        native-ids (set (keep :id raw-native))
+        native-ctx (native-epoch-context raw-native)
+        native-hits (->> (rseq raw-native)
+                         (keep (fn [raw]
+                                 (let [epoch (coerce-native-epoch raw native-ctx)]
+                                   (when (pred epoch) epoch))))
+                         vec)
+        tenx-hits (if (ten-x-fallback-eligible?)
+                    (let [matches  (read-10x-epochs)
+                          tenx-ctx {:all-traces  (read-10x-all-traces)
+                                    :all-matches matches}]
+                      (->> (rseq matches)
+                           (remove #(contains? native-ids (match-id %)))
+                           (keep (fn [raw]
+                                   (let [epoch (coerce-epoch raw tenx-ctx)]
+                                     (when (pred epoch) epoch))))
+                           vec))
+                    [])]
+    (vec (concat native-hits tenx-hits))))
 
 ;; ---------------------------------------------------------------------------
 ;; Console capture

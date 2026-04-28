@@ -857,6 +857,97 @@
     (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
     (is (nil? (rt/last-claude-epoch)))))
 
+(deftest epochs-since-prefers-native-buffer
+  (testing "epochs-since returns the native tail without consulting 10x"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch
+                        fixtures/synthetic-native-next-epoch]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-trace-buffer
+            {:entries  fixtures/synthetic-native-traces
+             :max-size 5000})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (let [r (rt/epochs-since 100)]
+        (is (false? (:id-aged-out? r)))
+        (is (= [200] (mapv :id (:epochs r))))
+        (is (= [[:other/event]] (mapv :event (:epochs r))))))))
+
+(deftest epochs-since-merges-older-10x-with-native-tail
+  (testing "older ids can fall back to 10x while overlapping recent ids
+            still come from native"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 3} {:id 4}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/ten-x-loaded? (fn [] true)
+                  rt/read-10x-epochs (fn [] [{:id 1} {:id 2} {:id 3} {:id 4}])
+                  rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw) :source :native})
+                                           ([raw _ctx] {:id (:id raw) :source :native}))
+                  rt/coerce-epoch (fn
+                                    ([raw] {:id (:id raw) :source :ten-x})
+                                    ([raw _ctx] {:id (:id raw) :source :ten-x}))]
+      (let [r (rt/epochs-since 1)]
+        (is (false? (:id-aged-out? r)))
+        (is (= [{:id 2 :source :ten-x}
+                {:id 3 :source :native}
+                {:id 4 :source :native}]
+               (:epochs r)))))))
+
+(deftest epochs-in-last-ms-prefers-native-buffer
+  (testing "pull-window reads use native timestamps when native epochs exist"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 1 :start 700}
+                        {:id 2 :start 900}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/now-ms (fn [] 1000)
+                  rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))
+                  rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw)})
+                                           ([raw _ctx] {:id (:id raw)}))]
+      (is (= [{:id 2}]
+             (rt/epochs-in-last-ms 200))))))
+
+(deftest find-where-prefers-native-buffer
+  (testing "find-where can answer from native epochs when 10x is absent"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch
+                        fixtures/synthetic-native-next-epoch]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-trace-buffer
+            {:entries  fixtures/synthetic-native-traces
+             :max-size 5000})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/read-10x-epochs
+                  (fn [] (throw (ex-info "10x should not be read" {})))]
+      (let [e (rt/find-where #(= [:cart/apply-coupon "SPRING25"] (:event %)))]
+        (is (= 100 (:id e)))
+        (is (= "11111111-1111-1111-1111-111111111111" (:dispatch-id e)))))))
+
+(deftest find-all-where-merges-native-and-10x
+  (testing "newest-first search returns native hits first and skips 10x duplicates"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [{:id 3} {:id 4}]
+             :max-size 50})
+    (reset-runtime-atom! #'rt/native-epoch-cb-installed? true)
+    (with-redefs [rt/ten-x-loaded? (fn [] true)
+                  rt/read-10x-epochs (fn [] [{:id 1} {:id 2} {:id 3} {:id 4}])
+                  rt/coerce-native-epoch (fn
+                                           ([raw] {:id (:id raw) :source :native})
+                                           ([raw _ctx] {:id (:id raw) :source :native}))
+                  rt/coerce-epoch (fn
+                                    ([raw] {:id (:id raw) :source :ten-x})
+                                    ([raw _ctx] {:id (:id raw) :source :ten-x}))]
+      (is (= [{:id 4 :source :native}
+              {:id 3 :source :native}
+              {:id 2 :source :ten-x}
+              {:id 1 :source :ten-x}]
+             (rt/find-all-where (constantly true)))))))
+
 (deftest find-where-coerces-until-newest-match
   (testing "find-where reverses raw epochs before coercion and stops after the first match"
     (let [coerced-ids (atom [])
