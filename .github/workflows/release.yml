@@ -57,9 +57,13 @@ jobs:
             exit 1
           fi
 
-      - name: Install babashka
+      - name: Install Clojure CLI and Babashka
+        # cli is needed for shadow-cljs's :deps true mode (shells out
+        # to `clojure` for classpath resolution) — npm test below
+        # invokes shadow-cljs which requires this.
         uses: DeLaGuardo/setup-clojure@02f5a82b79a547523e664fe8a7a32ea14884d7b2 # 13.6.0
         with:
+          cli: "latest"
           bb: "latest"
 
       - name: Smoke-test babashka scripts
