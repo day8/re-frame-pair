@@ -1,8 +1,23 @@
 # re-frame-pair
 
-Lets Claude (in Claude Code, or via the Claude API) interact with your **running re-frame application** — inspect `app-db`, dispatch events, hot-swap handlers, trace the dominoes, time-travel — all live against the runtime, no source edits required for probes.
+Lets Claude (in Claude Code, or via the Claude API) debug and develop against your **running re-frame application**. Claude can inspect `app-db`, dispatch events, trace the dominoes, hot-swap handlers, time-travel, and map visible UI back to source — all live against the runtime, with no source edits required for probes.
 
-A coding agent working with just static code is working with a limited perspective. With re-frame-pair, Claude reads the **internal state** and the **dynamics** of your running app, and can iteratively probe, patch, and revert without committing to source. REPL changes are **ephemeral** (try-and-discard); source edits **stick**.
+A coding agent working with just static code is working with a limited perspective. It can read handlers, subscriptions, and views, but it has to guess what happened in the browser. With re-frame-pair, Claude can ask the running app: which event fired, what changed in `app-db`, which effects fired, which subscriptions re-ran or cache-hit, which views rendered, and where the relevant source lives.
+
+The intended loop is empirical:
+
+1. Observe the current runtime state.
+2. Inspect the relevant epoch.
+3. Form a hypothesis.
+4. Probe with a dispatch, app-db read, hot-swap, side-effect stub, or REPL eval.
+5. Compare the new epoch with the baseline.
+6. Only then edit source.
+
+REPL changes are **ephemeral** (try-and-discard); source edits **stick**.
+
+Use it when a UI did not update, an event fired but the visible result is wrong, `app-db` ended up in a bad state, the user cannot remember the exact path that caused a bug, you need to find the source behind a visible control, or you want to test a handler/sub/fx change safely before committing it.
+
+Post-mortems are a core use case. Instead of asking the developer to describe every click and state transition that led to a bug, Claude can inspect the recent epoch trail and identify the event that introduced the bad value, including its parent dispatch, effects, `app-db` diff, subscriptions, renders, and source call sites.
 
 ## Examples
 

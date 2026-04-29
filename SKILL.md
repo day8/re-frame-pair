@@ -27,7 +27,20 @@ allowed-tools:
 
 # re-frame-pair
 
-You are pair-programming with a developer on a **live, running re-frame application** in a browser tab behind `shadow-cljs watch`. Without re-frame-pair you'd be reading source and guessing — you couldn't see `app-db`, you couldn't ask *"why didn't my view update?"* against actual state, you couldn't probe a fix without committing it. With re-frame-pair, you operate against the real runtime: read the current `app-db`, dispatch events, see *why* a sub didn't fire, hot-swap a handler to test a hypothesis, time-travel.
+You are pair-programming with a developer on a **live, running re-frame application** in a browser tab behind `shadow-cljs watch`.
+
+Your main advantage is not just that you can read `app-db`. Your main advantage is that you can close the debugging loop against the real runtime. Without re-frame-pair you would read source and guess what happened in the browser. With re-frame-pair you can ask the running app which event fired, what changed in `app-db`, which effects fired, which subscriptions re-ran or cache-hit, which views rendered, and where the relevant source lives.
+
+Prefer this empirical loop:
+
+1. Observe the current runtime state.
+2. Inspect the relevant epoch.
+3. Form a hypothesis.
+4. Probe with a dispatch, app-db read, hot-swap, side-effect stub, or REPL eval.
+5. Compare the new epoch with the baseline.
+6. Only then edit source.
+
+Use this especially when a UI did not update, an event fired but the visible result is wrong, `app-db` ended up in a bad state, the user cannot remember the exact path that caused a bug, you need to find the source behind a visible control, or you want to test a handler/sub/fx change before committing it.
 
 Your agency runs through two coupled primitives:
 
@@ -58,6 +71,15 @@ The rest of this doc is the vocabulary on top.
 - The user is starting an app that isn't running yet (no live runtime to attach to).
 - They're debugging code that isn't routed through re-frame.
 - They want pure source-only refactor work with no behavioural verification.
+
+## Core workflows
+
+- **Why didn't the UI update?** Follow event -> `app-db` diff -> subscriptions ran/cache-hit -> renders -> DOM/source.
+- **What happened after this dispatch?** Narrate the six dominoes: event, interceptors/coeffects, handler result, effects, subscriptions, renders.
+- **Post-mortem: how did app-db get here?** Do not make the user reconstruct the reproduction path from memory. Search recent epochs for the transition that introduced the bad value, then follow parent/child dispatch ids if the cause was cascaded.
+- **Can this fix work?** Hot-swap or eval the smallest runtime change, re-run the same event from the same state when possible, then compare epochs.
+- **Where is that UI wired?** Resolve visible controls/components to `:src`, then inspect their dispatches, subscriptions, and handlers.
+- **Can I iterate without real side effects?** Stub selected fx for one dispatch cascade, record what would have fired, and discard the stubs when the cascade settles.
 
 ## What every coerced epoch carries
 
@@ -103,6 +125,7 @@ When `handler/source` returns `:no-source-meta`, the cause is most often that th
 
 - **Read live state before guessing.** `app-db/snapshot`, `trace/last-epoch` first; hypothesis after.
 - **Probe, don't speculate.** When an answer isn't obvious, evaluate against live data.
+- **Prefer baseline/comparison evidence.** Capture the epoch before a probe, run the smallest useful change, then compare the resulting epoch instead of relying on intent.
 - **REPL access is your second mode.** You can hot-swap a handler / sub / fx, redefine a `defn`, or `reset!` `app-db` directly through `repl/eval` — the change takes effect immediately in the running app, no source edit and no recompile. That makes probing cheap: try a fix, dispatch the event, watch the resulting epoch, throw it away. When a REPL-only patch turns out to be the right shape, transfer it to source. Two practical points to remember:
   - REPL changes are **ephemeral** — survive hot-reloads of unaffected nses, lost on full page refresh. Source edits via `Edit` / `Write` are **permanent**.
   - After any source edit, run `scripts/tail-build.sh --probe '<form>'` before dispatching or tracing — otherwise you're interacting with the pre-reload code.

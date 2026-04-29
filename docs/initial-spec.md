@@ -8,13 +8,23 @@
 
 ## 1. Purpose
 
-`re-frame-pair` is a Claude Code Skill (and Plugin) that lets Claude act as a pair programmer for a **live, running re-frame application**. It attaches to the application's runtime via shadow-cljs nREPL and exposes a small set of operations that map directly onto re-frame's primitives: `app-db`, events, subscriptions, effects, interceptors. Source files can also be edited; changes are coordinated with shadow-cljs hot-reload (§4.5).
+`re-frame-pair` is a Claude Code Skill (and Plugin) that lets Claude act as a pair programmer for a **live, running re-frame application**. It attaches to the application's runtime via shadow-cljs nREPL and exposes operations that map directly onto re-frame's primitives: `app-db`, events, subscriptions, effects, interceptors, renders, and source locations. Source files can also be edited; changes are coordinated with shadow-cljs hot-reload (§4.5).
+
+The central purpose is to close the debugging loop for an AI coding agent. Claude should be able to observe the current runtime, inspect the event epoch that matters, form a hypothesis, probe with a dispatch or ephemeral REPL change, compare the new epoch with the baseline, and only then make the source edit.
 
 ### Why this shape
 
 re-frame is a reactive dataflow system — a DAG of derived values rooted in mutable state. `app-db` is the single source of truth; events are the only legal writes; subscriptions recompute as derived values; views re-render when their subs change. A coding agent that only edits `.cljs` files works against the static shape of that system and has no view of its dynamics at runtime.
 
 re-frame-pair inverts this. It operates on the live browser runtime *and* on source files — but deliberately, with a protocol: REPL changes are ephemeral probes; source edits are committed changes coordinated with shadow-cljs hot-reload (§4.5). Every read and write runs through re-frame's own vocabulary, so the data loop, the trace buffer, and the user's own instincts about the app all see the same thing Claude sees.
+
+The highest-value workflows are causal and empirical:
+
+- A UI did not update: follow event -> `app-db` diff -> subscriptions ran/cache-hit -> renders -> DOM/source.
+- An event fired but the visible result is wrong: inspect the handler result, effect cascade, and source call sites.
+- `app-db` is in a bad state, or the developer cannot remember the exact path that caused a bug: search recent epochs for the transition that introduced it, then report the event, parent dispatch, effects, `app-db` diff, renders, and source call sites.
+- A proposed fix is uncertain: hot-swap or eval the smallest runtime change, replay or re-dispatch, and compare epochs before editing source.
+- A visible control is suspicious: resolve it to source, then inspect its dispatches, subscriptions, and handlers.
 
 ### Non-goals
 
