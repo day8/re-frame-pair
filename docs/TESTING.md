@@ -39,7 +39,7 @@ To run: `npm run test:ops`. CI runs it on every push.
 
 ## 1c. Skill / recipe contract tests (`tests/skill_recipe_smoke.bb`)
 
-Pins SKILL.md and `docs/recipes/debux.md` invariants — heading text, allowed-tools, recipe section presence, fixture surface contract. Catches silent drift between the skill prose and the runtime / fixture surface.
+Pins SKILL.md and `docs/skill/debux.md` invariants — heading text, allowed-tools, recipe section presence, fixture surface contract. Catches silent drift between the skill prose and the runtime / fixture surface.
 
 Pins the fixture's `dispatch.sh --stub` recipe contract: `events.cljs` keeps a real `:test/log-message` `reg-fx`, the direct + cascaded events that emit it, and the README smoke steps that verify the runtime stub log against the fixture's real effect log. CI guard for the fixture surface; doesn't replace the live browser smoke.
 

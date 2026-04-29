@@ -10,7 +10,7 @@ For the design this is measured against, see [`docs/initial-spec.md`](docs/initi
 
 | Area | State |
 |---|---|
-| `SKILL.md` (~100 lines) + `docs/skill/*.md` recipes + `docs/recipes/debux.md` | Operator + AI-facing narrative; reviewed for efficiency / completeness / correctness / clarity / structure / duplication |
+| `SKILL.md` (~100 lines) + `docs/skill/*.md` recipes (including `debux.md`) | Operator + AI-facing narrative; reviewed for efficiency / completeness / correctness / clarity / structure / duplication |
 | `scripts/re_frame_pair/runtime/*.cljs` + facade `runtime.cljs` | Native epoch + trace ring buffers (`re-frame.core/register-epoch-cb`, rf-ybv) with 10x fallback; `dispatch-and-settle` / `dispatch-with` / source-meta consumers; auto-reinject after browser refresh |
 | `scripts/ops.clj` + shell shims | Babashka dispatches every op; `dispatch.sh --trace` routes through `dispatch-and-settle`; `--stub` flag for record-only fx overrides |
 | `.claude-plugin/plugin.json` | Written |

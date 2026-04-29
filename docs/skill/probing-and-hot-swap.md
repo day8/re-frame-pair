@@ -55,4 +55,4 @@ For a custom stub function, call `dispatch-with!` directly via `eval-cljs`; func
 
 ## Form-Level Trace
 
-For expression-by-expression tracing inside handlers, subs, or fx, use re-frame-debux when available. Probe availability with `(re-frame-pair.runtime/debux-runtime-api?)` (returns truthy when the runtime API is loaded). The full procedure lives in `docs/recipes/debux.md`.
+For expression-by-expression tracing inside handlers, subs, or fx, use re-frame-debux when available. Probe availability with `(re-frame-pair.runtime/debux-runtime-api?)` (returns truthy when the runtime API is loaded). The full procedure lives in `docs/skill/debux.md`.

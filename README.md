@@ -156,7 +156,7 @@ Make sure your `:release` build aliases `day8.re-frame.tracing` to the stubs so 
               {:ns-aliases
                {day8.re-frame.tracing day8.re-frame.tracing-stubs}}}}}}
 ```
-The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
+The REPL-driven recipes live in [`docs/skill/debux.md`](docs/skill/debux.md).
 
 
 ## Two modes

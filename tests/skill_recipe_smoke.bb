@@ -47,7 +47,7 @@
 (def ^:private project-root (System/getProperty "user.dir"))
 (def ^:private skill-md     (slurp (str project-root "/SKILL.md")))
 (def ^:private debux-recipe-md
-  (slurp (str project-root "/docs/recipes/debux.md")))
+  (slurp (str project-root "/docs/skill/debux.md")))
 (def ^:private fixture-deps-path
   (str project-root "/tests/fixture/deps.edn"))
 (def ^:private fixture-events-path
@@ -144,7 +144,7 @@
 ;; ---------------------------------------------------------------------------
 
 ;; The full debux procedures (runtime-API + manual fn-traced fallback)
-;; live in docs/recipes/debux.md to keep SKILL.md focused on day-to-day
+;; live in docs/skill/debux.md to keep SKILL.md focused on day-to-day
 ;; vocabulary; SKILL.md links here. Markers below match the H3-headed
 ;; regions in that file.
 (def ^:private runtime-api-region
@@ -322,7 +322,7 @@
           "debux-runtime-api? defn missing from runtime.cljs"))))
 
 (deftest tracing-options-section-present-in-debux-recipe
-  (testing "docs/recipes/debux.md exposes the re-frame-debux call-time
+  (testing "docs/skill/debux.md exposes the re-frame-debux call-time
             options (:once, :final, :msg, :verbose, :if) plus
             reset-once-state! so an agent reading the form-by-form
             recipe can find them in one place. Drift here would
@@ -331,17 +331,17 @@
             recipe was extracted to its own doc — heading promoted
             from H3 to H2 on the move."
     (is (str/includes? debux-recipe-md "## Tracing options — reducing noise")
-        "Tracing options heading missing from docs/recipes/debux.md")
+        "Tracing options heading missing from docs/skill/debux.md")
     (is (str/includes? debux-recipe-md ":once")
-        "docs/recipes/debux.md must name the :once option")
+        "docs/skill/debux.md must name the :once option")
     (is (str/includes? debux-recipe-md ":final")
-        "docs/recipes/debux.md must name the :final option")
+        "docs/skill/debux.md must name the :final option")
     (is (str/includes? debux-recipe-md ":msg")
-        "docs/recipes/debux.md must name the :msg option")
+        "docs/skill/debux.md must name the :msg option")
     (is (str/includes? debux-recipe-md ":verbose")
-        "docs/recipes/debux.md must name the :verbose option")
+        "docs/skill/debux.md must name the :verbose option")
     (is (str/includes? debux-recipe-md "reset-once-state!")
-        "docs/recipes/debux.md must name reset-once-state! so callers can clear :once memory")))
+        "docs/skill/debux.md must name reset-once-state! so callers can clear :once memory")))
 
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))

@@ -82,7 +82,7 @@ Most sessions need only three ops — `app-summary`, `dispatch`, and `last-epoch
 | UI didn't update; rendered output wrong; resolve a visible control to `:src` | [`docs/skill/ui-debugging.md`](docs/skill/ui-debugging.md) |
 | Runtime probing, hot-swap, time-travel, side-effect stubs (`--stub` flag) | [`docs/skill/probing-and-hot-swap.md`](docs/skill/probing-and-hot-swap.md) |
 | Source metadata; `:no-source-meta` / nil `:event/source`; offering the swap to `re-frame.core-instrumented` | [`docs/skill/source-meta.md`](docs/skill/source-meta.md) |
-| Form-by-form trace inside a handler / sub / fx (re-frame-debux — an optional source-printing instrumentation library) | [`docs/recipes/debux.md`](docs/recipes/debux.md) |
+| Form-by-form trace inside a handler / sub / fx (re-frame-debux — an optional source-printing instrumentation library) | [`docs/skill/debux.md`](docs/skill/debux.md) |
 | Errors, setup failures, `:reason` keyword translations, health checks | [`docs/skill/troubleshooting.md`](docs/skill/troubleshooting.md) |
 
 ## Operating Principles
