@@ -212,4 +212,4 @@ MIT.
 
 ---
 
-**Try it:** clone, symlink per [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md), then read [`SKILL.md`](SKILL.md) to see the full vocabulary Claude learns.
+**Try it:** clone, symlink per [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md), then read [`SKILL.md`](SKILL.md) for the principal operating model. Detailed workflow notes live under [`docs/skill/`](docs/skill/).
