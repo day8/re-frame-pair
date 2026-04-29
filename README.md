@@ -141,11 +141,11 @@ If you take the optional last two — the `re-frame-debux` deps — make sure yo
                {day8.re-frame.tracing day8.re-frame.tracing-stubs}}}}}}
 ```
 
-re-frame-pair itself is not yet published to npm. To install it now, clone this repo and follow [`docs/LOCAL_DEV.md`'s Project-local instructions](docs/LOCAL_DEV.md#3-project-local-only-active-in-one-app) to add it to a single app.
+re-frame-pair itself is not yet published to npm — see [Install](#install) below.
 
 ### Optional: per-form trace via re-frame-debux
 
-Add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) to your dev classpath and the skill can drive it on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. **Not** transitive via `re-frame-10x` — add the dep explicitly. The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
+With the [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) deps wired in (last two lines of the dep block above), the skill can drive debux on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
 
 ## Two modes
 
