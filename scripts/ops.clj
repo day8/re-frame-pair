@@ -642,6 +642,20 @@
                :required floor}))
           by-dep)))
 
+(defn- startup-context
+  "Best-effort app/runtime orientation payload for discover-app.
+
+   Kept separate from health because health is used as a cheap liveness
+   probe elsewhere; discover is the startup point where the larger
+   app-db snapshot and recent event tail are useful."
+  [build-id]
+  (try
+    (cljs-eval-value build-id (runtime-form 'startup-context))
+    (catch Exception e
+      {:error   true
+       :reason  (or (:reason (ex-data e)) :startup-context-failed)
+       :message (.getMessage e)})))
+
 ;; Forward reference: list-builds-on-port is defined further down with
 ;; the rest of the discover-list machinery. Babashka/sci does no
 ;; forward-symbol resolution at analysis time, so without this declare
@@ -660,6 +674,7 @@
     (try
       (let [health      (inject-runtime! build-id {:capture? capture?})
             version-err (version-failure health)
+            context     (startup-context build-id)
             ;; Multi-build awareness: probe active builds on the
             ;; chosen port. Failure is non-fatal — `discover` still
             ;; works, just without the warning.
@@ -691,7 +706,9 @@
 
           :else
           (emit (cond-> health
-                  true                          (assoc :ok? true :build-id build-id)
+                  true                          (assoc :ok? true
+                                                       :build-id build-id
+                                                       :startup-context context)
                   (not capture?)                (assoc :capture-skipped? true)
                   (not (:re-com-debug? health)) (assoc :warning :re-com-debug-disabled
                                                        :note    "DOM ↔ source ops will degrade; otherwise functional.")

@@ -106,7 +106,7 @@ When `handler/source` returns `:no-source-meta`, the cause is most often that th
 - **REPL access is your second mode.** You can hot-swap a handler / sub / fx, redefine a `defn`, or `reset!` `app-db` directly through `repl/eval` — the change takes effect immediately in the running app, no source edit and no recompile. That makes probing cheap: try a fix, dispatch the event, watch the resulting epoch, throw it away. When a REPL-only patch turns out to be the right shape, transfer it to source. Two practical points to remember:
   - REPL changes are **ephemeral** — survive hot-reloads of unaffected nses, lost on full page refresh. Source edits via `Edit` / `Write` are **permanent**.
   - After any source edit, run `scripts/tail-build.sh --probe '<form>'` before dispatching or tracing — otherwise you're interacting with the pre-reload code.
-- **Connect first, every session.** Run `scripts/discover-app.sh` then `scripts/app-summary.sh` before any other op. discover-app finds the nREPL port, switches to `:cljs` mode, verifies preconditions, and injects the runtime ns. app-summary is a one-round-trip bootstrap (versions + registrar + live subs + app-db shape + health). If discover fails it returns `{:ok? false :reason ...}` — surface verbatim, don't guess workarounds.
+- **Connect first, every session.** Run `scripts/discover-app.sh` before any other op. discover-app finds the nREPL port, switches to `:cljs` mode, verifies preconditions, injects the runtime ns, and returns `:startup-context` with the current app-db snapshot plus a compact tail of recent events. Run `scripts/app-summary.sh` next when you need registrar inventory, live subs, and app-db shape. If discover fails it returns `{:ok? false :reason ...}` — surface verbatim, don't guess workarounds.
 - **Surface failures verbatim.** Every script returns structured edn. Translate `:reason` to plain English; don't paper over it.
 - **Validate before proposing.** When a hot-swap or suggestion is on the table, compose the form and run it against current state first.
 - **Narrow detail as you go.** Summaries first; drill into a specific epoch / diff / sub when the user asks.
@@ -127,7 +127,7 @@ These cover most conversations:
 
 | Op | Use it for |
 |---|---|
-| `scripts/app-summary.sh` | Bootstrap: versions, registrar, live subs, app-db shape, health |
+| `scripts/app-summary.sh` | Extended bootstrap: versions, registrar, live subs, app-db shape, health |
 | `scripts/dispatch.sh '[:foo ...]'` | Fire an event (queued; `--sync` for sync; `--trace` for full epoch + cascade) |
 | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-epoch)'` | Most recent epoch, fully coerced |
 | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Forensic — most recent epoch matching a predicate |
@@ -139,7 +139,7 @@ These cover most conversations:
 
 | Op | Invocation | Returns |
 |---|---|---|
-| `app/summary` | `scripts/app-summary.sh` | Bootstrap bundle. Use first after discover. |
+| `app/summary` | `scripts/app-summary.sh` | Extended bootstrap bundle. Use after discover when you need registrar/live-sub detail. |
 | `health` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/health)'` | Re-arms listeners; `{:ok? :session-id :ten-x-loaded? :trace-enabled? :native-epoch-cb? :rf-error-handler? ...}`. Lighter than `app/summary` when you only need health. |
 | `versions/report` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/version-report)'` | Per-dep observed/floor + `:enforcement-live?` (distinguishes "all floors satisfied" from "no floors set, vacuous OK"). |
 | `app-db/snapshot` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/snapshot)'` | Current `@app-db` |

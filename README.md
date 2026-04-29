@@ -167,7 +167,7 @@ On first use the skill runs `discover-app.sh`:
 1. Locates the running shadow-cljs nREPL (`target/shadow-cljs/nrepl.port`, falling back to `.shadow-cljs/nrepl.port` or the `SHADOW_CLJS_NREPL_PORT` env var).
 2. Verifies a browser runtime is attached, that re-frame-10x and re-com are loaded, and that `re-frame.trace/trace-enabled?` is true.
 3. Injects the `re-frame-pair.runtime` namespace (helpers + epoch-buffer readers) into your app over nREPL.
-4. Reports `connected` or names the single failing check with a one-line fix suggestion.
+4. Returns a startup payload including health, the current `app-db` snapshot, and a compact tail of recent events so the agent can orient itself before asking for more detail.
 
 All subsequent ops reuse the connection. On a full page refresh the skill detects its session sentinel is gone and re-injects automatically.
 

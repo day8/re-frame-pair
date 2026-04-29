@@ -199,12 +199,37 @@
                                                 :trace-enabled? true
                                                 :re-com-debug? true
                                                 :versions {:by-dep {}}})
+                    ops/startup-context      (fn [_build-id]
+                                               {:app-db {} :recent-events []})
                     ops/read-port            (fn [] 8777)
                     ops/list-builds-on-port  (fn [_] [:app])
                     ops/emit                 (fn [m] (reset! emitted m))]
         (#'ops/discover ["--no-capture"])
         (is (= {:capture? false} @seen))
         (is (true? (:capture-skipped? @emitted)))))))
+
+(deftest discover-emits-startup-context
+  (testing "successful discover includes current app-db + recent event orientation"
+    (let [emitted (atom nil)]
+      (with-redefs [ops/ensure-port!         (fn [] true)
+                    ops/inject-runtime!      (fn [_build-id _opts]
+                                               {:ok? true
+                                                :ten-x-loaded? true
+                                                :trace-enabled? true
+                                                :re-com-debug? true
+                                                :versions {:by-dep {}}})
+                    ops/startup-context      (fn [build-id]
+                                               {:app-db {:screen :checkout}
+                                                :recent-events [{:id 1 :event [:initialize]}]
+                                                :build-id build-id})
+                    ops/read-port            (fn [] 8777)
+                    ops/list-builds-on-port  (fn [_] [:app])
+                    ops/emit                 (fn [m] (reset! emitted m))]
+        (#'ops/discover [])
+        (is (= {:app-db {:screen :checkout}
+                :recent-events [{:id 1 :event [:initialize]}]
+                :build-id :app}
+               (:startup-context @emitted)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; rfp-zml: --stub flag parsing for dispatch-with bridge

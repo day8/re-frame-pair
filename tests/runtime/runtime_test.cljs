@@ -2252,6 +2252,37 @@
         (finally
           (reset! re-frame.db/app-db orig))))))
 
+(deftest startup-context-includes-app-db-and-recent-events
+  (testing "startup-context gives discover-app enough state to orient the agent"
+    (let [orig @re-frame.db/app-db]
+      (try
+        (reset! re-frame.db/app-db {:screen :checkout :cart {:items [1 2]}})
+        (with-redefs [rt/epochs-since
+                      (fn [_]
+                        {:epochs [{:id 1 :event [:initialize] :app-db/diff {:large :omitted}}
+                                  {:id 2 :event nil}
+                                  {:id 3 :event [:cart/add 1] :effects {:db {}}}
+                                  {:id 4 :event [:cart/checkout]
+                                   :event/original [:cart/checkout]
+                                   :dispatch-id "d4"
+                                   :interceptor-chain [:coeffects :db-handler]}]})]
+          (let [ctx (rt/startup-context {:event-count 2})]
+            (is (= {:screen :checkout :cart {:items [1 2]}}
+                   (:app-db ctx)))
+            (is (= 2 (:event-count ctx)))
+            (is (number? (:ts ctx)))
+            (is (= [{:id 3 :event [:cart/add 1]}
+                    {:id 4
+                     :event [:cart/checkout]
+                     :event/original [:cart/checkout]
+                     :dispatch-id "d4"
+                     :interceptor-chain [:coeffects :db-handler]}]
+                   (:recent-events ctx)))
+            (is (not (contains? (first (:recent-events ctx)) :app-db/diff)))
+            (is (not (contains? (second (:recent-events ctx)) :effects)))))
+        (finally
+          (reset! re-frame.db/app-db orig))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Tests for handler/source
 ;; ---------------------------------------------------------------------------

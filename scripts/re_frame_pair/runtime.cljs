@@ -262,6 +262,50 @@
 (def version-report versions/version-report)
 
 ;; ---------------------------------------------------------------------------
+;; Startup orientation
+;; ---------------------------------------------------------------------------
+
+(defn recent-event-summary
+  "Compact projection of an epoch for startup-context.
+
+   The full epoch shape can be large: app-db diffs, coeffects, effects,
+   renders, subs, and debux code can all carry user data. Startup only
+   needs enough orientation for an agent to know what just happened and
+   which ids to fetch if it needs detail."
+  [epoch]
+  (select-keys epoch
+               [:id
+                :t
+                :time-ms
+                :event
+                :event/original
+                :event/source
+                :dispatch-id
+                :parent-dispatch-id
+                :interceptor-chain]))
+
+(defn startup-context
+  "Initial app/runtime context returned by discover-app.
+
+   Includes the current app-db snapshot and a bounded tail of recent
+   events so the agent can orient itself immediately after injection.
+   The event tail is intentionally compact; callers can use :id with
+   `epoch-by-id` when they need the full epoch."
+  ([] (startup-context {}))
+  ([{:keys [event-count] :or {event-count 5}}]
+   (let [recent (try
+                  (->> (:epochs (epochs-since nil))
+                       (filter :event)
+                       (take-last event-count)
+                       (mapv recent-event-summary))
+                  (catch :default e
+                    {:error (.-message e)}))]
+     {:app-db        @db/app-db
+      :recent-events recent
+      :event-count   event-count
+      :ts            (js/Date.now)})))
+
+;; ---------------------------------------------------------------------------
 ;; Health check
 ;; ---------------------------------------------------------------------------
 

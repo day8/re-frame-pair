@@ -120,8 +120,9 @@ Installing re-frame-pair adds **no new host-project configuration beyond what 10
 
 1. `discover-app.sh` locates nREPL and attaches.
 2. `inject-runtime.sh` creates the `re-frame-pair.runtime` namespace at runtime and interns helpers (`snapshot`, `trace-dispatch`, etc.) from `scripts/runtime.cljs`. Among those helpers is the **session sentinel** — `re-frame-pair.runtime/session-id`, a random UUID. On every subsequent op, the skill reads the session sentinel; if absent, a full page refresh has occurred (the new runtime doesn't have our injection) and the skill re-injects before proceeding. The nREPL session itself persists through refreshes — only the browser-side runtime object is renewed.
+3. The successful discovery response includes `:startup-context`: the current `app-db` snapshot plus a compact tail of recent event epochs (`:id`, `:event`, dispatch ids, timing, and source/interceptor hints). The tail is intentionally a pointer list; callers fetch full epochs by id when they need detailed diffs, effects, renders, or debux code.
 
-That's the full bootstrap. Per-op concerns — epoch streaming (§4.4), hot-reload confirmation (§4.5) — do their own work on demand. No trace callback is installed at connect or anywhere else; all epoch data comes from 10x's existing trace-cb and epoch buffer.
+That's the full bootstrap. Per-op concerns — epoch streaming (§4.4), hot-reload confirmation (§4.5) — do their own work on demand. Current re-frame builds feed re-frame-pair through native epoch/trace callbacks installed by `health`; older builds fall back to 10x's epoch buffer.
 
 This is the only install path: one command on the Claude side, and whatever 10x + re-com already required on the app side.
 
