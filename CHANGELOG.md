@@ -14,6 +14,33 @@ versioning aims at [SemVer](https://semver.org/) once the skill leaves beta.
 
 Nothing yet.
 
+## [0.1.0-beta.4] - 2026-04-30
+
+### Fixed
+
+- **`watch-epochs.sh` no longer silently emits `0` matches when a
+  buffered epoch carries `:debux/code` from a `fn-traced` handler.**
+  CLJS prints captured fn values as `#object[name]`; the JVM EDN
+  reader couldn't parse those, `safe-edn` fell through to a raw
+  string, and the watch loop's `(:matches result)` returned `nil` —
+  the watch terminated reporting `:emitted 0` despite matching epochs
+  in the buffer. `coerce-epoch` now stringifies fn values inside
+  `:debux/code` so the coerced epoch survives the EDN-via-nREPL
+  round-trip. Operators see the same `#object[name]` printed form
+  they'd see in 10x's UI; the value is just a plain string.
+
+### Changed
+
+- **Source-meta opt-in namespace renamed.** Tracking the upstream
+  re-frame 1.4.7 rename: the macro mirror that captures call-site
+  source metadata is now `re-frame.core-instrumented` (and
+  `re-frame.alpha-instrumented` for the alpha API) — re-frame 1.4.6's
+  `re-frame.macros` no longer exists. Host apps that opted into
+  source-meta on beta.3 should sweep their `:require` lines:
+  `[re-frame.core :as rf]` →
+  `[re-frame.core-instrumented :as rf]`. SKILL.md and
+  `docs/skill/source-meta.md` cover the offer-the-swap heuristics.
+
 ## [0.1.0-beta.3] - 2026-04-29
 
 ### Added
