@@ -2,7 +2,7 @@
 
 A living record of what's actually implemented, what's scaffolded, and what's blocked on the spike. Updated per release. See `docs/initial-spec.md` for the design this is measured against.
 
-**Last updated:** 2026-04-28 (post-rfp-t3bp — auto-reinject / legacy-stub fixes plus recipe-smoke and test-count refreshes)
+**Last updated:** 2026-04-30 (post-`v0.1.0-beta.3` — SKILL.md coordinated review pass, sub-doc rename + source-meta migration teaching, deps bumped to re-frame `1.4.7` with the `re-frame.core-instrumented` namespace)
 
 ---
 
@@ -16,12 +16,21 @@ A living record of what's actually implemented, what's scaffolded, and what's bl
 | `scripts/ops.clj` + shell shims | Written — babashka dispatches every op |
 | `.claude-plugin/plugin.json` | Written |
 | `package.json` + GH Actions (CI + release) | Written; CI now runs the runtime-test build per push |
-| `tests/runtime/` unit tests | **73 deftests / 385 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
-| `tests/ops_smoke.bb` babashka tests | **26 deftests / 51 assertions / 0 failures**; ops.clj load-path + pure-helper coverage, run via `npm run test:ops`, gated in CI |
+| `tests/runtime/` unit tests | **121 deftests / 609 assertions / 0 failures**; shadow-cljs `:node-test` build, run via `npm test`, gated in CI |
+| `tests/ops_smoke.bb` babashka tests | **57 deftests / 154 assertions / 0 failures**; ops.clj load-path + pure-helper coverage, run via `npm run test:ops`, gated in CI |
+| `tests/skill_recipe_smoke.bb` SKILL/recipe contract tests | **10 deftests / 36 assertions / 0 failures**; pins SKILL.md and `docs/recipes/debux.md` invariants, run via `npm run test:skill-recipe`, gated in CI |
 | `tests/fixture/` sample app | Built — minimal re-frame + 10x + re-com app; bundled bootstrap + re-com CSS for self-contained rendering; wired into `re-frame-debux` via `:local/root` (rfp-mkf) so the worked example for the form-by-form trace recipe carries a non-nil `:debux/code` |
 | End-to-end against a live re-frame app | **Verified** — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 predicate filters validated; time-travel rolls userland app-db correctly. v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs #1, #2). |
 
-v0.1.0-beta.2 is on `main` (un-tagged). All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, and CI is green on both PRs. Significant work has landed since the last STATUS refresh — see *Post-spike additions* below — including: Phase 1 + Phase 2 of `re-frame-debux` integration (`:debux/code` field, wrap-handler!/unwrap-handler! recipe, dbg single-form recipe), native epoch path (`re-frame/register-epoch-cb` via rf-ybv replaces 10x as primary epoch source; 10x kept as fallback), `dispatch-and-settle` --trace path (rf-4mr), `dispatch-with --stub` for record-only fx stubs (rf-ge8), post-refresh auto-reinject callback reinstallation (rfp-5k7), legacy `--trace --stub` safety on pre-rf-4mr builds (rfp-ajn), `:event/source` (rf-hsl) and `:subscribe/source` + `:input-query-sources` on `:subs/ran` (rf-cna) flattened onto coerced epoch records, and `day8.re-frame-10x.public` preferred over inlined-rf walking (rf1-jum). The next tag will reflect this body of work, not just beta.2.
+**`v0.1.0-beta.3` tagged + GitHub Release published 2026-04-30.** All §8a ground-truth unknowns are resolved (see *Spike findings* below), the runtime + fixture are validated end-to-end, CI is green, and the SKILL narrative has been through a six-angle independent review pass.
+
+Body of work since v0.1.0-beta.2:
+
+- **Native instrumentation primitives** — `register-epoch-cb` (rf-ybv) replaces 10x as the primary epoch source with 10x kept as fallback; `dispatch-and-settle` (rf-4mr) drives `dispatch.sh --trace`; `dispatch-with --stub` (rf-ge8) for record-only fx stubs; post-refresh auto-reinject (rfp-5k7); `:event/source` (rf-hsl) + `:subscribe/source` + `:input-query-sources` (rf-cna) flattened onto coerced epoch records; `day8.re-frame-10x.public` (rf1-jum) preferred over inlined-rf walking.
+- **`re-frame-debux` integration phases 1 + 2** — `:debux/code` field on epochs, `wrap-handler!` / `unwrap-handler!` recipe, single-form `dbg` recipe.
+- **Source-meta opt-in path** — re-frame 1.4.7 ships the `re-frame.core-instrumented` namespace (renamed from the 1.4.6 `re-frame.macros`); `docs/skill/source-meta.md` now teaches the agent when to *offer* the alias swap to the user rather than silently editing source.
+- **SKILL narrative split + reviewed** — SKILL.md is now a thin overview (~100 lines) with the recipes pushed down into `docs/skill/{operations,probing-and-hot-swap,source-meta,ui-debugging,post-mortems,troubleshooting}.md` and `docs/recipes/debux.md`. Six independent review passes (efficiency, completeness, correctness, clarity, structure, duplication) have been actioned: the Starter Pack and Epoch Summary tables collapsed to pointers; empirical-loop promoted to its own `##` section with a "what is an epoch" gloss before first use; multi-build / time-travel-safety / trace-enabled-prerequisite principles surfaced; `re-frame-debux` and `re-frame.core-instrumented` defined on first mention.
+- **CI / release** — `release.yml` ships a GitHub Release; `npm publish` is intentionally gated on the `NPM_TOKEN` repo secret (currently unconfigured — rfp-sugy). Slack notifications similarly gated on `SLACK_WEBHOOK` (rfp-sugy).
 
 ---
 
