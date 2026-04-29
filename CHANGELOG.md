@@ -12,8 +12,9 @@ versioning aims at [SemVer](https://semver.org/) once the skill leaves beta.
 
 ## [Unreleased]
 
-Working tree is ~30 commits past `v0.1.0-beta.2` and represents the
-next tag's body of work.
+Nothing yet.
+
+## [0.1.0-beta.3] - 2026-04-29
 
 ### Added
 
