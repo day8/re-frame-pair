@@ -17,7 +17,7 @@
    and a connected browser tab to evaluate. The textual contract test
    (form-shape, symbol resolution, deps pin) lives in
    `tests/skill_recipe_smoke.bb` and runs in `npm test`."
-  (:require [re-frame.macros               :as rf]
+  (:require [re-frame.core-instrumented   :as rf]
             [re-frame.registrar            :as registrar]
             [day8.re-frame.tracing.runtime :as tracing-rt
              :refer-macros [wrap-handler!]]))

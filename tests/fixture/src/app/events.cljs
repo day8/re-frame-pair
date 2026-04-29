@@ -1,7 +1,7 @@
 (ns app.events
-  (:require [re-frame.macros       :as rf]
-            [day8.re-frame.tracing :refer-macros [fn-traced]]
-            [app.db                :as db]))
+  (:require [re-frame.core-instrumented :as rf]
+            [day8.re-frame.tracing      :refer-macros [fn-traced]]
+            [app.db                     :as db]))
 
 ;; -----------------------------------------------------------------------------
 ;; Bootstrap

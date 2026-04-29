@@ -362,7 +362,7 @@
       (is (= (:debux/code legacy-e) (:debux/code native-e))))))
 
 (deftest coerce-epoch-surfaces-event-source-when-present
-  ;; rf-hsl: re-frame.macros/dispatch attaches {:re-frame/source
+  ;; re-frame.core-instrumented/dispatch attaches {:re-frame/source
   ;; {:file ... :line ...}} to the event vector's meta at the call
   ;; site. coerce-epoch should flatten that to a top-level
   ;; :event/source key so it survives the pr-str / cljs-eval boundary
@@ -731,7 +731,7 @@
       (is (= legacy-e native-e)))))
 
 (deftest subs-ran-surfaces-subscribe-and-input-sources-when-present
-  ;; rf-cna: re-frame.macros/subscribe attaches {:re-frame/source
+  ;; re-frame.core-instrumented/subscribe attaches {:re-frame/source
   ;; {:file ... :line ...}} to the query-v's meta at the call site.
   ;; subs-ran-from-10x-state (now shared by both paths via the match-shape
   ;; convergence) should lift that to :subscribe/source on each entry,
