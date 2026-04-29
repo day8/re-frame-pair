@@ -80,7 +80,7 @@ Preserve the `:as` alias they were using; only the namespace changes.
 - `handler/source` returning `:no-source-meta` usually means the host
   has not opted into the instrumented namespace.
 
-See `docs/handler-source-meta.md` for design rationale and history.
+See `docs/handler-source-meta.md` for design rationale.
 
 ## DOM Source
 
