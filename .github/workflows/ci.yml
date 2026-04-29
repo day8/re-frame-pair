@@ -92,21 +92,3 @@ jobs:
       - name: Run runtime tests (shadow-cljs :node-test)
         run: npm test
 
-  notify:
-    # Single notification step covering both jobs above. Only fires on
-    # push events (not PRs from forks, which can't access the secret),
-    # and only on failure/cancel — matches the pattern used by the
-    # other day8 repos (#oss-robots).
-    needs: [smoke, runtime-test]
-    if: (failure() || cancelled()) && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Slack notification
-        uses: slackapi/slack-github-action@03ea5433c137af7c0495bc0cad1af10403fc800c # v3.0.2
-        with:
-          webhook: ${{ secrets.SLACK_WEBHOOK }}
-          webhook-type: incoming-webhook
-          payload: |
-            {
-              "text": "*re-frame-pair Tests*: failure\nCommit: <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
-            }

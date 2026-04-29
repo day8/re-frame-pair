@@ -1,21 +1,21 @@
 # re-frame-pair
 
-Lets Claude (in Claude Code, or via the Claude API) debug and develop against your **running re-frame application**. Claude can inspect `app-db`, dispatch events, trace the dominoes, hot-swap handlers, time-travel, and map visible UI back to source — all live against the runtime, with no source edits required for probes.
+Lets an AI (Claude, Codex?) debug and develop against your **running re-frame application**. 
 
-A coding agent working with just static code is working with a limited perspective. It can read handlers, subscriptions, and views, but it has to guess what happened in the browser. With re-frame-pair, Claude can ask the running app: which event fired, what changed in `app-db`, which effects fired, which subscriptions re-ran or cache-hit, which views rendered, and where the relevant source lives.
+Claude can inspect `app-db`, dispatch events, trace the 6 dominoes, hot-swap handlers, time-travel, and map visible UI back to source code — all live against the runtime, with no source edits required for probes.
+
+A coding agent working with just static code is working with a limited perspective. It can read handlers, subscriptions, and views, but it has to guess what happened in the browser at runtime. With re-frame-pair, Claude can ask the running app: which event fired, what changed in `app-db`, which effects fired, which subscriptions re-ran or cache-hit, which views rendered, and where the relevant source lives.
 
 The intended loop is empirical:
 
 1. Observe the current runtime state.
 2. Inspect the relevant epoch.
 3. Form a hypothesis.
-4. Probe with a dispatch, app-db read, hot-swap, side-effect stub, or REPL eval.
+4. Undo state, probe with a new dispatch, read app-db, hot-swap handlers, side-effect stub, or REPL eval.
 5. Compare the new epoch with the baseline.
 6. Only then edit source.
 
 REPL changes are **ephemeral** (try-and-discard); source edits **stick**.
-
-Use it when a UI did not update, an event fired but the visible result is wrong, `app-db` ended up in a bad state, the user cannot remember the exact path that caused a bug, you need to find the source behind a visible control, or you want to test a handler/sub/fx change safely before committing it.
 
 Post-mortems are a core use case. Instead of asking the developer to describe every click and state transition that led to a bug, Claude can inspect the recent epoch trail and identify the event that introduced the bad value, including its parent dispatch, effects, `app-db` diff, subscriptions, renders, and source call sites.
 
@@ -102,32 +102,44 @@ Post-mortems are a core use case. Instead of asking the developer to describe ev
 
 ## Requirements
 
+Install 
+
 | Dep | Version | Notes |
-|---|---|---|
-| [re-frame](https://github.com/day8/re-frame) | 1.4.6 *(works on 1.4+)* | required |
-| [re-frame-10x](https://github.com/day8/re-frame-10x) | 1.12.0 *(works on 1.10+)* | required; dev preload, with `re-frame.trace.trace-enabled?` set true via `:closure-defines` |
-| [re-com](https://github.com/day8/re-com) | 2.29.3 *(works on 2.20+)* | **optional** — required only for the DOM ↔ source bridge. Debug instrumentation must be on AND call sites must pass `:src (at)`; without both, `dom/*` ops degrade gracefully (return `nil`) |
-| [day8.re-frame/tracing](https://github.com/day8/re-frame-debux) + tracing-stubs | 0.9.2 | **optional** — adds per-form trace; see *Optional: per-form trace via re-frame-debux* below |
 | [shadow-cljs](https://shadow-cljs.github.io/) | 2.20+ | required; nREPL enabled on the dev build |
 | [babashka](https://babashka.org) | 1.0+ | required; the skill's shell shims use it — see [babashka install](https://github.com/babashka/babashka#installation) |
 
+Dependencies
+
+| Dep | Version | Notes |
+|---|---|---|
+| [re-frame](https://github.com/day8/re-frame) | 1.4.7  | required  (works on 1.4+) |
+| [re-frame-10x](https://github.com/day8/re-frame-10x) | 1.12.0  | (works on 1.10+) required; dev preload, with `re-frame.trace.trace-enabled?` set true via `:closure-defines` |
+| [re-com](https://github.com/day8/re-com) | 2.29.3 | (works on 2.20+) **optional** — required only for the DOM ↔ source bridge. Debug instrumentation must be on AND call sites must pass `:src (at)`; without both, `dom/*` ops degrade gracefully (return `nil`) |
+| [day8.re-frame/tracing](https://github.com/day8/re-frame-debux) + tracing-stubs | 0.9.2 | **optional** — adds per-form trace; see *Optional: per-form trace via re-frame-debux* below |
+
 You don't need to make any changes to your code/project to use it.
 
-Starting fresh? [`re-frame-template`](https://github.com/day8/re-frame-template) scaffolds a project that satisfies this stack out of the box: `lein new re-frame your-app +10x +re-com` produces an app re-frame-pair can attach to without further changes.
-
 ### Try it out
+
+
+Starting fresh? [`re-frame-template`](https://github.com/day8/re-frame-template) scaffolds a project that satisfies this stack out of the box: `lein new re-frame your-app +10x +re-com` produces an app re-frame-pair can attach to without further changes.
 
 To pin a known-good combination, drop these into your `shadow-cljs.edn` (or `deps.edn` / `project.clj`):
 
 ```clojure
-[re-frame                       "1.4.6"]   ; the core
+[re-frame                       "1.4.7"]   ; the core
 [day8.re-frame/re-frame-10x     "1.12.0"]  ; debug panel — dev preload
 [re-com                         "2.29.3"]  ; UI components (optional)
+
+### Try it out with re-frame-debux
+
+Add these two dependicies:
+```
 [day8.re-frame/tracing          "0.9.2"]   ; debux integration (optional)
 [day8.re-frame/tracing-stubs    "0.9.2"]   ; production stubs for above
 ```
 
-If you take the optional last two — the `re-frame-debux` deps — make sure your `:release` build aliases `day8.re-frame.tracing` to the stubs so per-form trace machinery doesn't ship into production. Wire it into `shadow-cljs.edn` like this:
+Make sure your `:release` build aliases `day8.re-frame.tracing` to the stubs so per-form trace machinery doesn't ship into production. Wire it into `shadow-cljs.edn` like this:
 
 ```clojure
 {:builds
@@ -141,12 +153,8 @@ If you take the optional last two — the `re-frame-debux` deps — make sure yo
               {:ns-aliases
                {day8.re-frame.tracing day8.re-frame.tracing-stubs}}}}}}
 ```
+The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
 
-re-frame-pair itself is not yet published to npm — see [Install](#install) below.
-
-### Optional: per-form trace via re-frame-debux
-
-With the [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) deps wired in (last two lines of the dep block above), the skill can drive debux on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
 
 ## Two modes
 
@@ -158,9 +166,11 @@ REPL changes survive hot-reloads of unaffected namespaces, but are lost on full 
 
 ## Install
 
-**Right now:** clone + symlink the repo into `~/.claude/skills/re-frame-pair/`. See [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for the full walk-through (install babashka, point Claude at the skill directory, done).
+**re-frame-pair itself is not yet published to npm. **
 
-**After the first tagged release** (`v0.1.0-alpha.1`+, planned npm `@day8/re-frame-pair`), one of:
+**So, right now:** clone this repo and follow the instructions in [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md).
+
+**After it is published to npm as `@day8/re-frame-pair`), one of:
 
 ```bash
 # Agent Skill — portable across Claude clients (recommended)
@@ -205,7 +215,7 @@ Claude connects on first use of the session and stays connected until you exit.
 
 Useful when you want to force the tool, or when the question doesn't obviously lean on the running app.
 
-## How it connects
+## How it works
 
 On first use the skill runs `discover-app.sh`:
 
@@ -216,11 +226,10 @@ On first use the skill runs `discover-app.sh`:
 
 All subsequent ops reuse the connection. On a full page refresh the skill detects its session sentinel is gone and re-injects automatically.
 
-Live-watch ops hold a long-running eval open and poll the epoch buffer at animation-frame cadence. Hot-reload confirmation is probe-based: after a source edit, `tail-build.sh` polls a short CLJS form that flips when the new code lands in the browser (see [`docs/initial-spec.md`](docs/initial-spec.md) §4.5). The script is named `tail-build.sh` for historical reasons — it does not actually tail the shadow-cljs server log.
+Live-watch ops hold a long-running eval open and poll the epoch buffer at animation-frame cadence. Hot-reload confirmation is probe-based: after a source edit, `tail-build.sh` polls a short CLJS form that flips when the new code lands in the browser. The script is named `tail-build.sh` for historical reasons — it does not actually tail the shadow-cljs server log.
 
 Epoch reads come from re-frame's own `register-epoch-cb` callback when available — once a `:event` trace completes, re-frame delivers an assembled epoch record (sub-runs, renders, effects, `app-db` before/after) that the skill drains into a native ring buffer. On older re-frame builds, the skill falls back to reading 10x's epoch buffer via the public `day8.re-frame-10x.public` ns, with the legacy inlined-rf walk as a third fallback for 10x JARs predating the public surface. Render entries tagged with `:re-com?` (and a layout/input/content category where possible) let Claude apply component-aware diagnostics.
 
-See [`docs/initial-spec.md`](docs/initial-spec.md) for the full operation catalogue, architecture, error surfaces, versioning, and phased delivery plan.
 
 ## How this differs from re-frame-10x alone
 
@@ -232,14 +241,10 @@ You can run both at once. They don't conflict — 10x renders its panel, re-fram
 
 ## Status
 
-**Beta.** Validated end-to-end against the live fixture (re-frame + re-frame-10x + re-com under `shadow-cljs watch`). CI green; ~120 deftests across runtime + ops_smoke + skill_recipe_smoke. Next tag is operator-pending.
+**Beta.** Validated end-to-end against a live fixture - see test/fixture (re-frame + re-frame-10x + re-com under `shadow-cljs watch`). 
 
-See [`STATUS.md`](STATUS.md) for the per-phase implementation matrix and post-spike additions log; [`docs/initial-spec.md`](docs/initial-spec.md) for the design; [`docs/TESTING.md`](docs/TESTING.md) for the four-surface test plan; [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) for running from a clone; [`RELEASING.md`](RELEASING.md) for the release flow.
+See [`STATUS.md`](STATUS.md).
 
 ## License
 
 MIT.
-
----
-
-**Try it:** clone, symlink per [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md), then read [`SKILL.md`](SKILL.md) for the principal operating model. Detailed workflow notes live under [`docs/skill/`](docs/skill/).
