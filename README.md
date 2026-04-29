@@ -166,38 +166,18 @@ REPL changes survive hot-reloads of unaffected namespaces, but are lost on full 
 
 ## Install
 
-**re-frame-pair itself is not yet published to npm. **
+re-frame-pair is **not yet published to npm**. To install, clone this repo and follow [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) — it covers the three install paths (global symlink, copy, project-local), prerequisites, the dev loop for iterating on the skill itself, and troubleshooting.
 
-**So, right now:** clone this repo and follow the instructions in [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md).
-
-> ⚠️ **Pull regularly.** This skill is iterating quickly on feedback and experience — `git pull` your clone (or re-run `npx skills add` once the npm release is up) every week or two so Claude has the latest vocabulary, recipes, and runtime helpers. The recipes Claude reaches for change as the SKILL learns; you don't want yesterday's playbook against today's runtime.
-
-**After it is published to npm as `@day8/re-frame-pair`), one of:
-
-```bash
-# Agent Skill — portable across Claude clients (recommended)
-npx skills add day8/re-frame-pair
-
-# Or as a Claude Code Plugin
-/plugin install re-frame-pair@day8
-```
+> ⚠️ **Pull regularly.** This skill is iterating quickly on feedback and experience — `git pull` your clone every week or two so Claude has the latest vocabulary, recipes, and runtime helpers. The recipes Claude reaches for change as the SKILL learns; you don't want yesterday's playbook against today's runtime.
 
 re-frame-pair adds nothing to the host project beyond what 10x and re-com already require. On first connect it injects helpers into your app over the REPL — no extra deps, no extra preloads, no extra closure-defines attributable to re-frame-pair.
 
-### Scope: global vs project-local
+Once published to npm (planned `@day8/re-frame-pair`), install will be:
 
-- **Global** (recommended for individuals) — installs into your user Claude config (`~/.claude/`). Best when you work on several re-frame apps:
-  ```bash
-  npx skills add day8/re-frame-pair
-  ```
-- **Project-local** — install into the project's own `.claude/skills/re-frame-pair/` and commit it. Teammates who clone the repo get the skill on first use, pinned to the committed version:
-  ```bash
-  cd your-re-frame-project
-  npx skills add --scope project day8/re-frame-pair    # planned syntax
-  git add .claude/skills/re-frame-pair
-  ```
-  For the plugin variant, reference `re-frame-pair@day8` in a checked-in `.claude/plugin.json`.
-- **Both** is fine — the project-local install takes precedence when both are present.
+```bash
+npx skills add day8/re-frame-pair        # Agent Skill — portable across Claude clients
+/plugin install re-frame-pair@day8        # or as a Claude Code Plugin
+```
 
 ## How to invoke it
 
