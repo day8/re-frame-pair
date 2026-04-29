@@ -114,6 +114,35 @@ You don't need to make any changes to your code/project to use it.
 
 Starting fresh? [`re-frame-template`](https://github.com/day8/re-frame-template) scaffolds a project that satisfies this stack out of the box: `lein new re-frame your-app +10x +re-com` produces an app re-frame-pair can attach to without further changes.
 
+### Try it out
+
+To pin a known-good combination, drop these into your `shadow-cljs.edn` (or `deps.edn` / `project.clj`):
+
+```clojure
+[re-frame                       "1.4.6"]   ; the core
+[day8.re-frame/re-frame-10x     "1.12.0"]  ; debug panel — dev preload
+[re-com                         "2.29.3"]  ; UI components (optional)
+[day8.re-frame/tracing          "0.9.2"]   ; debux integration (optional)
+[day8.re-frame/tracing-stubs    "0.9.2"]   ; production stubs for above
+```
+
+If you take the optional last two — the `re-frame-debux` deps — make sure your `:release` build aliases `day8.re-frame.tracing` to the stubs so per-form trace machinery doesn't ship into production. Wire it into `shadow-cljs.edn` like this:
+
+```clojure
+{:builds
+ {:app
+  {:devtools {:preloads [day8.re-frame-10x.preload]}    ; 10x in dev
+   :dev     {:compiler-options
+              {:closure-defines
+               {re-frame.trace.trace-enabled?     true
+                day8.re-frame.tracing.trace-enabled? true}}}
+   :release {:build-options
+              {:ns-aliases
+               {day8.re-frame.tracing day8.re-frame.tracing-stubs}}}}}}
+```
+
+re-frame-pair itself is not yet published to npm. To install it now, clone this repo and follow [`docs/LOCAL_DEV.md`'s Project-local instructions](docs/LOCAL_DEV.md#3-project-local-only-active-in-one-app) to add it to a single app.
+
 ### Optional: per-form trace via re-frame-debux
 
 Add [`day8.re-frame/tracing`](https://github.com/day8/re-frame-debux) to your dev classpath and the skill can drive it on demand: `wrap-handler!` / `unwrap-handler!` to instrument a whole handler (no source edit, hot-swapped at the REPL), or `dbg` / `dbgn` to instrument a single expression. Per-form trace records flow through `re-frame.trace/merge-trace!` into the same epoch buffer the skill already reads, surfaced as `:debux/code` on each coerced epoch. **Not** transitive via `re-frame-10x` — add the dep explicitly. The REPL-driven recipes live in [`docs/recipes/debux.md`](docs/recipes/debux.md).
