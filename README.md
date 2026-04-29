@@ -131,12 +131,14 @@ To pin a known-good combination, drop these into your `shadow-cljs.edn` (or `dep
 [re-frame                       "1.4.7"]   ; the core
 [day8.re-frame/re-frame-10x     "1.12.0"]  ; debug panel — dev preload
 [re-com                         "2.29.3"]  ; UI components (optional)
+```
 
 ### Try it out with re-frame-debux
 
-Add these two dependicies:
-```
-[day8.re-frame/tracing          "0.9.2"]   ; debux integration (optional)
+Add these two dependencies:
+
+```clojure
+[day8.re-frame/tracing          "0.9.2"]   ; debux integration
 [day8.re-frame/tracing-stubs    "0.9.2"]   ; production stubs for above
 ```
 
