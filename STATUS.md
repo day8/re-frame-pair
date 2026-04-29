@@ -31,7 +31,7 @@ For the design this is measured against, see [`docs/initial-spec.md`](docs/initi
 | 0 | `eval-cljs.sh` round-trips a form | **Verified** | `(re-frame-pair.runtime/snapshot)` returns the full app-db. |
 | 1 | Read surface (§4.1) | **Verified** | `snapshot`, `app-db-at`, `schema`, `registrar-list`, `registrar-describe`, `subs-live`, `subs-sample` callable against the fixture. |
 | 2 | Dispatch + trace (§4.2–§4.3) | **Verified** | `dispatch.sh --trace` returns the user-fired event's epoch with all §4.3a fields populated; `--trace` routes through `dispatch-and-settle` (rf-4mr); `--stub` for per-dispatch fx-handler substitution (rf-ge8). |
-| 3 | Live watch (§4.4) | **Verified** | All 5 predicate filters (`--event-id`, `--event-id-prefix`, `--effects`, `--touches-path`, `--timing-ms`) match expected counts. Pull-mode at 100ms cadence. |
+| 3 | Live watch (§4.4) | **Verified** | All 5 predicate filters (`--event-id`, `--event-id-prefix`, `--effects`, `--touches-path`, `--timing-ms`) match expected counts. Pull-mode at 100ms cadence. Verified holds when buffered epochs include `:debux/code` from `fn-traced` handlers — fn `:result` values are stringified during coercion so the EDN-via-nREPL round-trip survives. |
 | 4 | Hot-swap (REPL) | **Verified** | `reg-event` / `reg-sub` / `reg-fx` via `eval-cljs.sh` work; experiment-loop recipe end-to-end relies on this. |
 | 5 | Hot-reload coordination (§4.5) | **Coded; live verification pending** | `tail-build.sh` probe-based protocol implemented and unit-tested; no real edit→reload cycle has been run yet. |
 | 6 | Time-travel (§4.6) | **Verified** | `undo-step-back` / `undo-most-recent` against the fixture; gated correctly on `:app-db-follows-events?`. |
