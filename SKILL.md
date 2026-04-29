@@ -30,9 +30,11 @@ allowed-tools:
 
 You are pair-programming with a developer on a **live, running re-frame application** in a browser tab behind `shadow-cljs watch`.
 
-Your main advantage is not just that you can read `app-db`. Your main advantage is that you can close the debugging loop against the real runtime. Without re-frame-pair you would read source and guess what happened in the browser. With re-frame-pair you can ask the running app which event fired, what changed in `app-db`, which effects fired, which subscriptions re-ran or cache-hit, which views rendered, and where the relevant source lives.
+The point isn't just reading `app-db` — it's closing the debug loop against the live runtime. Ask the running app which event fired, what changed in `app-db`, which effects fired, which subs re-ran or were served from cache, which views rendered, and where the source lives.
 
-Prefer this empirical loop:
+## The Empirical Loop
+
+Prefer this loop over reading source and guessing:
 
 1. Observe the current runtime state.
 2. Inspect the relevant epoch.
@@ -41,11 +43,25 @@ Prefer this empirical loop:
 5. Compare the new epoch with the baseline.
 6. Only then edit source.
 
-Use this especially when a UI did not update, an event fired but the visible result is wrong, `app-db` ended up in a bad state, the user cannot remember the exact path that caused a bug, you need to find the source behind a visible control, or you want to test a handler/sub/fx change before committing it.
+Reach for the loop especially when:
+
+- A UI didn't update, or its visible result is wrong.
+- `app-db` ended up in a bad state.
+- The user can't remember the path that caused a bug — search the recent epoch trail.
+- You need to find the source behind a visible control.
+- You want to test a handler / sub / fx change before committing it.
+
+### What is an epoch?
+
+An **epoch** is the record of everything that happened in response to one dispatch — the event, interceptor chain, handler result, effects fired, subscriptions that ran or hit cache, components that rendered, and `app-db` before/after diff. The full field list lives in [`docs/skill/operations.md`](docs/skill/operations.md). Use compact `:app-db/diff` first; request full snapshots only when the diff isn't enough.
+
+## When Not To Use
+
+- The app isn't running yet, so there's no live runtime to attach to.
+- The code being debugged isn't routed through re-frame.
+- The user wants pure source-only refactor work with no behavioural verification.
 
 ## Quick Start
-
-Three calls and you're inside the app:
 
 ```bash
 scripts/discover-app.sh
@@ -53,74 +69,32 @@ scripts/app-summary.sh
 scripts/dispatch.sh --trace '[:cart/apply-coupon "SPRING25"]'
 ```
 
-`discover-app.sh` is mandatory at the start of each session. It finds the nREPL port, switches to CLJS mode, verifies preconditions, injects the runtime namespace, and returns startup context with app-db shape plus recent event pointers.
+`discover-app.sh` is **mandatory** at the start of each session. It finds the nREPL port, switches to CLJS mode, injects the runtime namespace, and returns the app-db's top-level keys plus dispatch-ids of the most recent events. If it reports `:warning :multiple-builds`, ask the user which build to attach to before continuing.
 
-## Core Workflows
+Most sessions need only three ops — `app-summary`, `dispatch`, and `last-epoch` (via `eval-cljs`). For the full reference see [`docs/skill/operations.md`](docs/skill/operations.md).
 
-- **Why didn't the UI update?** Follow event -> `app-db` diff -> subscriptions ran/cache-hit -> renders -> DOM/source.
-- **What happened after this dispatch?** Narrate the six dominoes: event, interceptors/coeffects, handler result, effects, subscriptions, renders.
-- **Post-mortem: how did app-db get here?** Do not make the user reconstruct the reproduction path from memory. Search recent epochs for the transition that introduced the bad value, then follow parent/child dispatch ids if the cause was cascaded.
-- **Can this fix work?** Hot-swap or eval the smallest runtime change, re-run the same event from the same state when possible, then compare epochs.
-- **Where is that UI wired?** Resolve visible controls/components to `:src`, then inspect their dispatches, subscriptions, and handlers.
-- **Can I iterate without real side effects?** Stub selected fx for one dispatch cascade, record what would have fired, and discard the stubs when the cascade settles.
+## Detail On Demand
 
-## Load Detail On Demand
-
-This file is the principal operating model. Before doing a detailed workflow, read the relevant supporting document:
-
-| Task | Read |
+| Question / task | Read |
 |---|---|
-| Operation names, command forms, epoch fields | `docs/skill/operations.md` |
-| Post-mortem / bad app-db state | `docs/skill/post-mortems.md` |
-| UI did not update, rendered output wrong, source for visible UI | `docs/skill/ui-debugging.md` |
-| Runtime probing, hot-swap, time-travel, side-effect stubs | `docs/skill/probing-and-hot-swap.md` |
-| Source metadata, macro opt-in, handler/source gaps | `docs/skill/source-meta.md` |
-| Errors, setup failures, health checks | `docs/skill/troubleshooting.md` |
+| Operation names, command forms, epoch fields, console tags | [`docs/skill/operations.md`](docs/skill/operations.md) |
+| Post-mortem — how did `app-db` get here? Don't ask the user to reconstruct repro steps; search recent epochs for the bad transition, follow `:parent-dispatch-id` to walk the chain | [`docs/skill/post-mortems.md`](docs/skill/post-mortems.md) |
+| UI didn't update; rendered output wrong; resolve a visible control to `:src` | [`docs/skill/ui-debugging.md`](docs/skill/ui-debugging.md) |
+| Runtime probing, hot-swap, time-travel, side-effect stubs (`--stub` flag) | [`docs/skill/probing-and-hot-swap.md`](docs/skill/probing-and-hot-swap.md) |
+| Source metadata; `:no-source-meta` / nil `:event/source`; offering the swap to `re-frame.core-instrumented` | [`docs/skill/source-meta.md`](docs/skill/source-meta.md) |
+| Form-by-form trace inside a handler / sub / fx (re-frame-debux — an optional source-printing instrumentation library) | [`docs/recipes/debux.md`](docs/recipes/debux.md) |
+| Errors, setup failures, `:reason` keyword translations, health checks | [`docs/skill/troubleshooting.md`](docs/skill/troubleshooting.md) |
 
 ## Operating Principles
 
 - **Read live state before guessing.** `app-db/snapshot`, `trace/last-epoch`, or `app-summary` first; hypothesis after.
-- **Probe, don't speculate.** When an answer isn't obvious, evaluate against live data.
-- **Prefer baseline/comparison evidence.** Capture the epoch before a probe, run the smallest useful change, then compare the resulting epoch instead of relying on intent.
-- **REPL access is your second mode.** You can hot-swap a handler / sub / fx, redefine a `defn`, or `reset!` `app-db` directly through `repl/eval`. REPL changes are ephemeral; source edits are permanent.
-- **After any source edit, wait for hot reload.** Run `scripts/tail-build.sh --probe '<form>'` before dispatching or tracing, otherwise you may interact with the pre-reload code.
-- **Surface failures verbatim.** Every script returns structured edn. Translate `:reason` to plain English; do not paper over it.
-- **Narrow detail as you go.** Summaries first; drill into a specific epoch / diff / sub when the user asks.
-- **Always resolve UI references to `:src` where possible.** `re-com/button at app/cart/view.cljs:84` grounds the conversation.
-- **Prefer dedicated shims over raw `eval-cljs`.** When a shim exists, it handles namespace names, quoting, and common flag combinations.
-
-## Starter Pack
-
-These cover most conversations:
-
-| Op | Use it for |
-|---|---|
-| `scripts/app-summary.sh` | Extended bootstrap: versions, registrar, live subs, app-db shape, health |
-| `scripts/dispatch.sh '[:foo ...]'` | Fire an event; add `--sync` for sync or `--trace` for full epoch + cascade |
-| `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-epoch)'` | Most recent epoch, fully coerced |
-| `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Forensic search for the most recent matching epoch |
-| `scripts/handler-source.sh :event :foo/bar` | `{:file :line}` of a registered handler |
-| `scripts/eval-cljs.sh '(re-frame-pair.runtime/subs-live)'` | Currently-cached query vectors |
-| `scripts/eval-cljs.sh '(re-frame-pair.runtime/dom-source-at "#save-btn")'` | DOM element -> source line |
-
-## When Not To Use
-
-- The app is not running yet, so there is no live runtime to attach to.
-- The code being debugged is not routed through re-frame.
-- The user wants pure source-only refactor work with no behavioural verification.
-
-## Epoch Summary
-
-An epoch is everything that happened in response to one dispatch. It may include:
-
-- `:event`, `:event/original`, `:event/source`
-- `:dispatch-id`, `:parent-dispatch-id`
-- `:app-db/diff`; full before/after snapshots are on demand only
-- `:effects/fired`
-- `:interceptor-chain`
-- `:subs/ran`, `:subs/cache-hit`
-- `:renders`
-- `:debux/code` when re-frame-debux instrumentation is active
-- `:coeffects`
-
-Use compact diffs first. Ask for full app-db snapshots only when the compact diff is insufficient.
+- **Compare epochs, don't rely on intent.** Capture the epoch, run the smallest change, compare.
+- **REPL access is your second mode.** Hot-swap a handler / sub / fx, redefine a `defn`, or `reset!` `app-db`. REPL changes are ephemeral; source edits stick. After a successful hot-swap, ask the user before transferring the patch to source.
+- **After any source edit, wait for hot reload.** Run `scripts/tail-build.sh --probe '<form>'` before dispatching, or your next call may run against the pre-reload code.
+- **Surface failures verbatim.** Every script returns structured EDN. Translate `:reason` to plain English using [`docs/skill/troubleshooting.md`](docs/skill/troubleshooting.md). `:reinjected? true` is informational, not an error — the runtime was re-shipped after a browser refresh.
+- **Narrow detail as you go.** Summaries first; drill in on request.
+- **Resolve UI references to `:src`** — `re-com/button at app/cart/view.cljs:84` grounds the conversation.
+- **Prefer dedicated shims over raw `eval-cljs`.** Shims handle namespacing, quoting, and flag combinations.
+- **Time-travel rewinds `app-db` only** — side effects already fired aren't reversed. Before any `undo/*` op, check whether the cascade contained `:http-xhrio` / navigation / etc., and warn the user.
+- **Requires `re-frame.trace.trace-enabled? true`.** If `discover-app.sh` reports `:trace-enabled-false`, almost every workflow degrades — fall back to `app-db/snapshot` and dispatch only, and tell the user how to enable tracing (10x's install guide covers the `:closure-defines` flag).
+- **Offer the source-meta swap when relevant.** When you read source files and notice the host uses plain `re-frame.core` (or `re-frame.alpha`), and a trace shows `:no-source-meta` while the user is asking a "where did this come from?" question, offer to swap their `:require` to `re-frame.core-instrumented`. See [`docs/skill/source-meta.md`](docs/skill/source-meta.md).

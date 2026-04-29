@@ -51,8 +51,8 @@ scripts/eval-cljs.sh '(re-frame-pair.runtime/stubbed-effects-since 0)'
 
 Each `--stub` id is checked against the fx registrar. If an id is unknown, the shim refuses to dispatch so the real effect cannot accidentally run.
 
-For a custom stub function, call `dispatch-with!` directly via `eval-cljs`; functions cannot round-trip through the bash CLI.
+For a custom stub function, call `dispatch-with!` directly via `eval-cljs`; functions cannot round-trip through the bash CLI. The signature is `(dispatch-with! event-v {fx-id stub-fn ...})` — the second arg is a map from fx ids to stub functions, each `(fn [fx-value] ...)`.
 
 ## Form-Level Trace
 
-For expression-by-expression tracing inside handlers, subs, or fx, use re-frame-debux when available. The full procedure lives in `docs/recipes/debux.md`.
+For expression-by-expression tracing inside handlers, subs, or fx, use re-frame-debux when available. Probe availability with `(re-frame-pair.runtime/debux-runtime-api?)` (returns truthy when the runtime API is loaded). The full procedure lives in `docs/recipes/debux.md`.

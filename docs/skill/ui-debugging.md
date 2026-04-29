@@ -35,7 +35,7 @@ When the user asks whether a panel is showing the right values, prove data -> su
 
 1. Use `subs/live` to confirm the query is currently alive.
 2. Pull a recent epoch and inspect `:subs/ran` plus `:subs/cache-hit`.
-3. Read `:subscribe/source` to locate the outer `(rf.macros/subscribe ...)`.
+3. Read `:subscribe/source` to locate the outer `(re-frame.core-instrumented/subscribe ...)` call site.
 4. For composite subscriptions, inspect `:input-query-vs` and `:input-query-sources`.
 
 Cache-hit subtlety: re-frame's cache key ignores metadata, so shared subscriptions may report the first originating call site. To enumerate all readers, combine `subs/live` with source search.

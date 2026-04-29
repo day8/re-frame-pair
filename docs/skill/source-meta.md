@@ -65,11 +65,13 @@ Preserve the `:as` alias they were using; only the namespace changes.
 
 ## Caveats
 
-- Macros cannot be used in value position. For `(apply reg-sub ...)`,
-  `(map reg-event-db ...)`, `(partial reg-fx ...)`, keep
-  `re-frame.core`. The instrumented namespace's `def` re-exports of
-  non-instrumented symbols (interceptor builders, `clear-*`, etc.)
-  *can* be used in value position.
+- The instrumented namespace's `dispatch` / `subscribe` / `reg-*` are
+  **macros** (so they can capture call-site source-meta at expansion
+  time); the rest are plain `def` re-exports of the underlying
+  function. Macros cannot be used in value position — for
+  `(apply reg-sub ...)`, `(map reg-event-db ...)`, `(partial reg-fx
+  ...)`, keep `re-frame.core`. The `def` re-exports (interceptor
+  builders, `clear-*`, etc.) *can* be used in value position.
 - `:event/source` from `dispatch.sh --trace` is nil because the bash
   shim dispatches via `re-frame.core/dispatch`; real button clicks
   can carry source from the macro call site.
