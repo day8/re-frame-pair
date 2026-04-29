@@ -1,5 +1,6 @@
 (ns re-frame-pair.runtime.ten-x-adapter
   (:require [clojure.data :as data]
+            [clojure.walk :as walk]
             [re-frame-pair.runtime.re-com :as re-com]))
 
 ;; 10x runs its own *inlined* copy of re-frame to keep its devtool state
@@ -634,7 +635,16 @@
         ;; :event trace: debux's merge-trace! lands on *current-trace*,
         ;; which std_interceptors/db-handler->interceptor binds to the
         ;; :event/handler with-trace boundary at handler-call time.
-        :debux/code        (-> handler-trace :tags :code)
+        ;; debux's per-form trace can carry fn values in :result when the
+        ;; traced form evaluates to a function (e.g. `inc`, anonymous fns).
+        ;; CLJS prints those as `#object[name]`, which cljs-eval's EDN
+        ;; round-trip back to the JVM cannot read — `safe-edn` falls
+        ;; through and the watch loop's `(:matches result)` returns nil.
+        ;; Replace fn values with their printed form so the coerced epoch
+        ;; survives the edn-via-nREPL hop.
+        :debux/code        (walk/postwalk
+                             (fn [x] (if (fn? x) (pr-str x) x))
+                             (-> handler-trace :tags :code))
         ;; Dispatch-site source (file/line) lifted from the event
         ;; vector's meta. Populated when the event was dispatched via
         ;; re-frame.core-instrumented/dispatch[-sync] (rf-hsl); nil for events

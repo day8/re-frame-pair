@@ -361,6 +361,40 @@
       (is (= code-payload (:debux/code native-e)))
       (is (= (:debux/code legacy-e) (:debux/code native-e))))))
 
+(deftest debux-code-fn-values-stringified
+  ;; When the traced form evaluates to a function (e.g. `(map inc xs)` —
+  ;; debux records `inc` as the :result for the inner inc form), CLJS
+  ;; prints it as `#object[cljs$core$inc]`. The JVM EDN reader cannot
+  ;; parse `#object[...]` without a tagged-element handler, so when an
+  ;; un-scrubbed fn lands in :debux/code the watch loop's safe-edn parse
+  ;; falls through and `(:matches result)` on the resulting raw string
+  ;; returns nil — the watch silently emits 0. Scrub fn values to their
+  ;; printed form during coercion so the epoch survives the edn-via-nREPL
+  ;; round-trip.
+  (let [code-payload [{:form 'inc :result inc
+                       :indent-level 1 :syntax-order 0 :num-seen 0}
+                      {:form '(map inc xs) :result [1 2 3]
+                       :indent-level 0 :syntax-order 1 :num-seen 0}]
+        match    (-> fixtures/synthetic-match
+                     (update :match-info conj
+                             {:id 105 :op-type :event/handler
+                              :tags {:code code-payload}}))
+        e        (rt/coerce-epoch match fixtures/basic-context)
+        debux    (:debux/code e)]
+    (testing "fn :result is replaced with its printed form, not left as a fn"
+      (is (string? (:result (first debux))))
+      (is (not (fn? (:result (first debux))))))
+    (testing "non-fn :result values pass through unchanged"
+      (is (= [1 2 3] (:result (second debux)))))
+    (testing "non-:result fields are unchanged"
+      (is (= 'inc (:form (first debux))))
+      (is (= '(map inc xs) (:form (second debux))))
+      (is (= 1 (:indent-level (first debux)))))
+    (testing "the full coerced epoch round-trips through pr-str → reader/read-string"
+      ;; Pre-fix this throws / falls back to a raw-string parse — the
+      ;; concrete failure mode in ops.clj's watch-op cljs-eval-value path.
+      (is (some? (reader/read-string (pr-str e)))))))
+
 (deftest coerce-epoch-surfaces-event-source-when-present
   ;; re-frame.core-instrumented/dispatch attaches {:re-frame/source
   ;; {:file ... :line ...}} to the event vector's meta at the call
