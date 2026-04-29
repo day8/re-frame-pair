@@ -1,7 +1,5 @@
-# re-frame-pair — Initial Specification
+# re-frame-pair — Specification
 
-**Status:** Draft 1
-**Date:** 2026-04-19
 **Owner:** mike.thompson@day8.com.au
 
 ---
@@ -162,13 +160,13 @@ Typed failures the skill returns rather than raises:
 
 ### 3.7 Versioning and compatibility
 
-Minimum version *enforcement* is plumbed end-to-end (`runtime.cljs/version-report` + `ops.clj/version-failure`), but **floors are currently `nil` across the board** — enforcement is a no-op until the spike (§8a) confirms where each library exposes its version at runtime. `health` exposes `:versions.enforcement-live?` so callers can tell the difference between "no floor violation" and "not actually checking". Exact floors TBD on first release:
+Minimum version *enforcement* is plumbed end-to-end (`runtime.cljs/version-report` + `ops.clj/version-failure`), but **floors are currently `nil` across the board** — enforcement stays a no-op until each library exposes a runtime-readable version constant. `re-frame.core/version` is available; re-com and re-frame-10x are still pending. `health` exposes `:versions.enforcement-live?` so callers can tell the difference between "no floor violation" and "not actually checking".
 
-| Dep | Min (placeholder) | Why |
+| Dep | Floor | Why |
 |---|---|---|
-| re-frame | 1.4 | `register-trace-cb` semantics re-frame-pair relies on. Also: now exposes `re-frame.core/version` (commit `8cc973c`); floor enforcement plumbing-ready for re-frame specifically. |
-| re-frame-10x | 1.9 | Epoch-buffer shape re-frame-pair reads. Public surface `day8.re-frame-10x.public` shipped at commit `4107f8f`; once a re-frame-10x runtime version constant lands, this row's floor can move to the public-ns version. |
-| re-com | 2.20 | `:src (at)` / `data-rc-src` contract. `:re-com/render` trace tag ships in commits `b3912727` + `961b9215` — once the rfp consumer lands the floor here may bump. |
+| re-frame | 1.4 | `register-trace-cb` semantics re-frame-pair relies on. Runtime `re-frame.core/version` is in place — floor enforcement plumbing-ready. |
+| re-frame-10x | 1.9 | Epoch-buffer shape re-frame-pair reads, plus `day8.re-frame-10x.public` for the preferred read surface. Floor moves once 10x exposes a runtime version constant. |
+| re-com | 2.20 | `:src (at)` / `data-rc-src` contract; `:re-com/render` trace tag for render-event source-meta. |
 | shadow-cljs | 2.28 | nREPL + reload stability |
 
 Versions are read via namespace-var lookup at connect. If any is below floor, the skill refuses with a specific message naming the dep and both versions (observed vs required).
@@ -347,7 +345,7 @@ Everything in §4.1–§4.3 is pull: Claude asks, re-frame-pair answers. `watch/
 Streaming rides nREPL's `:out`, which is populated only during an active eval — once an eval returns, `*out*` unbinds from the session and async browser output lands in `js/console.log`. So the eval must not return for the duration of the watch. CLJS has no `<!!` (no blocking), so the eval cannot park-and-wait in the usual core.async way; it has to schedule with the JS event loop and keep returning control. The sketch below uses `js/setInterval` for cadence and reads 10x's buffer directly — no second callback:
 
 ```clojure
-;; design sketch — transport not yet validated; see §8a spike item 3
+;; design sketch for streaming mode — see pull-mode below for the implemented fallback
 (let [last-id (atom (rfp-runtime/latest-epoch-id))
       stop?   (atom false)
       tick    (fn []
@@ -365,7 +363,7 @@ Streaming rides nREPL's `:out`, which is populated only during an active eval �
   iv)
 ```
 
-The fallback if streaming-via-`:out` can't be made to work reliably is **pull-mode**: `watch-epochs.sh` repeatedly invokes a short eval (every ~100ms) that reads `rfp-runtime/epochs-since last-id` and prints matches. Each eval returns promptly; no long-lived `*out*` binding needed. Higher latency, more REPL chatter, but it's built on the same primitive every other op uses and removes the unproven piece. If the spike shows streaming-via-`:out` works, we keep it; if not, pull-mode is the fallback.
+The implemented transport is **pull-mode**: `watch-epochs.sh` repeatedly invokes a short eval (every ~100ms) that reads `rfp-runtime/epochs-since last-id` and prints matches. Each eval returns promptly; no long-lived `*out*` binding needed. Higher latency than a streaming variant would offer, more REPL chatter, but it's built on the same primitive every other op uses and avoids the unproven piece. The streaming-via-`:out` sketch above is retained for if and when the transport-stability question gets revisited.
 
 Either way, `scripts/watch-epochs.sh` reads the line stream and forwards to Claude via the Monitor tool. Each line becomes a notification turn where Claude can narrate, summarise, or stay silent.
 
@@ -509,7 +507,7 @@ REPL hot-swap is ephemeral; source edits are permanent and must be followed by `
 
 ## 6. Phased delivery
 
-> **Status (2026-04-27).** Phases 0–8 all delivered as of v0.1.0-beta.2; per-phase implementation status tracked in [`STATUS.md`](../STATUS.md) *Per-phase status* table. Phase 5 (hot-reload coordination) is coded but lacks a live edit→reload verification cycle (STATUS.md *Near-term* item 2).
+Current implementation status per phase lives in [`STATUS.md`](../STATUS.md). The phases below frame the design milestones; STATUS tracks which are verified vs. coded vs. open.
 
 | Phase | Deliverable | Demo |
 |---|---|---|
@@ -527,17 +525,13 @@ REPL hot-swap is ephemeral; source edits are permanent and must be followed by `
 
 ## 7. Open questions
 
-> **Per-question status as of 2026-04-27 (post-beta.2 capability waves).** Each question
-> annotated with current state. Questions are still active design
-> choices, not stale verification items.
+Active design questions. STATUS.md mirrors a short version with current resolution state.
 
-1. **Authorization surface for writes** — should `app-db/reset` and handler hot-swap require a second-level confirmation (an `AskUserQuestion` prompt) or is trusting the skill's in-prompt guardrails enough? Lean toward confirming for v1 and loosening later. *Status: still open. v0.1.0-beta.2 ships without an explicit confirmation gate; the SKILL.md cardinal rule (REPL changes ephemeral, lost on full reload) is the safety net. Revisit before v0.2.*
-2. **10x coupling** — re-frame-pair reads 10x internals, which aren't a public API. For v1 re-frame-pair absorbs that coupling directly. If 10x internals churn, the fix lands in re-frame-pair's adapter, not the skill vocabulary. See Appendix A (specifically A2) for the proposal to promote a stable public namespace in 10x. *Status: 10x maintainer shipped the public surface in commit `4107f8f` (`rf1-jum`); re-frame-pair consumer landed in commit `4a575ac` — `runtime.cljs` prefers the public ns and falls back to inlined-rf walking only on older 10x JARs. Adjacent: re-frame `4a53afb` (`rf-ybv`) shipped `register-epoch-cb`, and re-frame-pair's `9d4e948` (`rfp-zl8`) made the native epoch path the primary source — so 10x is now a secondary substrate for new fixtures. The coupling-absorption claim is now scoped to the legacy fallback path.*
-3. **Exact minimum versions** (§3.7 placeholders) — confirm floor versions on first release by checking which API surfaces each feature requires. *Status: re-frame now exposes a runtime version constant (commit `8cc973c`) so floor enforcement is plumbing-ready for re-frame; re-frame-10x and re-com still need their own constants. Floors remain nil through v0.1.0-beta.2; `health` exposes `:versions.enforcement-live? false` so callers can tell.*
-4. **`app-db/schema` convention** — is `(get @app-db :re-frame-pair/schema)` the right convention to ask apps to opt into, or should re-frame-pair sniff a registry (malli / spec) directly? Revisit when `:schema` usage is observed in real apps. *Status: still open. No real-world `:schema` usage observed yet against the fixture; revisit after first day8 app exercise (STATUS.md *Near-term* item 3).*
-5. **Hot-reload probe fallback delay** — v1 uses a fixed post-"Build complete" delay (default 300ms) when no code-sensitive probe is available. Confirm empirically that 300ms is enough on typical dev builds; consider a larger default on CI / slow machines. *Status: still open. Phase 5 live verification (STATUS.md *Near-term* item 2) is the natural venue — no automated edit→reload cycle has run end-to-end yet. Adjacent: `rfp-3es` (commit `d51cfa5`) confirmed the SKILL.md cardinal rule names the real op (`tail-build.sh --probe`) — fixes a doc bug that would have led an LLM to attempt a non-existent invocation on the first source edit.*
-
-(Contracts that need *verification against current source* — specific atom names, shadow-cljs nREPL port paths, re-com's `data-rc-src` form, 10x's epoch-buffer shape and internal navigation events, and the live-watch transport mechanism — are consolidated in §8a as spike deliverables. **§8a is now resolved (2026-04-25); see banner there.** This section is reserved for design choices that are open even after plumbing is proven.)
+1. **Authorization surface for writes** — should `app-db/reset` and handler hot-swap require a second-level confirmation (an `AskUserQuestion` prompt) or is trusting the skill's in-prompt guardrails enough? Lean toward confirming for v1 and loosening later.
+2. **10x coupling** — re-frame-pair reads 10x internals via a fallback path; the preferred path uses the public `day8.re-frame-10x.public` namespace. The legacy walker stays for older 10x JARs. Open: when can the fallback be retired?
+3. **`app-db/schema` convention** — is `(get @app-db :re-frame-pair/schema)` the right convention to ask apps to opt into, or should re-frame-pair sniff a registry (malli / spec) directly? Revisit when `:schema` usage is observed in real apps.
+4. **Hot-reload probe fallback delay** — the post-"Build complete" 300ms default is a guess. Confirm empirically once Phase 5 live verification has run end-to-end.
+5. **Re-com / re-frame-10x runtime version constants** — re-frame exposes one; the others don't. Floor enforcement stays nil-and-no-op until they do.
 
 
 ---
@@ -550,52 +544,6 @@ The skill is useful if, after installing and starting a shadow-cljs dev build:
 2. Claude can fire `[:user/save-profile {...}]` and report the resulting `app-db` diff, effects fired, and subs re-run.
 3. Claude can hot-patch a failing event handler, the developer reloads nothing, and the next click works.
 4. Adding the skill adds no host-project configuration beyond what re-frame-10x already required. No extra `deps.edn` entry, no extra `:preloads`, no extra `:closure-defines` attributable to re-frame-pair. The skill injects everything it needs over the REPL on connect.
-
----
-
-## 8a. Status: pre-spike
-
-> **Status update 2026-04-26: spike resolved.** All 6 unknowns in this
-> section have been ground-truthed end-to-end against the live fixture
-> (`tests/fixture/`). See `STATUS.md` *Spike findings (§8a, resolved
-> 2026-04-25)* for the per-item resolution: the 10x epoch-buffer
-> accessor, the time-travel adapter, the re-com `:src` parser, the
-> registrar shape, and the subscription cache shape are all wired to
-> real internals; v0.1.0-beta.1 + beta.2 squash-merged to `main` (PRs
-> #1, #2). The §6 phase deliverables are also marked Verified per
-> `STATUS.md`'s per-phase table. This section retained as historical
-> record of what the spike was meant to prove.
-
-This is a design document, not a running skill. The spec leans on internals of three libraries (re-frame, re-frame-10x, re-com) and of shadow-cljs itself. Two categories of claim need to be told apart:
-
-### Confirmed (by inspection of current source)
-
-- `re-frame.db/app-db` is a public Reagent ratom. Read/reset! are the normal API.
-- `re-frame.registrar/kind->id->handler` is the registrar atom; reachable from outside even though not documented.
-- `re-frame.trace/register-trace-cb` and `re-frame.trace/trace-enabled?` are the trace hook and the compile-time gate.
-- re-frame-10x registers a trace-cb, groups trace events into epochs, maintains a buffer.
-- shadow-cljs nREPL starts in JVM-Clojure mode and `(shadow.cljs.devtools.api/repl <build-id>)` switches to `:cljs` mode.
-
-### To verify in the spike, before more spec writing
-
-The exact names and shapes below are assumed from memory; they drive real ops and must be ground-truthed:
-
-- **`re-frame.subs/query->reaction`** — is that still the name of the subscription cache atom? Shape: `{query-vec reaction}`?
-- **re-com's `:src (at)` contract** — is `data-rc-src` the actual attribute, what form (single `file:line:col` string, or split attributes)? Which `re-com.config` flag gates attaching it?
-- **re-frame-10x's epoch-buffer surface** — what's the actual shape and where in 10x's own `app-db` (inside the 10x iframe) does it live? What events does 10x's internal epoch-navigation use (for the `undo/*` adapter in §4.6)?
-- **shadow-cljs nREPL port file** — `target/shadow-cljs/nrepl.port`, `.shadow-cljs/nrepl.port`, or configurable? Which does the current shadow-cljs default to?
-- **Live-watch transport (§4.4)** — does `prn` from a `js/setInterval` callback reach nREPL's `:out` during the outer eval's lifetime, and does the outer eval stay active long enough? If not, pull-mode is the fallback (same section).
-
-### Recommended next step: a narrow spike
-
-End-to-end against a minimal fixture app (re-frame + re-frame-10x + re-com + shadow-cljs, nothing else):
-
-1. **Runtime discovery.** `discover-app.sh` finds the nREPL port, connects, switches to `:cljs` mode for the build, and verifies re-frame, 10x, re-com, and `trace-enabled?` — reporting each check by name on failure.
-2. **CLJS eval into the selected browser runtime.** `eval-cljs.sh` round-trips `(deref re-frame.db/app-db)` and returns edn to the shell. Also exercises multi-runtime selection (two browser tabs on the same build).
-3. **Epoch extraction from 10x.** Read a recent epoch from 10x's buffer, translate it into the §4.3a record shape, and confirm the fields (`:app-db/diff`, `:subs/ran`, `:renders`, `:effects/fired`) are all recoverable from what 10x already stores. No second trace callback — proving §3.2's "one source of truth" claim is actually achievable.
-4. **Live-watch transport.** Prove (or disprove) that async `prn` output from an in-progress eval reaches nREPL's `:out` reliably enough for streaming. If it doesn't, commit to the pull-mode fallback and update §4.4.
-
-If the spike surfaces anything that contradicts this spec, the spec is wrong, not the spike. Fix the spec first, then continue with Phase 1.
 
 ---
 
@@ -612,46 +560,23 @@ CI runs (1) and (2) on every push; (3) and (4) on main + nightly. Release gates 
 
 ---
 
-## Appendix A — Proposed companion changes to re-frame, re-frame-10x, and re-com
+## Appendix A — Open companion-change proposals for re-frame, re-frame-10x, and re-com
 
-re-frame-pair can ship against these libraries as they exist today. The following changes to re-frame, re-frame-10x, and re-com would reduce re-frame-pair's code size, stabilise its contract, or unlock new recipes. Ordered by leverage.
+re-frame-pair ships against these libraries as they exist today. The proposals below would further reduce re-frame-pair's code size, stabilise its contract, or unlock new recipes. The proposals listed in earlier drafts that have since shipped upstream (10x's public surface, re-com's `:src` in the render trace, re-frame's `register-epoch-cb` / `dispatch-and-settle` / `dispatch-with` / `with-meta` on registered handlers) are now consumed by `runtime.cljs` and have moved out of this list.
 
-> **Implementation status (2026-04-27).** Six of the nine items have shipped upstream and are consumed in re-frame-pair: A2 (re-frame-10x `4107f8f` rf1-jum), A3 (re-com `b3912727`+`961b9215` rc-aeh), A4 (re-frame `4a53afb` rf-ybv), A8 (re-frame `f8f0f59` rf-4mr), A9 (re-frame `2651a30` rf-ge8), and A7 superseded by re-frame `15dfc25` rf-ysy (with-meta on registered handler value rather than retained source forms — same effect for the `handler/source` use case). A1, A5, and A6 remain open. See `STATUS.md` *Post-spike additions* for the per-item land-detail.
+**A1. Documented `re-frame.introspect` public namespace.**
+re-frame-pair reaches into `re-frame.registrar/kind->id->handler`, `re-frame.subs/query->reaction`, and `re-frame.db/app-db` directly. These work but are not documented API. Promote a small surface — `(list-handlers kind)`, `(live-subs)`, `(current-app-db)`, `(registered? kind id)` — to a named public namespace so re-frame-pair (and future tooling) has a stable contract instead of a coupling to internal atoms.
 
-### Tier 1 — high leverage
-
-**A1. Documented `re-frame.introspect` public namespace.** *(Open — no upstream movement; re-frame-pair continues to reach into the de-facto-public atoms.)*
-Today re-frame-pair reaches into `re-frame.registrar/kind->id->handler`, `re-frame.subs/query->reaction`, and `re-frame.db/app-db` directly. These work but are not documented API. Promote a small surface — `(list-handlers kind)`, `(live-subs)`, `(current-app-db)`, `(registered? kind id)` — to a named public namespace so re-frame-pair (and future tooling) has a stable contract instead of a coupling to internal atoms.
-
-**A2. Public namespace in re-frame-10x.** *(Shipped — re-frame-10x `4107f8f` rf1-jum; consumer rfp `4a575ac`.)*
-10x's epoch structures are re-frame-pair's trace substrate (§3.2) but are not a public API. Promote the needed fields (epoch id, event vector, interceptor chain, app-db before/after, sub-runs, renders, timings) to a documented namespace — e.g. `day8.re-frame-10x.public` — so re-frame-pair's adapter has a stable contract.
-
-**A3. Carry `:src` in the render trace.** *(Shipped — re-com `b3912727` rc-aeh + `961b9215` debug exported-fns fix; rfp consumer in flight as `rc-u1z`.)*
-Today re-com's `:src (at)` metadata lands on the DOM as `data-rc-src` but is not surfaced in the Reagent `:render` trace event. re-frame-pair's v1 adapter therefore joins render entries to `:src` via DOM name-and-recency matching (§4.3b) — approximate. A small re-com change — thread `:src` through to component metadata that the render trace picks up — makes the join exact and removes the DOM detour. Every render entry in an epoch would then carry `{:file :line :column}` end-to-end.
-
-**A4. `register-epoch-cb` alongside `register-trace-cb`.** *(Shipped — re-frame `4a53afb` rf-ybv; consumer rfp `9d4e948` rfp-zl8.)*
-Today, 10x groups raw trace events into per-dispatch *epochs* inside itself. If re-frame emitted epoch-granular callbacks — one call per completed event carrying the assembled sub-runs, renders, effects map, and app-db before/after — 10x (and any future tooling) would simplify dramatically, and *epoch* would become a canonical re-frame concept rather than a 10x construct. Downstream benefit: re-frame-pair could read epochs from re-frame directly, shortening the dependency chain.
-
-### Tier 2 — useful
-
-**A5. Subscription graph as data.** *(Open.)*
+**A2. Subscription graph as data.**
 `(subs/declared-graph)` returning the static `:<-` edges, with a dynamic overlay of currently-live nodes. Lets Claude reason about the reactive topology without tracing to discover it; enables recipes like "show me everything that would re-run if I changed this sub".
 
-**A6. Dispatch provenance.** *(Open — adjacent: rf-3p7 item 2 `af024c3` ships auto-generated `:dispatch-id` (different concern from caller-supplied provenance).)*
-`(dispatch ev {:from :re-frame-pair})` with the metadata threaded through to the epoch record, so agent-dispatched events are distinguishable from user-driven ones in traces. (v1 workaround: the skill tags its own dispatches; see §4.3.)
+**A3. Dispatch provenance.**
+`(dispatch ev {:from :re-frame-pair})` with the metadata threaded through to the epoch record, so agent-dispatched events are distinguishable from user-driven ones in traces. (Workaround in place: the skill tags its own dispatches; see §4.3.)
 
-**A7. Retained handler source forms in dev builds.** *(Superseded for the `handler/source` use case — re-frame `15dfc25` rf-ysy attaches `{:file :line}` via `with-meta` instead of retaining source forms; consumer rfp `fd74b8f` rfp-hpu retired the local `rfp-rsg` side-table. The "show the handler form itself" use case remains open at lower priority.)*
-The registrar currently stores only the compiled handler fn. In dev builds, keep the source form alongside. Lets Claude *read* current handler behaviour rather than only overwriting it — better "explain this handler" recipes, safer hot-swap. Required for `registrar/describe` (§4.1) to return a source form.
-
-### Tier 3 — speculative
-
-**A8. `dispatch-and-settle` returning a promise/channel.** *(Shipped — re-frame `f8f0f59` rf-4mr; consumer rfp `c87529c` rfp-4ew.)*
-Fulfilled when the event *and* its cascade of `:dispatch` / `:dispatch-later` / `:http-xhrio` / etc. all complete. Collapses the one-animation-frame wait and the "did the async effect land?" question into one primitive. "Settle" is hard to define generally — probably scoped to a configurable set of fx handlers.
-
-**A9. Effect substitution for probe dispatches.** *(Shipped — re-frame `2651a30` rf-ge8; consumer rfp `69c570d` rfp-zml.)*
-`dispatch-with` that swaps selected `reg-fx` handlers for no-ops or doubles, so Claude can safely explore event behaviour without triggering real network calls or navigation. Overlaps in spirit with re-frame's existing test utilities; may be achievable by exposing the test-mode machinery at runtime.
+**A4. Retained handler source forms in dev builds — secondary use case.**
+re-frame's current `with-meta` on registered handlers covers the `handler/source` use case. Retaining the source form itself (not just the file/line) would unlock "explain this handler" recipes that read the registered behaviour rather than only overwriting it. Lower priority than the use case `with-meta` already serves.
 
 ### Notes
 
-- A1, A2, A3, and A4 would meaningfully simplify re-frame-pair's own code (A3 specifically removes the v1 DOM-recency join in §4.3b). The rest are leverage multipliers for what Claude can do with it.
-- None of these are prerequisites. re-frame-pair ships against unchanged re-frame and unchanged 10x first; each companion change can land independently and re-frame-pair will pick it up opportunistically.
+- A1 would meaningfully simplify re-frame-pair's own code by removing the de-facto-public atom coupling. The rest are leverage multipliers for what Claude can do with the skill.
+- None of these are prerequisites. re-frame-pair picks each up opportunistically as it lands upstream.
