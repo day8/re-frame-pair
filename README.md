@@ -102,13 +102,14 @@ Post-mortems are a core use case. Instead of asking the developer to describe ev
 
 ## Requirements
 
-| Dep | Floor | Notes |
+| Dep | Version | Notes |
 |---|---|---|
-| [re-frame](https://github.com/day8/re-frame) | 1.4+ | |
-| [re-frame-10x](https://github.com/day8/re-frame-10x) | 1.10+ | dev preload, with `re-frame.trace.trace-enabled?` set true via `:closure-defines` (10x's own requirement) |
-| [re-com](https://github.com/day8/re-com) | 2.20+ | for the DOM ↔ source bridge, debug instrumentation must be on AND call sites must pass `:src (at)` — without both, `dom/*` ops degrade gracefully (return `nil`) |
-| [shadow-cljs](https://shadow-cljs.github.io/) | 2.20+ | nREPL enabled on the dev build |
-| [babashka](https://babashka.org) | 1.0+ | the skill's shell shims use it — see [babashka install](https://github.com/babashka/babashka#installation) |
+| [re-frame](https://github.com/day8/re-frame) | 1.4.6 *(works on 1.4+)* | required |
+| [re-frame-10x](https://github.com/day8/re-frame-10x) | 1.12.0 *(works on 1.10+)* | required; dev preload, with `re-frame.trace.trace-enabled?` set true via `:closure-defines` |
+| [re-com](https://github.com/day8/re-com) | 2.29.3 *(works on 2.20+)* | **optional** — required only for the DOM ↔ source bridge. Debug instrumentation must be on AND call sites must pass `:src (at)`; without both, `dom/*` ops degrade gracefully (return `nil`) |
+| [day8.re-frame/tracing](https://github.com/day8/re-frame-debux) + tracing-stubs | 0.9.2 | **optional** — adds per-form trace; see *Optional: per-form trace via re-frame-debux* below |
+| [shadow-cljs](https://shadow-cljs.github.io/) | 2.20+ | required; nREPL enabled on the dev build |
+| [babashka](https://babashka.org) | 1.0+ | required; the skill's shell shims use it — see [babashka install](https://github.com/babashka/babashka#installation) |
 
 You don't need to make any changes to your code/project to use it.
 
