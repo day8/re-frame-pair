@@ -161,6 +161,7 @@
 (def latest-epoch-id   epochs/latest-epoch-id)
 (def epoch-count       epochs/epoch-count)
 (def epoch-by-id       epochs/epoch-by-id)
+(def epoch-app-db-snapshots epochs/epoch-app-db-snapshots)
 (def last-epoch        epochs/last-epoch)
 (def epochs-since      epochs/epochs-since)
 (def epochs-in-last-ms epochs/epochs-in-last-ms)
@@ -265,6 +266,23 @@
 ;; Startup orientation
 ;; ---------------------------------------------------------------------------
 
+(defn value-shape-tag
+  "Compact one-level-deep shape descriptor for app-summary and
+   startup-context. Returns a symbol naming the type without dragging
+   the value itself into the response."
+  [v]
+  (cond
+    (nil? v)        'nil
+    (map? v)        'map
+    (vector? v)     'vec
+    (set? v)        'set
+    (sequential? v) 'seq
+    (string? v)     'string
+    (boolean? v)    'boolean
+    (keyword? v)    'keyword
+    (number? v)     'number
+    :else           'other))
+
 (defn recent-event-summary
   "Compact projection of an epoch for startup-context.
 
@@ -287,20 +305,24 @@
 (defn startup-context
   "Initial app/runtime context returned by discover-app.
 
-   Includes the current app-db snapshot and a bounded tail of recent
-   events so the agent can orient itself immediately after injection.
-   The event tail is intentionally compact; callers can use :id with
-   `epoch-by-id` when they need the full epoch."
+   Includes compact app-db orientation and a bounded tail of recent
+   events so the agent can orient itself immediately after injection
+   without dumping a large app-db into context. Callers can use
+   `snapshot`, `app-db-at`, or `epoch-app-db-snapshots` when they need
+   exact values."
   ([] (startup-context {}))
   ([{:keys [event-count] :or {event-count 5}}]
-   (let [recent (try
+   (let [db     @db/app-db
+         recent (try
                   (->> (:epochs (epochs-since nil))
                        (filter :event)
                        (take-last event-count)
                        (mapv recent-event-summary))
                   (catch :default e
                     {:error (.-message e)}))]
-     {:app-db        @db/app-db
+     {:app-db-keys  (when (map? db) (vec (keys db)))
+      :app-db-shape (when (map? db)
+                      (into {} (map (fn [[k v]] [k (value-shape-tag v)])) db))
       :recent-events recent
       :event-count   event-count
       :ts            (js/Date.now)})))
@@ -359,23 +381,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Session-bootstrap summary
 ;; ---------------------------------------------------------------------------
-
-(defn value-shape-tag
-  "Compact one-level-deep shape descriptor for app-summary. Returns
-   a symbol naming the type without dragging the value itself into
-   the response. Public so tests can exercise the dispatch directly."
-  [v]
-  (cond
-    (nil? v)        'nil
-    (map? v)        'map
-    (vector? v)     'vec
-    (set? v)        'set
-    (sequential? v) 'seq
-    (string? v)     'string
-    (boolean? v)    'boolean
-    (keyword? v)    'keyword
-    (number? v)     'number
-    :else           'other))
 
 (defn app-summary
   "One-call session-bootstrap bundle. Returns versions, registrar

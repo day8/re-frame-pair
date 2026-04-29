@@ -273,15 +273,15 @@
 
 (defn- diff-app-db
   "clojure.data/diff of the event trace's :app-db-before / :app-db-after.
-   Returns the §4.3a :app-db/diff shape."
+   Returns the compact §4.3a :app-db/diff shape. Full before/after
+   snapshots are intentionally omitted from the normal epoch payload;
+   callers that need them can ask through epoch-app-db-snapshots."
   [event-trace]
   (let [tags (:tags event-trace)
         b    (:app-db-before tags)
         a    (:app-db-after  tags)
         [only-before only-after _both] (data/diff b a)]
-    {:before      b
-     :after       a
-     :only-before only-before
+    {:only-before only-before
      :only-after  only-after}))
 
 (defn- flatten-fx

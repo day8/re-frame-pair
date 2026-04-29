@@ -69,7 +69,7 @@ Every epoch returned by `trace/*` ops has this shape. These fields are the headl
 | `:event/original` | The dispatched event pinned at handle-entry — *before* any interceptor (`trim-v`, `unwrap`, `path`) rewrote it. |
 | `:event/source` | `{:file :line}` of the dispatch call site — when the host opted in via `re-frame.macros/dispatch`. **`nil`** otherwise. |
 | `:dispatch-id` / `:parent-dispatch-id` | UUIDs threaded through cascades. Cascade children carry the parent's id; root events have `:parent-dispatch-id nil`. |
-| `:app-db/diff` | `{:before :after :only-before :only-after}` — what changed. Compact, not the full before/after. |
+| `:app-db/diff` | `{:only-before :only-after}` — compact changed values only. Full before/after snapshots are available on demand with `epoch-app-db-snapshots`. |
 | `:effects/fired` | Effects flattened to a tree — `:db`, `:dispatch`, `:http-xhrio`, custom fx. |
 | `:interceptor-chain` | Ordered `:id` keys of the chain that ran. |
 | `:subs/ran` | Each entry: `:query-v :subscribe/source :input-query-vs :input-query-sources :time-ms`. |
@@ -106,7 +106,7 @@ When `handler/source` returns `:no-source-meta`, the cause is most often that th
 - **REPL access is your second mode.** You can hot-swap a handler / sub / fx, redefine a `defn`, or `reset!` `app-db` directly through `repl/eval` — the change takes effect immediately in the running app, no source edit and no recompile. That makes probing cheap: try a fix, dispatch the event, watch the resulting epoch, throw it away. When a REPL-only patch turns out to be the right shape, transfer it to source. Two practical points to remember:
   - REPL changes are **ephemeral** — survive hot-reloads of unaffected nses, lost on full page refresh. Source edits via `Edit` / `Write` are **permanent**.
   - After any source edit, run `scripts/tail-build.sh --probe '<form>'` before dispatching or tracing — otherwise you're interacting with the pre-reload code.
-- **Connect first, every session.** Run `scripts/discover-app.sh` before any other op. discover-app finds the nREPL port, switches to `:cljs` mode, verifies preconditions, injects the runtime ns, and returns `:startup-context` with the current app-db snapshot plus a compact tail of recent events. Run `scripts/app-summary.sh` next when you need registrar inventory, live subs, and app-db shape. If discover fails it returns `{:ok? false :reason ...}` — surface verbatim, don't guess workarounds.
+- **Connect first, every session.** Run `scripts/discover-app.sh` before any other op. discover-app finds the nREPL port, switches to `:cljs` mode, verifies preconditions, injects the runtime ns, and returns `:startup-context` with app-db keys/shape plus a compact tail of recent events. Run `scripts/app-summary.sh` next when you need registrar inventory, live subs, and app-db shape. If discover fails it returns `{:ok? false :reason ...}` — surface verbatim, don't guess workarounds.
 - **Surface failures verbatim.** Every script returns structured edn. Translate `:reason` to plain English; don't paper over it.
 - **Validate before proposing.** When a hot-swap or suggestion is on the table, compose the form and run it against current state first.
 - **Narrow detail as you go.** Summaries first; drill into a specific epoch / diff / sub when the user asks.
@@ -168,6 +168,7 @@ These cover most conversations:
 | `trace/last-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-epoch)'` | Most recent epoch (any origin) |
 | `trace/last-claude-epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/last-claude-epoch)'` | Most recent epoch this session dispatched |
 | `trace/epoch` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/epoch-by-id "<id>")'` | Named epoch (full payload, including `:debux/code`) |
+| `trace/epoch-app-db` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/epoch-app-db-snapshots <id>)'` | Full `{:before :after}` app-db snapshots for one epoch. Use only when the compact diff is insufficient. |
 | `trace/dispatch-and-settle` | `scripts/dispatch.sh --trace '[:foo ...]'` | Fire + await the cascade + return root and cascaded epochs (rf-4mr; falls back to fixed-sleep on older re-frame) |
 | `trace/recent` | `scripts/trace-recent.sh <ms>` | Epochs added in last N ms (pull) |
 | `trace/find-where` | `scripts/eval-cljs.sh '(re-frame-pair.runtime/find-where <pred>)'` | Most recent epoch matching a predicate — primary forensic op |

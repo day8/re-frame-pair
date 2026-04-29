@@ -120,7 +120,7 @@ Installing re-frame-pair adds **no new host-project configuration beyond what 10
 
 1. `discover-app.sh` locates nREPL and attaches.
 2. `inject-runtime.sh` creates the `re-frame-pair.runtime` namespace at runtime and interns helpers (`snapshot`, `trace-dispatch`, etc.) from `scripts/runtime.cljs`. Among those helpers is the **session sentinel** — `re-frame-pair.runtime/session-id`, a random UUID. On every subsequent op, the skill reads the session sentinel; if absent, a full page refresh has occurred (the new runtime doesn't have our injection) and the skill re-injects before proceeding. The nREPL session itself persists through refreshes — only the browser-side runtime object is renewed.
-3. The successful discovery response includes `:startup-context`: the current `app-db` snapshot plus a compact tail of recent event epochs (`:id`, `:event`, dispatch ids, timing, and source/interceptor hints). The tail is intentionally a pointer list; callers fetch full epochs by id when they need detailed diffs, effects, renders, or debux code.
+3. The successful discovery response includes `:startup-context`: app-db keys/shape plus a compact tail of recent event epochs (`:id`, `:event`, dispatch ids, timing, and source/interceptor hints). The tail is intentionally a pointer list; callers fetch full epochs by id when they need detailed diffs, effects, renders, or debux code.
 
 That's the full bootstrap. Per-op concerns — epoch streaming (§4.4), hot-reload confirmation (§4.5) — do their own work on demand. Current re-frame builds feed re-frame-pair through native epoch/trace callbacks installed by `health`; older builds fall back to 10x's epoch buffer.
 
@@ -252,6 +252,7 @@ All trace ops read from re-frame-10x's epoch buffer (see §3.2).
 | `trace/last-epoch` | 10x epoch buffer, head | Most recent epoch in the buffer regardless of origin — includes user clicks and Claude dispatches alike |
 | `trace/last-claude-epoch` | 10x epoch buffer, filtered by session tag | Most recent epoch from a `dispatch-sync` (or `trace/dispatch-and-collect`) issued by this skill session. Does **not** include queued dispatches — see §4.2 *Claude-dispatch tagging* for why. |
 | `trace/epoch` | 10x epoch buffer, by id | Same shape, for a named epoch |
+| `trace/epoch-app-db` | Native / 10x epoch buffer, by id | Full `{:before :after}` app-db snapshots for one named epoch. Use only when compact `:app-db/diff` is insufficient. |
 | `trace/dispatch-and-collect` | Capture 10x's newest-epoch-id before dispatch; run `dispatch-sync` (its epoch appears immediately, synchronously); record the new head-id via the §4.2 tagging mechanism — that id is *ours* by construction, regardless of what other activity happens in the same frame; wait one animation frame so renders land; read the epoch by id | Fire event, return the epoch record |
 | `trace/recent` | Tail N ms of 10x's buffer | Snapshot the epochs added in the last N ms (pull — contrast with `watch/*` push ops in §4.4) |
 
@@ -286,8 +287,7 @@ The full record shape:
                      :value {:uri "/coupon/validate" ...}
                      :time-ms ...} ...]
  :interceptor-chain [...]                   ; ordered, with before/after timings
- :app-db/diff      {:before ... :after ...  ; clojure.data/diff — (1) how app-db changed
-                    :only-before ...
+ :app-db/diff      {:only-before ...       ; compact clojure.data/diff — (1) how app-db changed
                     :only-after ...}
  :subs/ran         [{:query-v [...] :time-ms ...} ...]  ; (2) subs that recomputed
  :subs/cache-hit   [{:query-v [...]                    ; subs dereffed but cached
@@ -302,7 +302,7 @@ The full record shape:
 
 Fidelity notes:
 
-1. **`app-db/diff`** — exact. Pre- and post-snapshots of `@re-frame.db/app-db` diffed with `clojure.data/diff`.
+1. **`app-db/diff`** — exact but compact: pre- and post-snapshots of `@re-frame.db/app-db` are diffed with `clojure.data/diff`, but normal epoch payloads carry only `:only-before` and `:only-after`. Full before/after snapshots are available explicitly via `epoch-app-db-snapshots` for a named epoch id.
 2. **`subs/ran` and `subs/cache-hit`** — exact when `re-frame.trace.trace-enabled?` is `true` in the build (the skill refuses to connect otherwise). Distinguishes recomputes (`:sub/run` trace events) from cache hits.
 3. **`renders`** — component-granularity, captured from Reagent's `:render` trace events. Anonymous components appear with opaque names; library components that don't opt in to render tracing don't appear at all. Because renders happen on the animation frame **after** `dispatch-sync` returns, `trace/dispatch-and-collect` waits one frame before sampling — the caller sees a complete epoch, not a partial one.
 4. **`:src`** — populated for re-com components that were called with `:src (at)`. v1 joins render entries to DOM by component name + recency (see §4.3b); when the re-com companion change lands (Appendix A, A3), the `:src` will be carried in the render trace itself and the DOM join becomes unnecessary.

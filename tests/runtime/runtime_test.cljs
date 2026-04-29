@@ -215,7 +215,9 @@
     (testing "app-db/diff has clojure.data/diff results"
       (is (some? (:app-db/diff e)))
       (is (= {:cart {:coupon "SPRING25"}} (get-in e [:app-db/diff :only-after])))
-      (is (nil? (get-in e [:app-db/diff :only-before]))))
+      (is (nil? (get-in e [:app-db/diff :only-before])))
+      (is (not (contains? (:app-db/diff e) :before)))
+      (is (not (contains? (:app-db/diff e) :after))))
     (testing "subs/ran — reactions that re-ran AND value changed
               (read from :sub-state :reaction-state, not :match-info).
               :input-query-vs is nil here because the synthetic
@@ -979,6 +981,32 @@
                   ten-x/ten-x-app-db-ratom            (fn [] nil)]
       (is (= [:cart/apply-coupon "SPRING25"]
              (:event (rt/epoch-by-id 100)))))))
+
+(deftest epoch-app-db-snapshots-prefers-native-buffer
+  (testing "full app-db snapshots are available explicitly by epoch id"
+    (reset-runtime-atom! #'rt/native-epoch-buffer
+            {:entries  [fixtures/synthetic-native-epoch]
+             :max-size 50})
+    (let [snapshots (rt/epoch-app-db-snapshots 100)]
+      (is (= 100 (:id snapshots)))
+      (is (= (:app-db/before fixtures/synthetic-native-epoch)
+             (:before snapshots)))
+      (is (= (:app-db/after fixtures/synthetic-native-epoch)
+             (:after snapshots))))))
+
+(deftest epoch-app-db-snapshots-uses-10x-fallback
+  (testing "older re-frame/10x path can still expose before/after on demand"
+    (with-redefs [native-epoch/find-native-epoch-by-id (fn [_] nil)
+                  ten-x/ten-x-loaded?        (fn [] true)
+                  ten-x/read-10x-match-by-id (fn [id]
+                                               (when (= 100 id)
+                                                 fixtures/synthetic-match))]
+      (let [snapshots (rt/epoch-app-db-snapshots 100)]
+        (is (= 100 (:id snapshots)))
+        (is (= {:cart {:items []} :user/profile {:id 1}}
+               (:before snapshots)))
+        (is (= {:cart {:items [] :coupon "SPRING25"} :user/profile {:id 1}}
+               (:after snapshots)))))))
 
 (deftest last-epoch-prefers-native-buffer
   (testing "last-epoch returns the native buffer's tail when populated;
@@ -2252,8 +2280,8 @@
         (finally
           (reset! re-frame.db/app-db orig))))))
 
-(deftest startup-context-includes-app-db-and-recent-events
-  (testing "startup-context gives discover-app enough state to orient the agent"
+(deftest startup-context-includes-app-db-shape-and-recent-events
+  (testing "startup-context gives discover-app enough state without dumping app-db"
     (let [orig @re-frame.db/app-db]
       (try
         (reset! re-frame.db/app-db {:screen :checkout :cart {:items [1 2]}})
@@ -2267,8 +2295,10 @@
                                    :dispatch-id "d4"
                                    :interceptor-chain [:coeffects :db-handler]}]})]
           (let [ctx (rt/startup-context {:event-count 2})]
-            (is (= {:screen :checkout :cart {:items [1 2]}}
-                   (:app-db ctx)))
+            (is (= [:screen :cart] (:app-db-keys ctx)))
+            (is (= {:screen 'keyword :cart 'map}
+                   (:app-db-shape ctx)))
+            (is (not (contains? ctx :app-db)))
             (is (= 2 (:event-count ctx)))
             (is (number? (:ts ctx)))
             (is (= [{:id 3 :event [:cart/add 1]}

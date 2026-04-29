@@ -73,6 +73,36 @@
     #(some-> (ten-x/read-10x-match-by-id id)
              ten-x/coerce-epoch)))
 
+(defn- ten-x-app-db-snapshots
+  [id]
+  (when (ten-x-fallback-eligible?)
+    (when-let [match (ten-x/read-10x-match-by-id id)]
+      (let [tags (:tags (ten-x/find-trace match :event))]
+        (when (or (contains? tags :app-db-before)
+                  (contains? tags :app-db-after))
+          {:id     id
+           :before (:app-db-before tags)
+           :after  (:app-db-after tags)})))))
+
+(defn- native-app-db-snapshots
+  [id]
+  (when-let [raw (native-epoch/find-native-epoch-by-id id)]
+    (when (or (contains? raw :app-db/before)
+              (contains? raw :app-db/after))
+      {:id     id
+       :before (:app-db/before raw)
+       :after  (:app-db/after raw)})))
+
+(defn epoch-app-db-snapshots
+  "Full app-db before/after snapshots for one epoch id.
+
+   Normal epoch reads intentionally omit these large values and return
+   only the compact clojure.data/diff output. Use this helper when the
+   exact pre/post app-db is worth the context cost."
+  [id]
+  (or (native-app-db-snapshots id)
+      (ten-x-app-db-snapshots id)))
+
 (defn last-epoch
   "Most recently appended epoch, coerced. Prefers the native-epoch-
    buffer; falls back to 10x when it is loaded. Nil if neither
