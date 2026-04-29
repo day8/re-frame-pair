@@ -83,10 +83,15 @@ jobs:
       - name: Run CLJS unit tests
         run: npm test
 
-      - name: Publish to npm
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # npm publish disabled until the NPM_TOKEN secret is wired up on
+      # this repo. Until then, users install per docs/LOCAL_DEV.md
+      # ('not yet published to npm' is called out in README's Install
+      # section). Restore by adding back:
+      #
+      #   - name: Publish to npm
+      #     run: npm publish
+      #     env:
+      #       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
