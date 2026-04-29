@@ -102,13 +102,14 @@ Post-mortems are a core use case. Instead of asking the developer to describe ev
 
 ## Requirements
 
-Install 
+### Install
 
 | Dep | Version | Notes |
+|---|---|---|
 | [shadow-cljs](https://shadow-cljs.github.io/) | 2.20+ | required; nREPL enabled on the dev build |
 | [babashka](https://babashka.org) | 1.0+ | required; the skill's shell shims use it — see [babashka install](https://github.com/babashka/babashka#installation) |
 
-Dependencies
+### Dependencies
 
 | Dep | Version | Notes |
 |---|---|---|
