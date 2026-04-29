@@ -47,4 +47,4 @@ Read both sides:
 1. `trace/last-epoch` or `trace/epoch` -> `:event/source` gives the dispatch call site.
 2. `handler/source` for the event id gives the registered handler.
 
-If `:event/source` is nil, the host may not be using `re-frame.macros/dispatch`; see `source-meta.md`.
+If `:event/source` is nil, the host may not be using `re-frame.core-instrumented/dispatch`; see `source-meta.md`.

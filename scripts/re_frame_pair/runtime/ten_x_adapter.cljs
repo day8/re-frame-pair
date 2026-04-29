@@ -637,7 +637,7 @@
         :debux/code        (-> handler-trace :tags :code)
         ;; Dispatch-site source (file/line) lifted from the event
         ;; vector's meta. Populated when the event was dispatched via
-        ;; re-frame.macros/dispatch[-sync] (rf-hsl); nil for events
+        ;; re-frame.core-instrumented/dispatch[-sync] (rf-hsl); nil for events
         ;; dispatched via the bare re-frame.core/dispatch fn or on a
         ;; re-frame predating those macros. Flattened from meta to a
         ;; top-level key so it survives the pr-str / cljs-eval boundary

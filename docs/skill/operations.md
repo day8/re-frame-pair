@@ -10,7 +10,7 @@ Every epoch returned by `trace/*` ops is coerced into an agent-readable shape:
 |---|---|
 | `:event` | The dispatched event vector after interceptor rewrites. |
 | `:event/original` | The event pinned at handle-entry before `trim-v`, `unwrap`, `path`, etc. |
-| `:event/source` | `{:file :line}` of the dispatch call site when the host uses `re-frame.macros/dispatch`; `nil` otherwise. |
+| `:event/source` | `{:file :line}` of the dispatch call site when the host uses `re-frame.core-instrumented/dispatch`; `nil` otherwise. |
 | `:dispatch-id` / `:parent-dispatch-id` | UUIDs threaded through cascades. Root events have no parent. |
 | `:app-db/diff` | Compact changed values only. Full snapshots are available through `epoch-app-db-snapshots`. |
 | `:effects/fired` | Effects as a tree: `:db`, `:dispatch`, `:http-xhrio`, custom fx. |

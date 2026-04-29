@@ -44,7 +44,7 @@ Use this only when investigating trace-shape mismatches; it is not part of norma
 
 ## Upstream Feature References
 
-- `re-frame.macros`: captures source metadata for dispatch, subscribe, and handler definitions.
+- `re-frame.core-instrumented`: captures source metadata for dispatch, subscribe, and handler definitions.
 - `register-epoch-cb`: native assembled-epoch callback.
 - `dispatch-and-settle`: settle-aware dispatch tracing.
 - `dispatch-with` / `dispatch-sync-with`: per-dispatch fx substitution.
