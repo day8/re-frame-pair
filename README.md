@@ -170,6 +170,8 @@ REPL changes survive hot-reloads of unaffected namespaces, but are lost on full 
 
 **So, right now:** clone this repo and follow the instructions in [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md).
 
+> ⚠️ **Pull regularly.** This skill is iterating quickly on feedback and experience — `git pull` your clone (or re-run `npx skills add` once the npm release is up) every week or two so Claude has the latest vocabulary, recipes, and runtime helpers. The recipes Claude reaches for change as the SKILL learns; you don't want yesterday's playbook against today's runtime.
+
 **After it is published to npm as `@day8/re-frame-pair`), one of:
 
 ```bash
