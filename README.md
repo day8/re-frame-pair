@@ -90,6 +90,12 @@ Post-mortems are a core use case. Instead of asking the developer to describe ev
 
 ---
 
+> **You**: Use my running app to test for edge cases on `[:cart/apply-coupon ...]`. Inject synthetic events with weird inputs, look at the results, and undo between each experiment.
+>
+> **Claude**: Captured the current epoch as the rewind point, then walked four inputs. `""` — handler accepted it, flipped `:status` to `:applied`. *Undo.* `"  "` — same; whitespace not stripped. *Undo.* `nil` — handler threw inside the validation branch on `(seq nil)`. *Undo.* 200-char string — accepted, no length cap. *Undo.* Three input-validation bugs surfaced in under a minute; want me to draft a guard interceptor that rejects empty/whitespace/nil/oversized codes before the handler runs?
+
+---
+
 > **You**: I want to iterate on `[:user/login {...}]` but it fires `:http-xhrio` and I don't want to hit the real auth endpoint each time.
 >
 > **Claude**: Substituting `:http-xhrio` and `:navigate` with record-only stubs for this dispatch. The handler still receives its coeffects, the cascade still runs, but the captured effect values land in `stubbed-effects-since` instead of being executed. Each iteration's stubs expire when the cascade settles — no global state to restore.
