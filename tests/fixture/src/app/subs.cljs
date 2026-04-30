@@ -10,6 +10,15 @@
 (rf/reg-sub :coupon       (fn [db _] (:coupon db)))
 (rf/reg-sub :events-fired (fn [db _] (:events-fired db)))
 
+;; Reports — Layer-2 reads. Display surface uses the count + load-via
+;; only; the actual rows live in app-db at [:reports :raw] and are
+;; reachable for wire-layer drilldown but never rendered (would defeat
+;; the demo).
+(rf/reg-sub :reports/count
+            (fn [db _] (count (get-in db [:reports :raw]))))
+(rf/reg-sub :reports/loaded-via
+            (fn [db _] (get-in db [:reports :loaded-via])))
+
 ;; -----------------------------------------------------------------------------
 ;; Layer 3 — depend on Layer 2. The spike specifically asks for one
 ;; Layer 3 sub depending on TWO Layer 2 inputs (so the "why didn't my

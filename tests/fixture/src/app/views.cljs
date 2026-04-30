@@ -2,7 +2,8 @@
   (:require [re-frame.core-instrumented :as rf]
             [reagent.core               :as reagent]
             [re-com.core                :refer [at v-box h-box box gap label title button
-                                                input-text line]]))
+                                                input-text line]]
+            [app.db                     :as db]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
@@ -29,20 +30,13 @@
        :gap "8px"
        :align :center
        :children
-       [[button :src (at)
-         :label "−"
-         :on-click #(rf/dispatch [:counter/dec])]
-        [box :src (at)
+       [[box :src (at)
          :width "40px"
          :align-self :center
          :child [label :src (at) :label (str n)]]
         [button :src (at)
          :label "+"
-         :on-click #(rf/dispatch [:counter/inc])]
-        [gap :src (at) :size "12px"]
-        [button :src (at)
-         :label "reset"
-         :on-click #(rf/dispatch [:counter/reset])]]]]]))
+         :on-click #(rf/dispatch [:counter/inc])]]]]]))
 
 ;; -----------------------------------------------------------------------------
 ;; Items list — for each item, a h-box with name, qty, and +1 button.
@@ -138,11 +132,48 @@
        :label "throw in handler"
        :on-click #(rf/dispatch [:broken/throw])]
       [button :src (at)
-       :label "return non-map"
-       :on-click #(rf/dispatch [:broken/non-map])]
-      [button :src (at)
        :label "reset to initial-db"
        :on-click #(rf/dispatch [:initialize])]]]]])
+
+;; -----------------------------------------------------------------------------
+;; Reports panel — wire-safety demo. Two distinct elision paths:
+;;
+;;   "Load (handler builds it)"  — the handler builds the rows
+;;     internally; the dispatched event vector is small. The big value
+;;     lands in :effects/db / :app-db/diff/only-after on the resulting
+;;     epoch and on subsequent `app-db/snapshot` reads.
+;;
+;;   "Dispatch with embedded payload"  — the rows are built in the
+;;     view and passed via the event vector. The big value lands in
+;;     the trace tags' :event arg.
+;;
+;; UI never renders the rows themselves — just the count + which path
+;; loaded them — so the demo doesn't drown the panel.
+;; -----------------------------------------------------------------------------
+
+(defn reports-panel []
+  (let [n   @(rf/subscribe [:reports/count])
+        via @(rf/subscribe [:reports/loaded-via])]
+    [v-box :src (at)
+     :gap "6px"
+     :children
+     [[panel-title "Large payloads (wire-safety demo)"]
+      [label :src (at)
+       :label (if (zero? n)
+                "No report loaded."
+                (str n " rows loaded (via " (name (or via :unknown)) ")"))]
+      [h-box :src (at)
+       :gap "8px"
+       :children
+       [[button :src (at)
+         :label "Load (handler builds it)"
+         :on-click #(rf/dispatch [:reports/load])]
+        [button :src (at)
+         :label "Dispatch with embedded payload"
+         :on-click #(rf/dispatch [:reports/loaded (db/mock-rows 5000)])]
+        [button :src (at)
+         :label "Clear"
+         :on-click #(rf/dispatch [:reports/clear])]]]]]))
 
 ;; -----------------------------------------------------------------------------
 ;; Telemetry footer
@@ -174,12 +205,13 @@
       :label "re-frame-pair fixture"
       :level :level1]
      [label :src (at)
-      :label "Subject app for the v0.1.0-beta.1 spike. Click around — every action shows up in re-frame-10x and is reachable from re-frame-pair runtime ops."
+      :label "A small re-frame app for re-frame-pair to test against."
       :class "muted"]
      [counter-panel]
      [items-panel]
      [coupon-panel]
      [summary-panel]
+     [reports-panel]
      [broken-panel]
      [footer]]]])
 

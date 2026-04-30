@@ -13,36 +13,19 @@
    db/initial-db))
 
 ;; -----------------------------------------------------------------------------
-;; Counter — three reg-event-db handlers. The "experiment loop" recipe
-;; in SKILL.md uses these because they're the simplest possible state
-;; mutation: dispatch, watch app-db, observe.
+;; Counter — the simplest visible state mutation. Wrapped with
+;; fn-traced so each sub-form (the threading pipeline, the two
+;; updates) lands as a :code entry on the event's trace; runtime.cljs
+;; surfaces those as :debux/code on the epoch. Worked example for the
+;; "experiment loop" and "Trace a handler/sub/fx form-by-form" recipes
+;; in SKILL.md.
 ;; -----------------------------------------------------------------------------
 
-;; rfp-mkf — wrapped with fn-traced so each sub-form (the threading
-;; pipeline, the two updates) lands as a :code entry on the event's
-;; trace. runtime.cljs surfaces those as :debux/code on the epoch
-;; (scripts/re_frame_pair/runtime.cljs), which until now was only
-;; covered by synthetic-data unit tests. Worked example for the
-;; "Trace a handler/sub/fx form-by-form" recipe in SKILL.md.
 (rf/reg-event-db
  :counter/inc
  (fn-traced [db _]
    (-> db
        (update :counter inc)
-       (update :events-fired inc))))
-
-(rf/reg-event-db
- :counter/dec
- (fn [db _]
-   (-> db
-       (update :counter dec)
-       (update :events-fired inc))))
-
-(rf/reg-event-db
- :counter/reset
- (fn [db _]
-   (-> db
-       (assoc :counter 0)
        (update :events-fired inc))))
 
 ;; -----------------------------------------------------------------------------
@@ -63,8 +46,10 @@
        (update :events-fired inc))))
 
 ;; -----------------------------------------------------------------------------
-;; Coupon — a reg-event-fx with a follow-up :dispatch effect. This
-;; exercises the :effects/fired flattening in coerce-epoch.
+;; Coupon — a reg-event-fx with a follow-up :dispatch effect. The
+;; cascade target is :counter/inc, an existing event — exercises the
+;; :effects/fired flattening + the parent->child :dispatch-id link in
+;; coerce-epoch without needing a dedicated cascade-target handler.
 ;; -----------------------------------------------------------------------------
 
 (rf/reg-event-fx
@@ -74,14 +59,7 @@
                   (assoc :coupon {:code code :status (if (seq code) :applied :none)})
                   (update :events-fired inc))
     :fx       [(when (seq code)
-                 [:dispatch [:analytics/track :coupon-applied {:code code}]])]}))
-
-(rf/reg-event-db
- :analytics/track
- (fn [db [_ _kind _payload]]
-   ;; In a real app this would emit a side-effect (xhrio, gtag). Here
-   ;; we just bump the counter so the dispatch shows up in the trace.
-   (update db :events-fired inc)))
+                 [:dispatch [:counter/inc]])]}))
 
 ;; -----------------------------------------------------------------------------
 ;; Test effects — custom reg-fx handlers for the dispatch-with --stub recipe.
@@ -140,9 +118,36 @@
    (throw (ex-info "broken-handler-on-purpose"
                    {:hint "This handler always throws. The agent should observe the error in 10x and propose a fix."}))))
 
+;; -----------------------------------------------------------------------------
+;; Large payloads — wire-safety demo / regression handle for the runtime
+;; wire layer (issue #4 / bead rfp-zw3w / shipped in v0.1.0-beta.5).
+;;
+;; `:reports/load`   handler builds the data internally; exercises the
+;;                   :effects/db / :app-db/diff/only-after elision path.
+;; `:reports/loaded` handler takes the data via the event vector;
+;;                   exercises the trace-tags / event-arg elision path.
+;; `:reports/clear`  drops the report so the panel can be re-armed.
+;; -----------------------------------------------------------------------------
+
 (rf/reg-event-db
- :broken/non-map
- (fn [_db _event]
-   ;; Intentional: returning a non-map sets app-db to a vector. Most
-   ;; subs will then break on next tick. Reset event clears it.
-   [:not :a :map]))
+ :reports/load
+ (fn [db _]
+   (-> db
+       (assoc-in [:reports :raw]        (db/mock-rows 5000))
+       (assoc-in [:reports :loaded-via] :handler-built)
+       (update :events-fired inc))))
+
+(rf/reg-event-db
+ :reports/loaded
+ (fn [db [_ rows]]
+   (-> db
+       (assoc-in [:reports :raw]        rows)
+       (assoc-in [:reports :loaded-via] :event-arg)
+       (update :events-fired inc))))
+
+(rf/reg-event-db
+ :reports/clear
+ (fn [db _]
+   (-> db
+       (assoc :reports {})
+       (update :events-fired inc))))
