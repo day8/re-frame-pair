@@ -42,7 +42,8 @@
             [re-frame-pair.runtime.session :as session]
             [re-frame-pair.runtime.ten-x-adapter :as ten-x]
             [re-frame-pair.runtime.time-travel :as time-travel]
-            [re-frame-pair.runtime.versions :as versions]))
+            [re-frame-pair.runtime.versions :as versions]
+            [re-frame-pair.runtime.wire :as wire]))
 
 ;; ---------------------------------------------------------------------------
 ;; Session + app-db — re-exported from re-frame-pair.runtime.session
@@ -407,3 +408,17 @@
                      (into {} (map (fn [[k v]] [k (value-shape-tag v)])) db))
      :health       (health)
      :ts           (js/Date.now)}))
+
+;; ---------------------------------------------------------------------------
+;; Wire safety — re-exported from re-frame-pair.runtime.wire
+;; ---------------------------------------------------------------------------
+;;
+;; Bounded summaries + cursor drill-down for the cljs-eval channel.
+;; ops.clj auto-wraps every form in `(wire/return! ... {:budget-bytes ...})`
+;; to keep responses under shadow-cljs's ~1MB printer cap. See issue #4.
+
+(def wire-return!     wire/return!)
+(def wire-fetch       wire/fetch-cursor)
+(def wire-fetch-path  wire/fetch-path)
+(def wire-release!    wire/release-cursor!)
+(def wire-stats       wire/store-stats)

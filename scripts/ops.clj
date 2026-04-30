@@ -246,7 +246,11 @@
    ;; dom depends on epochs (latest-epoch-id for click-fire).
    "dom.cljs"
    ;; time-travel depends on ten-x-adapter (ten-x-rf-core, ten-x-app-db-ratom).
-   "time_travel.cljs"])
+   "time_travel.cljs"
+   ;; wire depends on session (session-id for cursor allocation). Carries
+   ;; the wire-safe summary + cursor protocol used by every cljs-eval
+   ;; response (issue #4 / bead rfp-zw3w).
+   "wire.cljs"])
 
 (defn- runtime-cljs-paths
   "Source files comprising the re-frame-pair.runtime namespace tree,
@@ -298,12 +302,37 @@
          (str " " (str/join " " args)))
        ")"))
 
+(def ^:private wire-budget-bytes 262144)
+
+(defn- wire-wrap
+  "Wrap a CLJS source form in `re-frame-pair.runtime.wire/return!` so
+   the response is bounded by the wire-safe summary + cursor protocol
+   (issue #4 / bead rfp-zw3w). Trivial values pass through bare on the
+   runtime side; non-trivial values come back as
+   `{:rfp.wire/cursor ... :rfp.wire/value ... :rfp.wire/elisions [...]}`.
+
+   Skips re-wrapping when the user form is already a `wire/return!` or
+   `wire/raw` call — those are explicit opt-outs from re-wrapping."
+  [form-str]
+  (let [trimmed (str/triml form-str)]
+    (if (or (str/starts-with? trimmed "(re-frame-pair.runtime.wire/return!")
+            (str/starts-with? trimmed "(re-frame-pair.runtime.wire/raw")
+            (str/starts-with? trimmed "(re-frame-pair.runtime.wire/raw!"))
+      form-str
+      (str "(re-frame-pair.runtime.wire/return! (do " form-str ")"
+           " {:budget-bytes " wire-budget-bytes "})"))))
+
 (defn- cljs-eval-form
-  "Build the JVM-side shadow-cljs cljs-eval wrapper for `form-str`."
-  [build-id form-str]
-  (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
-          (pr-str build-id)
-          (pr-str form-str)))
+  "Build the JVM-side shadow-cljs cljs-eval wrapper for `form-str`.
+   By default the user form is wrapped via `wire-wrap` for transport
+   safety. Pass `:wrap? false` for inject-path / sentinel-probe forms
+   that must run before the runtime is loaded."
+  ([build-id form-str] (cljs-eval-form build-id form-str {}))
+  ([build-id form-str {:keys [wrap?] :or {wrap? true}}]
+   (let [final-form (if wrap? (wire-wrap form-str) form-str)]
+     (format "(shadow.cljs.devtools.api/cljs-eval %s %s {})"
+             (pr-str build-id)
+             (pr-str final-form)))))
 
 (defn- jvm-eval
   "Evaluate a Clojure (JVM-side) form over nREPL and return the combined
@@ -317,56 +346,105 @@
 
 (defn- cljs-eval
   "Evaluate a ClojureScript form in the connected browser runtime via
-   shadow-cljs's `cljs-eval` API. Returns the raw nREPL response."
-  ([build-id form-str]
-   (jvm-eval (cljs-eval-form build-id form-str)))
-  ([conn build-id form-str]
-   (jvm-eval conn (cljs-eval-form build-id form-str))))
+   shadow-cljs's `cljs-eval` API. Returns the raw nREPL response.
+
+   The 4-arity is the canonical form; 2- and 3-arity convenience
+   overloads pass `{}` as opts. Callers needing `opts` with no
+   persistent connection pass `nil` for `conn` explicitly.
+
+   `opts` keys understood today:
+     :wrap?  default true; pass `false` to skip the wire-safe
+             `re-frame-pair.runtime.wire/return!` wrap (inject path
+             and sentinel probe)."
+  ([build-id form-str]               (cljs-eval nil  build-id form-str {}))
+  ([conn build-id form-str]          (cljs-eval conn build-id form-str {}))
+  ([conn build-id form-str opts]
+   (let [code (cljs-eval-form build-id form-str opts)]
+     (if conn (jvm-eval conn code) (jvm-eval code)))))
 
 (defn- safe-edn [s]
   (try (edn/read-string s) (catch Exception _ s)))
 
-(defn- cljs-eval-value
-  "Like cljs-eval but unwraps to the actual CLJS value.
+(defn- parse-cljs-eval-response
+  "Parse a shadow-cljs cljs-eval nREPL response into the CLJS value
+   it produced. Returns `nil` for blank responses, throws on JVM /
+   compile errors. Wire unwrapping is *not* applied here — see
+   `cljs-eval-wire` for that step."
+  [res]
+  (cond
+    (some? (:ex res))
+    (throw (ex-info "nREPL eval error" {:reason :eval-error
+                                        :ex (:ex res)
+                                        :err (:err res)}))
 
-   shadow-cljs's `cljs-eval` returns a JVM map shaped like
-   `{:results [<printed-cljs-value-as-str>]}`. The nREPL response's
-   :value is the *printed* form of that map, so we:
-     1. edn/read the outer :value (JVM map);
-     2. take the last element of :results (the evaluated CLJS form's
-        printed value as a string);
-     3. edn/read that string to recover the CLJS value."
+    (str/blank? (str (:value res)))
+    nil
+
+    :else
+    (let [outer (safe-edn (str (:value res)))]
+      (cond
+        ;; Shadow result shape.
+        (and (map? outer) (vector? (:results outer)))
+        (when-let [last-result (peek (:results outer))]
+          (safe-edn last-result))
+
+        ;; Newer shadow may return {:err "..."} on cljs errors.
+        (and (map? outer) (:err outer))
+        (throw (ex-info "cljs eval error"
+                        {:reason :cljs-eval-error
+                         :err (:err outer)}))
+
+        ;; Fallback — assume we already have the value.
+        :else outer))))
+
+(defn- wire-shape?
+  "True when `v` is a wire-wrapper map produced by
+   `re-frame-pair.runtime.wire/return!` (a non-trivial response).
+   Trivial values pass through bare and aren't wire-shapes."
+  [v]
+  (and (map? v) (contains? v :rfp.wire/cursor)))
+
+(defn- cljs-eval-wire
+  "Evaluate `form-str` and return a structured wire-aware result:
+
+       {:value           <cljs-value>          ;; always present
+        :rfp.wire/cursor <handle>              ;; when wrapper allocated one
+        :rfp.wire/elisions [<el> ...]          ;; when value didn't fit
+        :rfp.wire/value-fits? <bool>}          ;; convenience flag
+
+   For trivial responses (small scalars, small colls) the value is
+   bare and there is no cursor — `:value-fits?` is `true` and the
+   wire keys are absent. For wrapped responses the value is the
+   maybe-elided projection of the original; the cursor reaches the
+   full value via `re-frame-pair.runtime.wire/fetch-path`.
+
+   Pass `:wrap? false` in `opts` to skip auto-wrapping (inject path
+   and sentinel probe — these run before the runtime is loaded)."
+  ([build-id form-str]               (cljs-eval-wire nil build-id form-str {}))
+  ([conn build-id form-str]          (cljs-eval-wire conn build-id form-str {}))
+  ([conn build-id form-str opts]
+   (let [res    (cljs-eval conn build-id form-str opts)
+         parsed (parse-cljs-eval-response res)]
+     (if (wire-shape? parsed)
+       (cond-> {:value                 (:rfp.wire/value parsed)
+                :rfp.wire/cursor       (:rfp.wire/cursor parsed)
+                :rfp.wire/value-fits?  (not (contains? parsed :rfp.wire/elisions))}
+         (:rfp.wire/elisions parsed)
+         (assoc :rfp.wire/elisions (:rfp.wire/elisions parsed)))
+       {:value                parsed
+        :rfp.wire/value-fits? true}))))
+
+(defn- cljs-eval-value
+  "Backwards-compatible value-only accessor: returns just the inner
+   CLJS value (wire shape unwrapped if present). Existing callers
+   that expect a bare value keep working — trivial responses pass
+   through unchanged, wrapped responses are unwrapped to their inner
+   maybe-elided value. To surface the cursor / elision metadata, use
+   `cljs-eval-wire`."
   ([build-id form-str]
    (cljs-eval-value nil build-id form-str))
   ([conn build-id form-str]
-   (let [res (if conn
-               (cljs-eval conn build-id form-str)
-               (cljs-eval build-id form-str))]
-     (cond
-       (some? (:ex res))
-       (throw (ex-info "nREPL eval error" {:reason :eval-error
-                                           :ex (:ex res)
-                                           :err (:err res)}))
-
-       (str/blank? (str (:value res)))
-       nil
-
-       :else
-       (let [outer (safe-edn (str (:value res)))]
-         (cond
-           ;; Shadow result shape.
-           (and (map? outer) (vector? (:results outer)))
-           (when-let [last-result (peek (:results outer))]
-             (safe-edn last-result))
-
-           ;; Newer shadow may return {:err "..."} on cljs errors.
-           (and (map? outer) (:err outer))
-           (throw (ex-info "cljs eval error"
-                           {:reason :cljs-eval-error
-                            :err (:err outer)}))
-
-           ;; Fallback — assume we already have the value.
-           :else outer))))))
+   (:value (cljs-eval-wire conn build-id form-str {}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: discover
@@ -401,12 +479,18 @@
   'not injected') because the eval *will* throw with an undefined-ns
    error until the first inject.
 
+   Bypasses the wire wrapper (`:wrap? false`) — we're literally
+   probing whether the runtime ns exists, so referencing
+   `re-frame-pair.runtime.wire/return!` would itself fail with the
+   undefined-ns error and obscure the signal.
+
    Spec §3.4 — the sentinel is why re-injection only fires on full
    page refresh, not every connect."
   [build-id]
   (try
-    (let [v (cljs-eval-value build-id (runtime-symbol 'session-id))]
-      (and (string? v) (seq v)))
+    (let [resp   (cljs-eval nil build-id (runtime-symbol 'session-id) {:wrap? false})
+          parsed (parse-cljs-eval-response resp)]
+      (and (string? parsed) (seq parsed)))
     (catch Exception _ false)))
 
 ;; ---------------------------------------------------------------------------
@@ -541,13 +625,18 @@
    chunker reads it from the file's first form), so files with
    different ns'es ship cleanly without bleed across boundaries.
    Returns a vec of `[chunk-index resp]` for each chunk so callers
-   can detect partial failures."
+   can detect partial failures.
+
+   Inject is the pre-runtime path — `re-frame-pair.runtime.wire/return!`
+   isn't defined yet, and the source itself contains ns / def forms
+   that wouldn't survive being wrapped in `(do ...)`. `:wrap? false`
+   skips the wire-wrap layer."
   [build-id src]
   (let [chunks (chunk-source src inject-chunk-bytes)]
     (loop [i 0, results []]
       (if (>= i (count chunks))
         results
-        (let [resp (cljs-eval build-id (nth chunks i))
+        (let [resp (cljs-eval nil build-id (nth chunks i) {:wrap? false})
               fail (inject-failure resp)]
           (if fail
             (conj results [i (assoc fail :chunk-index i :chunk-count (count chunks))])
@@ -734,8 +823,13 @@
         build-id    (build-id-from-args (rest args))
         reinjected? (ensure-injected! build-id)]
     (try
-      (emit (cond-> {:ok? true :value (cljs-eval-value build-id form)}
-              reinjected? (assoc :reinjected? true)))
+      (let [{:keys [value]
+             :rfp.wire/keys [cursor elisions value-fits?]} (cljs-eval-wire build-id form)]
+        (emit (cond-> {:ok? true :value value}
+                cursor          (assoc :rfp.wire/cursor cursor)
+                (seq elisions)  (assoc :rfp.wire/elisions elisions)
+                (some? value-fits?) (assoc :rfp.wire/value-fits? value-fits?)
+                reinjected?     (assoc :reinjected? true))))
       (catch Exception e
         (emit (cond-> {:ok? false
                        :reason (or (:reason (ex-data e)) :eval-error)
@@ -1301,7 +1395,7 @@
    failure (build not running, nREPL down, parse error)."
   [port build-id]
   (try
-    (let [form (cljs-eval-form build-id (runtime-symbol 'session-id))
+    (let [form (cljs-eval-form build-id (runtime-symbol 'session-id) {:wrap? false})
           resp (combine-responses (nrepl-eval-raw port form))
           v    (some-> resp :value safe-edn)
           first-result (some-> v :results first safe-edn)]

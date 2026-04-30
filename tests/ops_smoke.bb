@@ -940,5 +940,81 @@
         (is (empty? @eval-calls)
             "no health call on a failed inject — captures install nothing meaningful")))))
 
+;; ---------------------------------------------------------------------------
+;; Wire-safe eval wrapping (issue #4 / bead rfp-zw3w).
+;;
+;; ops.clj wraps every user form in `re-frame-pair.runtime.wire/return!`
+;; so the response is bounded by the wire-safe summary + cursor protocol.
+;; Inject-path forms (source-ship, sentinel probe) must skip the wrap —
+;; they run before the runtime is loaded, so referencing wire/return!
+;; would itself fail with an undefined-ns error.
+;; ---------------------------------------------------------------------------
+
+(deftest wire-wrap-injects-return-call-by-default
+  (testing "wire-wrap on a normal form prepends re-frame-pair.runtime.wire/return!"
+    (let [wrapped (#'ops/wire-wrap "(re-frame.core/dispatch [:foo])")]
+      (is (str/starts-with? wrapped "(re-frame-pair.runtime.wire/return!"))
+      (is (str/includes? wrapped "(do (re-frame.core/dispatch [:foo]))"))
+      (is (str/includes? wrapped ":budget-bytes")))))
+
+(deftest wire-wrap-skips-when-form-is-already-a-return-or-raw
+  (testing "operator-explicit return! / raw forms aren't double-wrapped"
+    (let [already "(re-frame-pair.runtime.wire/return! v {})"]
+      (is (= already (#'ops/wire-wrap already))))
+    (let [raw "(re-frame-pair.runtime.wire/raw v)"]
+      (is (= raw (#'ops/wire-wrap raw))))))
+
+(deftest cljs-eval-form-default-wraps
+  (testing "cljs-eval-form passes form-str through wire-wrap by default"
+    (let [code (#'ops/cljs-eval-form :app "(some-form)")]
+      (is (str/includes? code "re-frame-pair.runtime.wire/return!")))))
+
+(deftest cljs-eval-form-wrap-false-skips-wire-wrap
+  (testing ":wrap? false bypasses wire-wrap (inject path / sentinel probe)"
+    (let [code (#'ops/cljs-eval-form :app "(some-form)" {:wrap? false})]
+      (is (not (str/includes? code "re-frame-pair.runtime.wire/return!")))
+      (is (str/includes? code "(some-form)")))))
+
+(deftest cljs-eval-wire-unwraps-wire-shape
+  (testing "wire-shape responses are unwrapped to {:value ... :rfp.wire/cursor ...}"
+    (let [fake-resp {:value (pr-str
+                             {:results
+                              [(pr-str
+                                {:rfp.wire/cursor   "abc/1"
+                                 :rfp.wire/value    {:abridged true}
+                                 :rfp.wire/elisions [{:path [:big]
+                                                      :reason :branch-too-big}]})]})}]
+      (with-redefs [ops/cljs-eval (fn [& _] fake-resp)]
+        (let [result (#'ops/cljs-eval-wire nil :app "(any-form)" {})]
+          (is (= {:abridged true} (:value result))
+              "inner :rfp.wire/value surfaces as :value")
+          (is (= "abc/1" (:rfp.wire/cursor result))
+              ":rfp.wire/cursor preserved on the structured response")
+          (is (= 1 (count (:rfp.wire/elisions result)))
+              ":rfp.wire/elisions preserved when present")
+          (is (false? (:rfp.wire/value-fits? result))
+              ":rfp.wire/value-fits? false when elisions present"))))))
+
+(deftest cljs-eval-wire-trivial-response-bare
+  (testing "trivial responses pass through bare with :value-fits? true"
+    (let [fake-resp {:value (pr-str {:results [(pr-str {:counter 0})]})}]
+      (with-redefs [ops/cljs-eval (fn [& _] fake-resp)]
+        (let [result (#'ops/cljs-eval-wire nil :app "(any-form)" {})]
+          (is (= {:counter 0} (:value result)))
+          (is (true? (:rfp.wire/value-fits? result)))
+          (is (nil? (:rfp.wire/cursor result)))
+          (is (nil? (:rfp.wire/elisions result))))))))
+
+(deftest cljs-eval-value-strips-wire-shape-for-back-compat
+  (testing "cljs-eval-value (legacy accessor) returns just the inner value"
+    (let [fake-resp {:value (pr-str
+                             {:results
+                              [(pr-str
+                                {:rfp.wire/cursor "x/1"
+                                 :rfp.wire/value  {:counter 42}})]})}]
+      (with-redefs [ops/cljs-eval (fn [& _] fake-resp)]
+        (is (= {:counter 42} (#'ops/cljs-eval-value :app "(any-form)"))
+            "wire shape unwrapped; existing callers see the inner value")))))
+
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))
