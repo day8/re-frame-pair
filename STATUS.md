@@ -20,7 +20,7 @@ For the design this is measured against, see [`docs/initial-spec.md`](docs/initi
 | `tests/skill_recipe_smoke.bb` | **10 deftests / 36 assertions / 0 failures** (SKILL.md / recipe contract pins) |
 | `tests/fixture/` sample app | Minimal re-frame + 10x + re-com app on shadow-cljs `watch app`; bundled bootstrap + re-com CSS for self-contained rendering; `:counter/inc` wrapped with `fn-traced` for the form-by-form trace recipe |
 | End-to-end against the live fixture | Verified — full §4.3a epoch shape (event, diff, effects, coeffects, interceptor-chain, subs/ran, subs/cache-hit, renders, timing) produced for UI clicks; all 5 watch predicate filters validated; time-travel rolls userland app-db correctly |
-| Releases | `v0.1.0-beta.4` is the current GitHub Release (prerelease, tag pushed 2026-04-30); npm publish is gated on the `NPM_TOKEN` secret being configured |
+| Releases | `v0.1.0-beta.5` is the current GitHub Release (prerelease, tag pushed 2026-04-30); npm publish is gated on the `NPM_TOKEN` secret being configured |
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "re-frame-pair",
-  "version": "0.1.0-beta.4",
+  "version": "0.1.0-beta.5",
   "description": "Pair-program with a live re-frame application. A Claude Code Skill for the day8 stack (re-frame + re-frame-10x + re-com + shadow-cljs).",
   "author": {
     "name": "day8",

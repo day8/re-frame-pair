@@ -14,6 +14,37 @@ versioning aims at [SemVer](https://semver.org/) once the skill leaves beta.
 
 Nothing yet.
 
+## [0.1.0-beta.5] - 2026-04-30
+
+### Fixed
+
+- **Eval channel no longer silently truncates large CLJS responses
+  past shadow-cljs's ~1 MB printer cap.** Previously, ops that
+  produced a large value (a `:report/loaded` event payload, an
+  `app-db/snapshot` of a real app's state, an epoch whose
+  `:effects/db` snapshotted a sizable subscription tree) returned
+  `{:ok? true :value nil}` to the caller while the browser console
+  threw `The limit of 1048576 bytes was reached while printing`. The
+  failure mode was asymmetric and silent — the runtime *thought* it
+  had succeeded.
+
+  Every cljs-eval response is now bounded by a wire-safe summary +
+  cursor protocol. Trivial responses pass through bare; non-trivial
+  responses come back as
+  `{:rfp.wire/cursor "<id>" :rfp.wire/value <maybe-elided>
+   :rfp.wire/elisions [{:path [...] :type :map :count 84 ...}]}`.
+  Oversized branches are replaced *in place* with type-aware
+  `{:rfp.wire/elided true ...}` markers carrying their own cursor.
+  The full value stays available in a session-keyed bounded LRU on
+  the runtime side; drill into a slice with
+  `eval-cljs.sh '(re-frame-pair.runtime.wire/fetch-path "<cursor>" [<path>])'`.
+
+  Closes [#4](https://github.com/day8/re-frame-pair/issues/4) (bead
+  rfp-zw3w). Phases 1+2 of the design landed in 75d2297; SKILL.md
+  documentation in afbff6a. Phases 3–5 (wire CLI sugar, epoch-aware
+  projections, question-shaped vocabulary) deferred — the bug is
+  fixed and remaining work is product polish.
+
 ## [0.1.0-beta.4] - 2026-04-30
 
 ### Fixed
