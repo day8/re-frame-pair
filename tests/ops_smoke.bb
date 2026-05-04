@@ -1018,6 +1018,49 @@
             "wire shape unwrapped; existing callers see the inner value")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #9: discover-app.sh should emit :ambiguous-build instead
+;; of silently picking a default build that isn't active.
+;; ---------------------------------------------------------------------------
+
+(deftest ambiguous-build-pred-explicit-selection-never-ambiguous
+  (testing "if the operator named the build, never ambiguous"
+    (is (false? (#'ops/ambiguous-build? true :app [:karma-test :browser-test])))
+    (is (false? (#'ops/ambiguous-build? true :app [])))
+    (is (false? (#'ops/ambiguous-build? true :app nil)))))
+
+(deftest ambiguous-build-pred-default-in-list-not-ambiguous
+  (testing "if the default IS one of the active builds, not ambiguous"
+    (is (false? (#'ops/ambiguous-build? false :app [:app])))
+    (is (false? (#'ops/ambiguous-build? false :app [:app :browser-test])))))
+
+(deftest ambiguous-build-pred-default-not-in-list-is-ambiguous
+  (testing "default not in candidate list, no explicit selection — ambiguous"
+    (is (true? (#'ops/ambiguous-build? false :app [:karma-test :browser-test :mws2prp])))
+    (is (true? (#'ops/ambiguous-build? false :app [:storybook])))))
+
+(deftest ambiguous-build-pred-empty-or-nil-builds-not-ambiguous
+  (testing "probe failed (nil) or returned [] — fall through to existing inject path, not ambiguous"
+    (is (false? (#'ops/ambiguous-build? false :app nil)))
+    (is (false? (#'ops/ambiguous-build? false :app [])))))
+
+(deftest discover-emits-ambiguous-build-when-default-not-active
+  (testing "discover refuses to inject and emits structured :ambiguous-build response"
+    (let [emitted (atom nil)
+          inject-called? (atom false)]
+      (with-redefs [ops/ensure-port!         (fn [] true)
+                    ops/read-port            (fn [] 8777)
+                    ops/list-builds-on-port  (fn [_] [:karma-test :browser-test :mws2prp])
+                    ops/inject-runtime!      (fn [& _] (reset! inject-called? true) {})
+                    ops/emit                 (fn [m] (reset! emitted m))]
+        (#'ops/discover [])
+        (is (false? @inject-called?) "must NOT call inject-runtime! when default is not active")
+        (is (= false (:ok? @emitted)))
+        (is (= :ambiguous-build (:reason @emitted)))
+        (is (= [:karma-test :browser-test :mws2prp] (:candidates @emitted)))
+        (is (= :app (:picked-default @emitted)))
+        (is (str/includes? (:hint @emitted) "--build="))))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for rfp-gmkj: load-order topology check on runtime-submodule-files
 ;;
 ;; PR #5 fixed registrar.cljs being listed before ten-x-adapter.cljs in

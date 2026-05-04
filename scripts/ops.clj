@@ -753,6 +753,20 @@
 ;; breaks.
 (declare list-builds-on-port)
 
+(defn- ambiguous-build?
+  "True when the implicit default build-id is not actually one of the
+   active builds on the port — and therefore proceeding with the inject
+   would either silently fail or produce a misleading nil response.
+   Returns false when the operator named a build, when the candidate
+   list is empty/unknown (probe failed, fall back to the existing
+   try-and-see path), or when the default IS in the list."
+  [explicit-build? build-id builds]
+  (boolean
+    (and (not explicit-build?)
+         (sequential? builds)
+         (seq builds)
+         (not (some #{build-id} builds)))))
+
 (defn- discover [args]
   (ensure-port!)
   (let [build-id        (build-id-from-args args)
@@ -760,16 +774,25 @@
         ;; If the operator named a build (--build= or env), we don't
         ;; warn about multi-build — they made the choice.
         explicit-build? (or (some #(str/starts-with? % "--build=") args)
-                            (boolean (System/getenv "SHADOW_CLJS_BUILD_ID")))]
+                            (boolean (System/getenv "SHADOW_CLJS_BUILD_ID")))
+        ;; Pre-flight: probe active builds before attempting inject so
+        ;; we can refuse a default that does not exist on the port,
+        ;; rather than letting `inject-runtime!` fail or silently
+        ;; produce nil. Probe failure is non-fatal; the original
+        ;; try-and-see path handles that case.
+        builds          (try (list-builds-on-port (read-port))
+                             (catch Exception _ nil))]
+    (if (ambiguous-build? explicit-build? build-id builds)
+      (emit {:ok? false
+             :reason         :ambiguous-build
+             :candidates     (vec builds)
+             :picked-default build-id
+             :hint (format "Default build %s is not active on this nREPL port. Pass --build=<id> or set SHADOW_CLJS_BUILD_ID. Active builds: %s"
+                           build-id (str/join ", " (map str builds)))})
     (try
       (let [health      (inject-runtime! build-id {:capture? capture?})
             version-err (version-failure health)
             context     (startup-context build-id)
-            ;; Multi-build awareness: probe active builds on the
-            ;; chosen port. Failure is non-fatal — `discover` still
-            ;; works, just without the warning.
-            builds      (try (list-builds-on-port (read-port))
-                             (catch Exception _ nil))
             multi?      (and (sequential? builds)
                              (> (count builds) 1)
                              (not explicit-build?))]
@@ -811,7 +834,7 @@
       (catch Exception e
         (emit {:ok? false
                :reason (or (:reason (ex-data e)) :unknown)
-               :message (.getMessage e)})))))
+               :message (.getMessage e)}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: eval
