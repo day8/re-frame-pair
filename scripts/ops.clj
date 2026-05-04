@@ -370,7 +370,15 @@
   "Parse a shadow-cljs cljs-eval nREPL response into the CLJS value
    it produced. Returns `nil` for blank responses, throws on JVM /
    compile errors. Wire unwrapping is *not* applied here — see
-   `cljs-eval-wire` for that step."
+   `cljs-eval-wire` for that step.
+
+   Important: shadow's nREPL response wraps its real result inside the
+   top-level :value field as a serialized map of shape
+   `{:results [...] :err \"...\" :ns ...}`. When :results is empty AND
+   :err is non-blank, that's a buried error — most often
+   \"No available JS runtime.\" (no browser registered) or an
+   :undeclared-ns / :undeclared-var compile warning. Both used to be
+   silently dropped on the floor; we now surface them."
   [res]
   (cond
     (some? (:ex res))
@@ -386,8 +394,35 @@
       (cond
         ;; Shadow result shape.
         (and (map? outer) (vector? (:results outer)))
-        (when-let [last-result (peek (:results outer))]
-          (safe-edn last-result))
+        (let [inner-err (str (:err outer))]
+          (cond
+            ;; Empty results AND a buried error → surface it. Most
+            ;; common: "No available JS runtime." (browser tab not
+            ;; registered with shadow). Also catches :undeclared-ns /
+            ;; :undeclared-var compile warnings that shadow folds into
+            ;; :err when the eval'd code references something not
+            ;; loaded into the runtime.
+            (and (empty? (:results outer))
+                 (not (str/blank? inner-err)))
+            (let [no-runtime? (str/includes? inner-err "No available JS runtime")
+                  reason      (if no-runtime?
+                                :browser-runtime-not-attached
+                                :cljs-eval-error)
+                  hint        (when no-runtime?
+                                "Open the app in a browser tab so shadow-cljs has a runtime to route the eval through. If a tab is already open, hard-refresh it (Ctrl+Shift+R) — the bundle may be from a previous shadow-cljs process whose runtime IDs don't match the current one.")]
+              (throw (ex-info inner-err
+                              (cond-> {:reason reason
+                                       :err inner-err}
+                                hint (assoc :hint hint)))))
+
+            ;; Empty results, no buried error → legitimate "form returned
+            ;; nothing meaningful" (e.g. forms whose top-level evaluated
+            ;; to nothing). Rare in practice; keep the historical nil.
+            (empty? (:results outer))
+            nil
+
+            :else
+            (safe-edn (peek (:results outer)))))
 
         ;; Newer shadow may return {:err "..."} on cljs errors.
         (and (map? outer) (:err outer))

@@ -1024,6 +1024,59 @@
             "wire shape unwrapped; existing callers see the inner value")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #6 (deeper fix): parse-cljs-eval-response must surface
+;; errors buried inside shadow's :value map (`{:results [] :err "..."}`)
+;; instead of returning nil. Most common buried error is
+;; "No available JS runtime." when the browser tab isn't registered.
+;; ---------------------------------------------------------------------------
+
+(deftest parse-surfaces-no-available-js-runtime-as-browser-runtime-not-attached
+  (testing "buried 'No available JS runtime.' surfaces as :reason :browser-runtime-not-attached"
+    (let [res {:value (pr-str
+                        {:results []
+                         :out ""
+                         :err "No available JS runtime.\nSee https://shadow-cljs.github.io/docs/UsersGuide.html#repl-troubleshooting"
+                         :ns 'cljs.user})}
+          thrown (try (#'ops/parse-cljs-eval-response res)
+                      (catch clojure.lang.ExceptionInfo e
+                        {:msg (.getMessage e) :data (ex-data e)}))]
+      (is (= :browser-runtime-not-attached (-> thrown :data :reason)))
+      (is (str/includes? (-> thrown :data :err) "No available JS runtime"))
+      (is (str/includes? (-> thrown :data :hint) "browser tab")
+          ":hint guides operator to open / hard-refresh the tab"))))
+
+(deftest parse-surfaces-buried-undeclared-var-as-cljs-eval-error
+  (testing "buried :undeclared-var warning surfaces as :reason :cljs-eval-error"
+    (let [res {:value (pr-str
+                        {:results []
+                         :out ""
+                         :err "------ WARNING - :undeclared-var -----------------------------------------------\n Resource: <eval>:1:1\n Use of undeclared Var foo/bar"
+                         :ns 'cljs.user})}
+          thrown (try (#'ops/parse-cljs-eval-response res)
+                      (catch clojure.lang.ExceptionInfo e
+                        (ex-data e)))]
+      (is (= :cljs-eval-error (:reason thrown)))
+      (is (str/includes? (:err thrown) ":undeclared-var")))))
+
+(deftest parse-still-returns-3-for-happy-path
+  (testing "no regression: shadow's normal :results [\"3\"] shape parses to 3"
+    (let [res {:value (pr-str
+                        {:results ["3"]
+                         :out ""
+                         :err ""
+                         :ns 'cljs.user})}]
+      (is (= 3 (#'ops/parse-cljs-eval-response res))))))
+
+(deftest parse-empty-results-no-error-still-returns-nil
+  (testing "no regression: empty results AND blank err keeps the historical nil return"
+    (let [res {:value (pr-str
+                        {:results []
+                         :out ""
+                         :err ""
+                         :ns 'cljs.user})}]
+      (is (nil? (#'ops/parse-cljs-eval-response res))))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for issue #6: cljs-eval-wire must distinguish "form returned nil"
 ;; from "shadow returned a blank response with no error" — the latter used
 ;; to surface as the misleading {:ok? true :value nil}.
