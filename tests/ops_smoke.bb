@@ -25,6 +25,7 @@
 
 (require '[clojure.test :refer [deftest is testing run-tests]]
          '[clojure.java.io :as io]
+         '[clojure.set]
          '[clojure.string :as str])
 (import '(java.io File))
 
@@ -1015,6 +1016,90 @@
       (with-redefs [ops/cljs-eval (fn [& _] fake-resp)]
         (is (= {:counter 42} (#'ops/cljs-eval-value :app "(any-form)"))
             "wire shape unwrapped; existing callers see the inner value")))))
+
+;; ---------------------------------------------------------------------------
+;; Tests for rfp-gmkj: load-order topology check on runtime-submodule-files
+;;
+;; PR #5 fixed registrar.cljs being listed before ten-x-adapter.cljs in
+;; ops/runtime-submodule-files despite registrar :requireing ten-x-adapter.
+;; That ordering trips :shadow.build.resolve/missing-ns during the chunked
+;; source-ship and silently aborts the inject. These tests pin the
+;; invariant: every (:require re-frame-pair.runtime.X) in a submodule must
+;; appear at an earlier slot in the load-order list, and every .cljs file
+;; in scripts/re_frame_pair/runtime/ must be listed.
+;; ---------------------------------------------------------------------------
+
+(defn- runtime-file->ns
+  "\"ten_x_adapter.cljs\" -> 're-frame-pair.runtime.ten-x-adapter"
+  [filename]
+  (-> filename
+      (str/replace #"\.cljs$" "")
+      (str/replace "_" "-")
+      (->> (str "re-frame-pair.runtime.")
+           symbol)))
+
+(defn- read-ns-form
+  "Read the first top-level form of a CLJS file. Expected to be (ns ...)."
+  [path]
+  (with-open [rdr (java.io.PushbackReader. (io/reader (io/file path)))]
+    (read rdr)))
+
+(defn- runtime-requires
+  "Set of fully-qualified re-frame-pair.runtime.* namespaces required by
+   the given (ns ...) form. Skips :require-macros and other clauses."
+  [ns-form]
+  (let [require-clause (->> ns-form
+                            (filter #(and (seq? %) (= :require (first %))))
+                            first)
+        required       (->> (rest require-clause)
+                            (map (fn [r] (if (sequential? r) (first r) r))))]
+    (->> required
+         (filter symbol?)
+         (filter #(str/starts-with? (str %) "re-frame-pair.runtime."))
+         set)))
+
+(def ^:private runtime-submodule-dir
+  (io/file (System/getProperty "user.dir")
+           "scripts" "re_frame_pair" "runtime"))
+
+(deftest runtime-submodule-files-respects-require-graph
+  (testing "every (:require re-frame-pair.runtime.X) appears earlier in the load order"
+    (let [files      @#'ops/runtime-submodule-files
+          ns->slot   (into {} (map-indexed (fn [i f] [(runtime-file->ns f) i]) files))
+          violations (for [[i filename] (map-indexed vector files)
+                           :let [path    (io/file runtime-submodule-dir filename)
+                                 ns-name (runtime-file->ns filename)
+                                 deps    (runtime-requires (read-ns-form path))
+                                 mis     (filter (fn [d]
+                                                   (when-let [dep-slot (ns->slot d)]
+                                                     (>= dep-slot i)))
+                                                 deps)]
+                           :when (seq mis)]
+                       {:file                  filename
+                        :slot                  i
+                        :ns                    ns-name
+                        :requires-loaded-later (vec mis)})]
+      (is (empty? violations)
+          (str "Mis-ordered runtime submodules in scripts/ops.clj/runtime-submodule-files. "
+               "Move each :file to AFTER every ns in :requires-loaded-later:\n"
+               (str/join "\n" (map pr-str violations)))))))
+
+(deftest runtime-submodule-files-covers-every-cljs-in-runtime-dir
+  (testing "every .cljs in scripts/re_frame_pair/runtime/ is listed in runtime-submodule-files"
+    (let [on-disk (->> (.listFiles runtime-submodule-dir)
+                       (map #(.getName %))
+                       (filter #(str/ends-with? % ".cljs"))
+                       set)
+          listed  (set @#'ops/runtime-submodule-files)
+          missing (clojure.set/difference on-disk listed)
+          extra   (clojure.set/difference listed on-disk)]
+      (is (empty? missing)
+          (str "These submodule files exist on disk but are not listed in "
+               "ops/runtime-submodule-files (they will not be shipped on inject): "
+               (pr-str missing)))
+      (is (empty? extra)
+          (str "These names are in ops/runtime-submodule-files but the file does not exist: "
+               (pr-str extra))))))
 
 (let [{:keys [fail error]} (run-tests 'user)]
   (System/exit (if (zero? (+ fail error)) 0 1)))
