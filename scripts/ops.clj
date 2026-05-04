@@ -23,7 +23,9 @@
 ;;;; guessing.
 
 (ns ops
-  (:require [clojure.edn :as edn]
+  (:require [babashka.http-client :as http]
+            [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.reader :as tr]
@@ -151,6 +153,130 @@
               (contains? r "status") (update :status (fnil into #{}) (get r "status"))))
           {:out "" :err ""}
           responses))
+
+;; ---------------------------------------------------------------------------
+;; Version check (rfp-isvq) — surface :version + :version-check on discover
+;; so operators see when a newer release is available. Read package.json for
+;; the local version; hit GitHub's releases API for the latest. Cache the
+;; remote lookup for 24h to avoid hammering the API + leaking usage signal.
+;; Opt out via env var. Failure-tolerant: a network outage / rate limit /
+;; missing release just omits :version-check, never blocks discover.
+;; ---------------------------------------------------------------------------
+
+(def ^:private version-cache-ttl-ms (* 24 60 60 1000))
+(def ^:private github-releases-url
+  "https://api.github.com/repos/day8/re-frame-pair/releases?per_page=1")
+(def ^:private version-check-timeout-ms 3000)
+
+(def ^:private ops-clj-load-path
+  "Absolute path to ops.clj at load time. *file* is only bound while
+   load-file is running; capturing it here gives skill-root a stable
+   anchor regardless of the calling context (bb -e, REPL, etc.)."
+  *file*)
+
+(defn- skill-root
+  "ops.clj's containing project root — used to anchor reads of package.json."
+  []
+  (.. (io/file ops-clj-load-path) getAbsoluteFile getParentFile getParentFile))
+
+(defn- current-version
+  "Local skill version, read from package.json. Single source of truth per
+   RELEASING.md; .claude-plugin/plugin.json must match (release workflow
+   gates on it). Returns nil if package.json can't be read or doesn't
+   carry a version (e.g. running from a non-repo install layout)."
+  []
+  (try
+    (let [path (io/file (skill-root) "package.json")]
+      (when (.exists path)
+        (-> (slurp path) (json/parse-string true) :version)))
+    (catch Exception _ nil)))
+
+(defn- version-cache-file []
+  (io/file (or (System/getenv "XDG_CACHE_HOME")
+               (str (System/getProperty "user.home") "/.cache"))
+           "re-frame-pair" "version-check.edn"))
+
+(defn- read-version-cache
+  "Read the cached latest-version data if it exists and is fresher than
+   `version-cache-ttl-ms`. Returns the cached map or nil."
+  []
+  (try
+    (let [f (version-cache-file)]
+      (when (.exists f)
+        (let [{:keys [checked-at] :as data} (edn/read-string (slurp f))]
+          (when (and checked-at
+                     (< (- (System/currentTimeMillis) checked-at)
+                        version-cache-ttl-ms))
+            data))))
+    (catch Exception _ nil)))
+
+(defn- write-version-cache
+  "Persist `data` (already includes :checked-at) to the cache file.
+   Best-effort — failures (read-only filesystem, etc.) are swallowed."
+  [data]
+  (try
+    (let [f (version-cache-file)]
+      (.mkdirs (.getParentFile f))
+      (spit f (pr-str data)))
+    (catch Exception _ nil)))
+
+(defn- fetch-latest-release
+  "Hit GitHub releases API for the latest release of day8/re-frame-pair.
+   Returns {:latest <tag-without-v> :released <iso-date> :url <html-url>}
+   or nil on any failure (timeout, network, rate-limit, parse error,
+   empty release list). Uses /releases?per_page=1 instead of
+   /releases/latest because /latest excludes pre-releases — and the
+   project is in pre-release territory until v1.0."
+  []
+  (try
+    (let [resp     (http/get github-releases-url
+                             {:headers {"User-Agent" "re-frame-pair-version-check"
+                                        "Accept"     "application/vnd.github+json"}
+                              :timeout version-check-timeout-ms})
+          releases (json/parse-string (:body resp))
+          latest   (first releases)]
+      (when (map? latest)
+        {:latest   (str/replace (get latest "tag_name") #"^v" "")
+         :released (get latest "published_at")
+         :url      (get latest "html_url")}))
+    (catch Exception _ nil)))
+
+(defn- version-check
+  "Compare the local skill version to the latest GitHub release. Returns
+   a map suitable for splicing into discover's emit:
+
+       {:status   :current | :stale | :unknown
+        :current  \"0.1.0-beta.6\"
+        :latest   \"0.1.0-beta.7\"            ;; only when known
+        :released \"2026-05-04T11:19:47Z\"    ;; only when known
+        :changelog \"https://...\"}            ;; only when known
+
+   Returns nil entirely when:
+   - The opt-out env var `RE_FRAME_PAIR_SKIP_VERSION_CHECK` is set
+   - We can't read the local version (no package.json)
+
+   Failure modes that aren't outages of the local install (network down,
+   rate limit, etc.) surface as `:status :unknown` so the caller still
+   sees a structured result and the operator knows the check ran."
+  []
+  (when-not (System/getenv "RE_FRAME_PAIR_SKIP_VERSION_CHECK")
+    (when-let [current (current-version)]
+      (let [cached  (read-version-cache)
+            fresh   (when-not cached
+                      (when-let [data (fetch-latest-release)]
+                        (let [stamped (assoc data :checked-at
+                                             (System/currentTimeMillis))]
+                          (write-version-cache stamped)
+                          stamped)))
+            data    (or cached fresh)]
+        (cond-> {:current current}
+          data       (assoc :status   (if (= current (:latest data))
+                                        :current
+                                        :stale)
+                            :latest   (:latest data)
+                            :released (:released data)
+                            :changelog (:url data))
+          (nil? data) (assoc :status :unknown))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Config / env
@@ -873,14 +999,27 @@
         ;; produce nil. Probe failure is non-fatal; the original
         ;; try-and-see path handles that case.
         builds          (try (list-builds-on-port (read-port))
-                             (catch Exception _ nil))]
+                             (catch Exception _ nil))
+        ;; Compute version-check once at the top so every emit path
+        ;; (success and structured failure) carries :version and (when
+        ;; available) :version-check. Operators reporting bugs from a
+        ;; failure response need to know what version they're on.
+        ;; Returns nil only when opted out via env var or
+        ;; package.json is unreadable; cached for 24h.
+        vc              (version-check)
+        with-version    (fn [m]
+                          (cond-> m
+                            (:current vc) (assoc :version (:current vc))
+                            (some? vc)    (assoc :version-check
+                                                 (dissoc vc :current))))]
     (if (ambiguous-build? explicit-build? build-id builds)
-      (emit {:ok? false
-             :reason         :ambiguous-build
-             :candidates     (vec builds)
-             :picked-default build-id
-             :hint (format "Default build %s is not active on this nREPL port. Pass --build=<id> or set SHADOW_CLJS_BUILD_ID. Active builds: %s"
-                           build-id (str/join ", " (map str builds)))})
+      (emit (with-version
+              {:ok? false
+               :reason         :ambiguous-build
+               :candidates     (vec builds)
+               :picked-default build-id
+               :hint (format "Default build %s is not active on this nREPL port. Pass --build=<id> or set SHADOW_CLJS_BUILD_ID. Active builds: %s"
+                             build-id (str/join ", " (map str builds)))}))
     (try
       (let [health      (inject-runtime! build-id {:capture? capture?})
             version-err (version-failure health)
@@ -896,37 +1035,41 @@
             (flush)))
         (cond
           (not (:ok? health))
-          (emit health)
+          (emit (with-version health))
 
           (not (:ten-x-loaded? health))
-          (emit {:ok? false :reason :ns-not-loaded :missing :re-frame-10x
-                 :hint "Add re-frame-10x to your dev deps and preloads."})
+          (emit (with-version
+                  {:ok? false :reason :ns-not-loaded :missing :re-frame-10x
+                   :hint "Add re-frame-10x to your dev deps and preloads."}))
 
           (not (:trace-enabled? health))
-          (emit {:ok? false :reason :trace-enabled-false
-                 :hint "Set re-frame.trace.trace-enabled? to true via :closure-defines."})
+          (emit (with-version
+                  {:ok? false :reason :trace-enabled-false
+                   :hint "Set re-frame.trace.trace-enabled? to true via :closure-defines."}))
 
           (some? version-err)
-          (emit version-err)
+          (emit (with-version version-err))
 
           :else
-          (emit (cond-> health
-                  true                          (assoc :ok? true
-                                                       :build-id build-id
-                                                       :startup-context context)
-                  (not capture?)                (assoc :capture-skipped? true)
-                  (not (:re-com-debug? health)) (assoc :warning :re-com-debug-disabled
-                                                       :note    "DOM ↔ source ops will degrade; otherwise functional.")
-                  ;; Multi-build wins as the structured :warning when
-                  ;; both apply — it's likely the cause of any other
-                  ;; surprises (wrong build picked).
-                  multi?                        (assoc :warning :multiple-builds
-                                                       :picked  build-id
-                                                       :others  (vec (remove #(= % build-id) builds)))))))
+          (emit (with-version
+                  (cond-> health
+                    true                          (assoc :ok? true
+                                                         :build-id build-id
+                                                         :startup-context context)
+                    (not capture?)                (assoc :capture-skipped? true)
+                    (not (:re-com-debug? health)) (assoc :warning :re-com-debug-disabled
+                                                         :note    "DOM ↔ source ops will degrade; otherwise functional.")
+                    ;; Multi-build wins as the structured :warning when
+                    ;; both apply — it's likely the cause of any other
+                    ;; surprises (wrong build picked).
+                    multi?                        (assoc :warning :multiple-builds
+                                                         :picked  build-id
+                                                         :others  (vec (remove #(= % build-id) builds))))))))
       (catch Exception e
-        (emit {:ok? false
-               :reason (or (:reason (ex-data e)) :unknown)
-               :message (.getMessage e)}))))))
+        (emit (with-version
+                {:ok? false
+                 :reason (or (:reason (ex-data e)) :unknown)
+                 :message (.getMessage e)})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Subcommand: eval

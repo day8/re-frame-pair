@@ -62,7 +62,19 @@
                                           "with-redefs (see "
                                           "discover-emits-unsupported-build-tool-when-shadow-absent "
                                           "for a pattern).")
-                                     (assoc extra :reason reason))))]
+                                     (assoc extra :reason reason))))
+                  ;; Suppress live HTTP + cache I/O from the version-check
+                  ;; (rfp-isvq) in every test. discover invokes
+                  ;; version-check at the top, so without these mocks every
+                  ;; discover-touching test would hit api.github.com (slow,
+                  ;; network-flaky, rate-limited) and read/write a real
+                  ;; cache file. Mocking the I/O primitives — not the
+                  ;; orchestrator — leaves version-check itself testable:
+                  ;; the dedicated `version-check-*` tests below override
+                  ;; these with controlled values.
+                  ops/fetch-latest-release (fn [] nil)
+                  ops/read-version-cache   (fn [] nil)
+                  ops/write-version-cache  (fn [_] nil)]
       (test-fn))))
 
 ;; ---------------------------------------------------------------------------
@@ -1075,6 +1087,132 @@
       (with-redefs [ops/cljs-eval (fn [& _] fake-resp)]
         (is (= {:counter 42} (#'ops/cljs-eval-value :app "(any-form)"))
             "wire shape unwrapped; existing callers see the inner value")))))
+
+;; ---------------------------------------------------------------------------
+;; Tests for rfp-isvq: discover surfaces :version + :version-check.
+;; ---------------------------------------------------------------------------
+
+(deftest current-version-reads-package-json
+  (testing "current-version returns the version from the project's package.json"
+    (let [v (#'ops/current-version)]
+      (is (string? v))
+      (is (re-matches #"\d+\.\d+\.\d+(-[a-z]+\.\d+)?" v)
+          "version is a recognizable semver string"))))
+
+(deftest version-check-nil-when-no-current-version
+  (testing "no package.json (or unreadable) → version-check returns nil entirely"
+    (with-redefs [ops/current-version      (fn [] nil)
+                  ;; If current-version is nil, fetch should NEVER fire —
+                  ;; we have nothing to compare against, no point in the
+                  ;; round-trip.
+                  ops/fetch-latest-release (fn [] (throw (ex-info "should-not-fetch" {})))]
+      (is (nil? (#'ops/version-check))))))
+
+(deftest version-check-status-current-when-versions-match
+  (testing "local version matches latest GitHub release → :status :current"
+    (with-redefs [ops/current-version      (fn [] "0.1.0-beta.6")
+                  ops/read-version-cache   (fn [] nil)
+                  ops/fetch-latest-release (fn []
+                                             {:latest "0.1.0-beta.6"
+                                              :released "2026-05-04T11:19:47Z"
+                                              :url "https://example/v0.1.0-beta.6"})
+                  ops/write-version-cache  (fn [_] nil)]
+      (let [vc (#'ops/version-check)]
+        (is (= :current (:status vc)))
+        (is (= "0.1.0-beta.6" (:current vc)))
+        (is (= "0.1.0-beta.6" (:latest vc)))))))
+
+(deftest version-check-status-stale-when-versions-differ
+  (testing "local version older than latest GitHub release → :status :stale"
+    (with-redefs [ops/current-version      (fn [] "0.1.0-beta.6")
+                  ops/read-version-cache   (fn [] nil)
+                  ops/fetch-latest-release (fn []
+                                             {:latest "0.1.0-beta.7"
+                                              :released "2026-06-01T00:00:00Z"
+                                              :url "https://example/v0.1.0-beta.7"})
+                  ops/write-version-cache  (fn [_] nil)]
+      (let [vc (#'ops/version-check)]
+        (is (= :stale (:status vc)))
+        (is (= "0.1.0-beta.6" (:current vc)))
+        (is (= "0.1.0-beta.7" (:latest vc)))
+        (is (str/includes? (:changelog vc) "v0.1.0-beta.7"))))))
+
+(deftest version-check-status-unknown-when-fetch-fails
+  (testing "fetch-latest-release returns nil (network down, rate-limited, etc.) → :status :unknown"
+    (with-redefs [ops/current-version      (fn [] "0.1.0-beta.6")
+                  ops/read-version-cache   (fn [] nil)
+                  ops/fetch-latest-release (fn [] nil)]
+      (let [vc (#'ops/version-check)]
+        (is (= :unknown (:status vc)))
+        (is (= "0.1.0-beta.6" (:current vc)))
+        (is (nil? (:latest vc)))
+        (is (nil? (:changelog vc)))))))
+
+(deftest version-check-uses-cache-when-fresh
+  (testing "fresh cache hit skips the network fetch"
+    (let [fetch-called? (atom false)]
+      (with-redefs [ops/current-version      (fn [] "0.1.0-beta.6")
+                    ops/read-version-cache   (fn []
+                                               {:latest "0.1.0-beta.6"
+                                                :released "2026-05-04T11:19:47Z"
+                                                :url "https://example/v0.1.0-beta.6"
+                                                :checked-at (System/currentTimeMillis)})
+                    ops/fetch-latest-release (fn [] (reset! fetch-called? true) nil)]
+        (let [vc (#'ops/version-check)]
+          (is (= :current (:status vc)))
+          (is (false? @fetch-called?)
+              "must NOT hit network when cache is fresh"))))))
+
+(deftest discover-emit-includes-version-and-check
+  (testing "discover's success-path emit carries :version and :version-check"
+    (let [emitted (atom nil)]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/read-port              (fn [] 8777)
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:app])
+                    ops/inject-runtime!        (fn [_build-id _opts]
+                                                 {:ok? true
+                                                  :ten-x-loaded? true
+                                                  :ten-x-mounted? true
+                                                  :trace-enabled? true
+                                                  :re-com-debug? true
+                                                  :versions {:by-dep {}}})
+                    ops/startup-context        (fn [_build-id]
+                                                 {:app-db {} :recent-events []})
+                    ops/version-check          (fn []
+                                                 {:current  "0.1.0-beta.6"
+                                                  :status   :stale
+                                                  :latest   "0.1.0-beta.7"
+                                                  :released "2026-06-01T00:00:00Z"
+                                                  :changelog "https://example/v0.1.0-beta.7"})
+                    ops/emit                   (fn [m] (reset! emitted m))]
+        (#'ops/discover [])
+        (is (= "0.1.0-beta.6" (:version @emitted))
+            ":version is the local version, lifted out of :current")
+        (is (= :stale (-> @emitted :version-check :status)))
+        (is (= "0.1.0-beta.7" (-> @emitted :version-check :latest)))
+        (is (nil? (-> @emitted :version-check :current))
+            ":current is removed from :version-check (it's already :version)")))))
+
+(deftest discover-emit-includes-version-on-failure-paths-too
+  (testing "version surface is also present on a failed discover (e.g. :ns-not-loaded)"
+    (let [emitted (atom nil)]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/read-port              (fn [] 8777)
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:app])
+                    ops/inject-runtime!        (fn [_build-id _opts]
+                                                 {:ok? true
+                                                  :ten-x-loaded? false
+                                                  :trace-enabled? true})
+                    ops/startup-context        (fn [_build-id] {})
+                    ops/version-check          (fn [] {:current "0.1.0-beta.6"
+                                                       :status :current})
+                    ops/emit                   (fn [m] (reset! emitted m))]
+        (#'ops/discover [])
+        (is (= :ns-not-loaded (:reason @emitted)) "still emits the failure reason")
+        (is (= "0.1.0-beta.6" (:version @emitted))
+            "operator reporting a bug always sees their version")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests for issue #14: refuse non-shadow-cljs nREPLs early with a structured
