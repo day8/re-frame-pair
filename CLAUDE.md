@@ -1,5 +1,9 @@
 # Project Instructions for AI Agents
 
+> **Audience: Claudes maintaining the re-frame-pair skill itself.**
+>
+> If you are using the skill against a host re-frame app, **stop reading this file** — the operator-facing entry point is [`SKILL.md`](SKILL.md), and detail-on-demand lives under [`docs/skill/`](docs/skill/). The instructions below (Beads workflow, mandatory `git push` session-completion, the fixture integration loop) apply to skill development only and will be wrong if applied to a host project.
+
 This file provides instructions and context for AI coding agents working on this project. AGENTS.md is a thin pointer to this file; everything authoritative lives here.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->

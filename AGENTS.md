@@ -1,5 +1,9 @@
 # Agent Instructions
 
+> **Audience: agents maintaining the re-frame-pair skill itself.**
+>
+> If you are using the skill against a host re-frame app, the operator-facing entry point is [`SKILL.md`](SKILL.md) — read that, not this. The instructions referenced below (beads workflow, mandatory `git push` session-completion, fixture integration testing) apply to skill development only and will misfire in a host project.
+
 **Canonical instructions are in [`CLAUDE.md`](CLAUDE.md).** Read that file for build/test commands, fixture integration testing, beads workflow, session-completion rules, and shell-command non-interactivity tips.
 
 This file exists because `AGENTS.md` is a convention several AI coding tools look for; it intentionally does not duplicate content. If you've found inconsistencies between this file and CLAUDE.md, CLAUDE.md wins.
