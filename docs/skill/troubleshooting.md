@@ -32,6 +32,24 @@ or set `SHADOW_CLJS_BUILD_ID`.
 
 Ops auto-reinject after browser refresh. Responses may carry `:reinjected? true`; that is informational, not an error.
 
+## Chunked-Inject Failures
+
+Symptom cluster — usually appearing together after a successful nREPL connect:
+
+- `discover-app.sh` returns blank or `nil`.
+- `eval-cljs.sh` returns `{:ok? true, :value nil}` for every form, including trivial ones like `(+ 1 2)`.
+- shadow-cljs's watch process logs `:tag :shadow.build.resolve/missing-ns` for a `re-frame-pair.runtime.*` namespace.
+
+This is **not a host classpath problem** — the source files exist on the skill side. The chunked inject ships submodules one form at a time over nREPL, and shadow-cljs's `:require` resolution at REPL time only sees namespaces that have already been shipped in this session. If submodule X requires submodule Y, X must appear *after* Y in `runtime-submodule-files` (`scripts/ops.clj`).
+
+Diagnosis:
+
+1. Read the failing namespace's `(:require ...)` form.
+2. Check its position in `runtime-submodule-files` against every required `re-frame-pair.runtime.*` ns it lists.
+3. Each required ns must appear at an earlier slot.
+
+The `runtime-submodule-files-respects-require-graph` test (`tests/ops_smoke.bb`) catches this class of bug at `npm test:ops` time.
+
 ## Trace Shape Mismatches
 
 On newer re-frame builds, `re-frame.core/tag-schema` describes trace tags. Runtime validation can be enabled with:
