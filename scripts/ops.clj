@@ -426,6 +426,20 @@
   ([conn build-id form-str opts]
    (let [res    (cljs-eval conn build-id form-str opts)
          parsed (parse-cljs-eval-response res)]
+     ;; Distinguish "form returned nil" from "shadow returned an
+     ;; empty response with no error". A legitimate nil result is
+     ;; encoded as :value "nil" (the EDN string), not as a blank
+     ;; :value. Blank :value with no :err and no :ex is a transport-
+     ;; or wrap-level failure that previously surfaced as the
+     ;; misleading {:ok? true :value nil} (issue #6).
+     (when (and (nil? parsed)
+                (str/blank? (str (:value res)))
+                (str/blank? (str (:err res)))
+                (nil? (:ex res)))
+       (throw (ex-info "shadow-cljs returned an empty cljs-eval response"
+                       {:reason :cljs-eval-empty
+                        :raw-response res
+                        :hint  "shadow-cljs's nREPL response carried no :value, :err, or :ex — neither a returned value nor an error. Common causes: a shadow-cljs version returning a value shape parse-cljs-eval-response doesn't recognize; the wire/return! wrapper evaluated but produced no transport output; the runtime ns is partially loaded (sentinel may say present but wire fns aren't bound). Re-run scripts/discover-app.sh to confirm runtime health."})))
      (if (wire-shape? parsed)
        (cond-> {:value                 (:rfp.wire/value parsed)
                 :rfp.wire/cursor       (:rfp.wire/cursor parsed)

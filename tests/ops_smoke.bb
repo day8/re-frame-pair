@@ -1024,6 +1024,48 @@
             "wire shape unwrapped; existing callers see the inner value")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #6: cljs-eval-wire must distinguish "form returned nil"
+;; from "shadow returned a blank response with no error" — the latter used
+;; to surface as the misleading {:ok? true :value nil}.
+;; ---------------------------------------------------------------------------
+
+(deftest cljs-eval-wire-throws-on-blank-no-error-response
+  (testing "blank :value with no :err and no :ex throws :cljs-eval-empty (eval-op surfaces as {:ok? false ...})"
+    (with-redefs [ops/cljs-eval (fn [& _] {:value "" :err "" :ex nil :status #{:done}})]
+      (let [thrown (try (#'ops/cljs-eval-wire nil :app "(+ 1 2)" {})
+                        (catch clojure.lang.ExceptionInfo e
+                          {:msg (.getMessage e) :data (ex-data e)}))]
+        (is (= :cljs-eval-empty (-> thrown :data :reason))
+            ":cljs-eval-empty distinguishes empty from legitimate-nil")
+        (is (contains? (:data thrown) :raw-response)
+            ":raw-response carried for debugging")
+        (is (str/includes? (-> thrown :data :hint) "discover-app"))))))
+
+(deftest cljs-eval-wire-passes-through-legitimate-nil-value
+  (testing "shadow returning :value \"nil\" (the EDN string) is a real nil result, not an empty response"
+    (with-redefs [ops/cljs-eval (fn [& _] {:value (pr-str {:results [(pr-str nil)]})
+                                            :status #{:done}})]
+      (let [result (#'ops/cljs-eval-wire nil :app "(prn :hi)" {})]
+        (is (nil? (:value result)) "legitimate nil passes through as :value nil")
+        (is (true? (:rfp.wire/value-fits? result)) "no error surfaced")))))
+
+(deftest cljs-eval-wire-blank-with-err-keeps-existing-eval-error-path
+  (testing "blank :value WITH :err set is an eval error, not :cljs-eval-empty (parse-cljs-eval-response throws first)"
+    (with-redefs [ops/cljs-eval (fn [& _] {:value "" :err "" :ex "compile error somewhere"})]
+      (let [thrown (try (#'ops/cljs-eval-wire nil :app "(broken)" {})
+                        (catch clojure.lang.ExceptionInfo e
+                          (ex-data e)))]
+        (is (= :eval-error (:reason thrown)) "throws :eval-error from parse-cljs-eval-response, not :cljs-eval-empty")))))
+
+(deftest cljs-eval-wire-blank-with-only-err-string-still-throws-cljs-eval-empty
+  (testing "blank :value with empty :err string but no :ex falls into :cljs-eval-empty (the headline #6 shape)"
+    (with-redefs [ops/cljs-eval (fn [& _] {:value "" :err nil :ex nil :status #{:done}})]
+      (let [thrown (try (#'ops/cljs-eval-wire nil :app "(+ 1 2)" {})
+                        (catch clojure.lang.ExceptionInfo e
+                          (ex-data e)))]
+        (is (= :cljs-eval-empty (:reason thrown)))))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for issue #7: inject failures must surface as :inject-failed, not
 ;; pass through silently as nil from downstream ops.
 ;; ---------------------------------------------------------------------------
