@@ -14,6 +14,40 @@ versioning aims at [SemVer](https://semver.org/) once the skill leaves beta.
 
 Nothing yet.
 
+## [0.1.0-beta.6] - 2026-05-04
+
+### Fixed
+
+- **`eval-cljs.sh` no longer silently returns `{:ok? true :value nil}` for valid forms.** Shadow's nREPL response wraps its real result inside the top-level `:value` field as a serialized map (`{:results [...] :err "..." :ns ...}`); when `:results` was empty, the actual error sat in the inner `:err` and the parser dropped it. The caller saw `:ok? true :value nil` — a false trust signal — for forms like `(+ 1 2)` whenever the runtime wasn't actually attached. Two complementary fixes:
+  - `parse-cljs-eval-response` now surfaces buried inner `:err`. `"No available JS runtime."` becomes `{:reason :browser-runtime-not-attached :hint "Open the app in a browser tab... If a tab is already open, hard-refresh it (Ctrl+Shift+R)..."}`. Compile warnings (`:undeclared-ns`, `:undeclared-var`) become `{:reason :cljs-eval-error :err <verbatim text>}`.
+  - `cljs-eval-wire` defensive layer: top-level `:value` blank with no `:err` and no `:ex` becomes `{:reason :cljs-eval-empty :raw-response <res>}` for shadow shapes the parser doesn't classify yet.
+
+  Closes [#6](https://github.com/day8/re-frame-pair/issues/6).
+
+- **Inject failures no longer silently leave the runtime ns absent.** `chunked-inject!` reported success when shadow's recompile errors (e.g. `:shadow.build.resolve/missing-ns`) didn't match the legacy `Syntax error|CompilerException|FileNotFoundException` regex; downstream ops then returned bare `nil`. Two fixes:
+  - `inject-failure` now also matches `:shadow.build.resolve/missing-ns` and `The required namespace ... is not available` patterns, surfacing as `{:reason :inject-failed :stage :compile :hint ...}` with a pointer at `npm test:ops`'s load-order topology check.
+  - `ensure-injected!` re-probes the runtime sentinel after the chunked ship + health call. If the sentinel still says "not injected" despite no recognized error, dies `{:reason :inject-failed :stage :verify :hint "...check the watch terminal..."}`. Catch-all for any silent-failure shape the classifier hasn't seen.
+
+  Closes [#7](https://github.com/day8/re-frame-pair/issues/7).
+
+- **`discover-app.sh` no longer silently picks a default build that isn't active.** Pre-flight probe of `list-builds-on-port` — when no `--build=` is given AND no `SHADOW_CLJS_BUILD_ID` is set AND the default build (`:app`) isn't in the candidate list, returns `{:reason :ambiguous-build :candidates [...] :picked-default :app :hint "Pass --build=<id>..."}` instead of attempting an inject that would fail or return nil. Existing multi-build warning (when the default IS in the candidate list) is preserved.
+
+  Closes [#9](https://github.com/day8/re-frame-pair/issues/9).
+
+- **`discover-app.sh` no longer crashes mid-flight on non-shadow-cljs builds.** Pre-flight probe for `shadow.cljs.devtools.api`. On figwheel-main / lein-cljsbuild / vanilla cljs nREPLs, returns `{:reason :unsupported-build-tool :hint "...currently requires shadow-cljs..."}` instead of the previous misleading `:nrepl-port-not-found` or undefined-ns crash on the first shadow API call. SKILL.md gains a top-of-body callout naming the shadow-cljs requirement explicitly.
+
+  Closes [#14](https://github.com/day8/re-frame-pair/issues/14).
+
+### Added
+
+- **`:ten-x-mounted?` flag** in the health response, distinct from `:ten-x-loaded?`. The latter means "the JS namespace is loaded into the bundle"; the former is a DOM probe for re-frame-10x's mount node `<div id="--re-frame-10x--">`. They're independent — `loaded? true` with `mounted? false` is a real failure mode (most commonly: dev `<script>` tag in `<head>` without `defer`, so `document.body` is null at preload time and the panel never renders). Diagnostic recipe in `docs/skill/troubleshooting.md`.
+
+  Closes [#10](https://github.com/day8/re-frame-pair/issues/10).
+
+### Changed
+
+- **Recommended `re-frame-10x` version bumped to `1.12.1`.** That release ships an auto-detecting default preload — consumers on React 18 (the typical configuration today) no longer need `:preloads [day8.re-frame-10x.preload.react-18]` explicitly to silence the React-17/18 mismatch warning or React's own `ReactDOM.render is no longer supported` deprecation. The bare `day8.re-frame-10x.preload` does the right thing on React 17 and React 18. Both the `Install` table and the copy-paste deps block in README point at it.
+
 ## [0.1.0-beta.5] - 2026-04-30
 
 ### Fixed
