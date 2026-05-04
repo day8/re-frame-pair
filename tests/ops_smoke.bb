@@ -193,18 +193,21 @@
     (let [seen    (atom nil)
           emitted (atom nil)]
       (with-redefs [ops/ensure-port!         (fn [] true)
-                    ops/inject-runtime!      (fn [_build-id opts]
-                                               (reset! seen opts)
-                                               {:ok? true
-                                                :ten-x-loaded? true
-                                                :trace-enabled? true
-                                                :re-com-debug? true
-                                                :versions {:by-dep {}}})
-                    ops/startup-context      (fn [_build-id]
-                                               {:app-db {} :recent-events []})
-                    ops/read-port            (fn [] 8777)
-                    ops/list-builds-on-port  (fn [_] [:app])
-                    ops/emit                 (fn [m] (reset! emitted m))]
+                    ops/inject-runtime!        (fn [_build-id opts]
+                                                 (reset! seen opts)
+                                                 {:ok? true
+                                                  :ten-x-loaded? true
+                                                  :trace-enabled? true
+                                                  :re-com-debug? true
+                                                  :versions {:by-dep {}}})
+                    ops/startup-context        (fn [_build-id]
+                                                 {:app-db {} :recent-events []})
+                    ops/read-port              (fn [] 8777)
+                    ;; See discover-emits-ambiguous-build-when-default-not-active
+                    ;; for why this mock is required (#14 probe).
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:app])
+                    ops/emit                   (fn [m] (reset! emitted m))]
         (#'ops/discover ["--no-capture"])
         (is (= {:capture? false} @seen))
         (is (true? (:capture-skipped? @emitted)))))))
@@ -212,20 +215,23 @@
 (deftest discover-emits-startup-context
   (testing "successful discover includes current app-db + recent event orientation"
     (let [emitted (atom nil)]
-      (with-redefs [ops/ensure-port!         (fn [] true)
-                    ops/inject-runtime!      (fn [_build-id _opts]
-                                               {:ok? true
-                                                :ten-x-loaded? true
-                                                :trace-enabled? true
-                                                :re-com-debug? true
-                                                :versions {:by-dep {}}})
-                    ops/startup-context      (fn [build-id]
-                                               {:app-db {:screen :checkout}
-                                                :recent-events [{:id 1 :event [:initialize]}]
-                                                :build-id build-id})
-                    ops/read-port            (fn [] 8777)
-                    ops/list-builds-on-port  (fn [_] [:app])
-                    ops/emit                 (fn [m] (reset! emitted m))]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/inject-runtime!        (fn [_build-id _opts]
+                                                 {:ok? true
+                                                  :ten-x-loaded? true
+                                                  :trace-enabled? true
+                                                  :re-com-debug? true
+                                                  :versions {:by-dep {}}})
+                    ops/startup-context        (fn [build-id]
+                                                 {:app-db {:screen :checkout}
+                                                  :recent-events [{:id 1 :event [:initialize]}]
+                                                  :build-id build-id})
+                    ops/read-port              (fn [] 8777)
+                    ;; See discover-emits-ambiguous-build-when-default-not-active
+                    ;; for why this mock is required (#14 probe).
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:app])
+                    ops/emit                   (fn [m] (reset! emitted m))]
         (#'ops/discover [])
         (is (= {:app-db {:screen :checkout}
                 :recent-events [{:id 1 :event [:initialize]}]
@@ -1252,11 +1258,19 @@
   (testing "discover refuses to inject and emits structured :ambiguous-build response"
     (let [emitted (atom nil)
           inject-called? (atom false)]
-      (with-redefs [ops/ensure-port!         (fn [] true)
-                    ops/read-port            (fn [] 8777)
-                    ops/list-builds-on-port  (fn [_] [:karma-test :browser-test :mws2prp])
-                    ops/inject-runtime!      (fn [& _] (reset! inject-called? true) {})
-                    ops/emit                 (fn [m] (reset! emitted m))]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/read-port              (fn [] 8777)
+                    ;; #14 added a shadow-cljs-availability probe in
+                    ;; discover before the ambiguous-build check. Mock
+                    ;; it true here so the test exercises the
+                    ;; ambiguous-build path, not the unsupported-build
+                    ;; path. Without this mock the real probe runs
+                    ;; against a non-existent nREPL and the unmocked
+                    ;; die calls System/exit, killing the JVM mid-test.
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:karma-test :browser-test :mws2prp])
+                    ops/inject-runtime!        (fn [& _] (reset! inject-called? true) {})
+                    ops/emit                   (fn [m] (reset! emitted m))]
         (#'ops/discover [])
         (is (false? @inject-called?) "must NOT call inject-runtime! when default is not active")
         (is (= false (:ok? @emitted)))
