@@ -23,7 +23,7 @@
 ;;;; not fire when load-file'd below; npm test:ops sets it via the
 ;;;; npm-script env, but a direct bb invocation must set it inline.
 
-(require '[clojure.test :refer [deftest is testing run-tests]]
+(require '[clojure.test :refer [deftest is testing run-tests use-fixtures]]
          '[clojure.java.io :as io]
          '[clojure.set]
          '[clojure.string :as str])
@@ -33,6 +33,53 @@
 ;; test environment so the script dispatcher does not auto-run.
 (spit "/dev/null" "") ;; touch fs to ensure cwd is sane
 (load-file (str (System/getProperty "user.dir") "/scripts/ops.clj"))
+
+;; Safety net for unmocked `ops/die`. die normally calls
+;; `(emit ...)` then `(System/exit 1)` — fine in production, fatal
+;; in a test runner. Any test that exercises a code path which
+;; eventually calls die without redefining it would silently kill
+;; the JVM mid-suite: the failing test produces no assertion
+;; output beyond `Testing user`, every subsequent test never runs,
+;; and CI shows only `##[error]Process completed with exit code 1`.
+;; CI was broken for six commits before commit 687dfc8 diagnosed
+;; this. This fixture replaces ops/die at every test boundary so
+;; any un-redef'd call throws cleanly — clojure.test reports it as
+;; an :error against the offending test, the suite keeps running,
+;; and the message names the fix.
+;;
+;; Tests that legitimately exercise die (e.g.
+;; discover-emits-unsupported-build-tool-when-shadow-absent) keep
+;; redefining it with their own `with-redefs` — that's dynamically
+;; scoped and wins inside the test body.
+(use-fixtures :each
+  (fn [test-fn]
+    (with-redefs [ops/die (fn [reason & {:as extra}]
+                            (throw (ex-info
+                                     (str "ops/die was called from a test without a "
+                                          "with-redefs guard. die calls (System/exit 1) "
+                                          "in production; this would have killed the "
+                                          "JVM mid-suite. Add `ops/die` to your "
+                                          "with-redefs (see "
+                                          "discover-emits-unsupported-build-tool-when-shadow-absent "
+                                          "for a pattern).")
+                                     (assoc extra :reason reason))))]
+      (test-fn))))
+
+;; ---------------------------------------------------------------------------
+;; Meta — assert the safety fixture above actually catches an unmocked die.
+;; If this ever fails, the fixture has drifted and the next regression like
+;; the one diagnosed in 687dfc8 will silently kill the JVM in CI again.
+;; ---------------------------------------------------------------------------
+
+(deftest die-safety-fixture-catches-unmocked-call
+  (testing "an unmocked ops/die throws ex-info (does not call System/exit)"
+    (let [thrown (try (#'ops/die :sentinel :hint "test")
+                      (catch clojure.lang.ExceptionInfo e
+                        {:msg (.getMessage e) :data (ex-data e)}))]
+      (is (= :sentinel (-> thrown :data :reason))
+          ":reason from the call carried through the throw")
+      (is (str/includes? (-> thrown :msg) "with-redefs")
+          ":message names the fix (add ops/die to with-redefs)"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests for rfp-r5s D: multi-build awareness in discover-app.sh
