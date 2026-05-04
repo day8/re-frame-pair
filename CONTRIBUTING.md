@@ -106,6 +106,10 @@ A `:reinjected? true` flag on a response means the runtime was re-shipped becaus
 - Refresh or open the browser (auto-reinject handles refreshes)
 - Wait for the operator to click UI elements — dispatch the event yourself via `eval-cljs.sh '(re-frame.core/dispatch-sync [:event/id args])'`
 
+## Cutting a Release
+
+> **Read [`RELEASING.md`](RELEASING.md) before you tag.** A release is more than a commit + tag — at minimum it requires the version bumped *in lockstep across two files* (`package.json` and `.claude-plugin/plugin.json`; the release workflow gates on the match) and the `CHANGELOG.md` `[Unreleased]` section promoted to the new version. Skipping any of these silently produces a broken release. The full checklist + tag-format rules + rollback path live in `RELEASING.md`.
+
 ## Architecture Overview
 
 _Add a brief overview of your project architecture_
