@@ -154,6 +154,31 @@
                                       :sub-ran :auth/user}
                                      epoch))))))
 
+(deftest subs-live-prefers-upstream-fn
+  (testing "subs-live calls re-frame.core/live-query-vs when available; skips the cache-shape-coupled walker"
+    (let [walk-called? (atom false)]
+      (with-redefs [registrar/live-query-vs-fn (fn [] (fn [] [[:bbb/x] [:aaa/y] [:ccc/z]]))
+                    registrar/extract-query-vs (fn [_]
+                                                 (reset! walk-called? true)
+                                                 [:should-not-be-seen])]
+        (let [result (registrar/subs-live)]
+          (is (= [[:aaa/y] [:bbb/x] [:ccc/z]] result)
+              "upstream fn's output, sorted by str-coercion of the query-v")
+          (is (false? @walk-called?)
+              "extract-query-vs (the legacy fallback) must NOT fire when upstream fn is available"))))))
+
+(deftest subs-live-falls-back-to-cache-walker
+  (testing "subs-live calls extract-query-vs when live-query-vs-fn returns nil (re-frame predates rf-5rpc)"
+    (let [walk-called? (atom false)]
+      (with-redefs [registrar/live-query-vs-fn (fn [] nil)
+                    registrar/extract-query-vs (fn [_]
+                                                 (reset! walk-called? true)
+                                                 [[:fallback/q]])]
+        (let [result (registrar/subs-live)]
+          (is (= [[:fallback/q]] result))
+          (is (true? @walk-called?)
+              "legacy walker is the fallback when re-frame doesn't expose live-query-vs"))))))
+
 (deftest subs-live-cache-key-extraction
   (testing "extracts :re-frame/query-v from each cache-key map"
     (let [k1 [{:re-frame/query-v   [:cart/total]
