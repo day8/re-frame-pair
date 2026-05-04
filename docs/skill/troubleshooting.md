@@ -32,6 +32,22 @@ or set `SHADOW_CLJS_BUILD_ID`.
 
 Ops auto-reinject after browser refresh. Responses may carry `:reinjected? true`; that is informational, not an error.
 
+## 10x Loaded but Panel Invisible
+
+Symptom — `discover-app.sh` reports:
+
+```clj
+{:ten-x-loaded?  true
+ :ten-x-mounted? false
+ ...}
+```
+
+The 10x namespace compiled and loaded fine, but its DOM mount node `<div id="--re-frame-10x--">` is missing. Most common cause: the dev `<script>` tag is in `<head>` without `defer`, so when 10x's preload runs `(.appendChild js/document.body container)` the body element doesn't exist yet, the call throws silently, and the panel never becomes visible.
+
+Fix in the host project: move the `<script src=".../app.js">` to the end of `<body>`, or add `defer` to the `<head>` script tag.
+
+`:ten-x-mounted?` is independent of `:ten-x-loaded?` — never cross 10x off the hypothesis list when only `:ten-x-loaded?` is true.
+
 ## Chunked-Inject Failures
 
 Symptom cluster — usually appearing together after a successful nREPL connect:

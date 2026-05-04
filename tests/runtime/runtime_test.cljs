@@ -1252,6 +1252,27 @@
       (is (boolean? (:native-epoch-cb? h)))
       (is (boolean? (:native-trace-cb? h))))))
 
+(deftest health-reports-ten-x-mounted-flag
+  (testing "health surfaces :ten-x-mounted? distinct from :ten-x-loaded?"
+    (let [h (rt/health)]
+      (is (contains? h :ten-x-mounted?)
+          ":ten-x-mounted? key is present even when its value is nil/false")
+      (is (contains? h :ten-x-loaded?)
+          ":ten-x-loaded? remains for back-compat"))))
+
+(deftest ten-x-mounted-pred-distinguishes-loaded-from-mounted
+  (testing "ten-x-mounted? probes the DOM mount node, not the loaded ns"
+    (with-redefs [ten-x/ten-x-loaded? (fn [] true)]
+      ;; In the node test env there is no js/document — the probe
+      ;; must return nil (or false), not throw, even when 10x's ns
+      ;; is loaded. This pins the contract that 'loaded' and 'mounted'
+      ;; are independent signals.
+      (is (or (nil? (ten-x/ten-x-mounted?))
+              (false? (ten-x/ten-x-mounted?)))
+          "no DOM ⇒ ten-x-mounted? is falsy regardless of ten-x-loaded?")
+      (is (true? (ten-x/ten-x-loaded?))
+          "ten-x-loaded? is independently true via the redef"))))
+
 (deftest health-can-skip-capture-installs
   (testing "discover --no-capture can avoid console and native trace overhead"
     (let [installed (atom [])]

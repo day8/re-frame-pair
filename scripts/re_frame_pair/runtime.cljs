@@ -82,6 +82,7 @@
 (def ten-x-app-db-ratom  ten-x/ten-x-app-db-ratom)
 (def ten-x-rf-core       ten-x/ten-x-rf-core)
 (def ten-x-loaded?       ten-x/ten-x-loaded?)
+(def ten-x-mounted?      ten-x/ten-x-mounted?)
 (def read-10x-all-traces ten-x/read-10x-all-traces)
 (def read-10x-epochs     ten-x/read-10x-epochs)
 (def match-id            ten-x/match-id)
@@ -367,6 +368,7 @@
      {:ok?                 true
       :session-id          session-id
       :ten-x-loaded?       (ten-x-loaded?)
+      :ten-x-mounted?      (ten-x-mounted?)
       :trace-enabled?      (trace-enabled?-fn)
       :re-com-debug?       (re-com-debug-enabled?)
       :last-click-capture? true

@@ -174,6 +174,23 @@
   []
   (boolean (ten-x-app-db-ratom)))
 
+(defn ten-x-mounted?
+  "True if 10x's DOM mount node `<div id=\"--re-frame-10x--\">` is
+   present in the document. Distinct from `ten-x-loaded?`: the panel
+   namespace can compile and load successfully while the mount step in
+   10x's preload (`create-shadow-root` → `(.appendChild js/document.body
+   container)`) crashes silently — most commonly when the dev <script>
+   tag is in <head> without `defer`, so `document.body` is nil at
+   preload time and the panel never becomes visible.
+
+   Returns nil outside a browser (no `js/document`)."
+  []
+  (try
+    (when (and (exists? js/document)
+               (some? js/document.getElementById))
+      (some? (.getElementById js/document "--re-frame-10x--")))
+    (catch :default _ nil)))
+
 (defn- normalize-10x-match
   "Return `match` with the legacy 10x keys that `coerce-epoch` consumes.
    `day8.re-frame-10x.public` intentionally exposes renamed fields
