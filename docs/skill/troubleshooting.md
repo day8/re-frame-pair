@@ -33,6 +33,30 @@ or set `SHADOW_CLJS_BUILD_ID`.
 
 Ops auto-reinject after browser refresh. Responses may carry `:reinjected? true`; that is informational, not an error.
 
+## WSL2 + Windows Browser: WS access-denied
+
+Symptom: developing in WSL but viewing the dev page in a Windows browser. The page renders, but the dev console shows shadow's WebSocket reply `["^ ","~:op","~:access-denied"]`, and `discover-app.sh` returns `:browser-runtime-not-attached`. Same setup works fine when the page is loaded by a browser running inside WSL (e.g. via Playwright).
+
+Cause: HTTP requests forward cleanly across WSL2's localhost bridge, but the WebSocket upgrade carries a security-token handshake that the bridge mutates in some way — shadow refuses with `:access-denied`. Verified by reaching the dev page from WSL itself (works) vs Windows (fails).
+
+Workaround (immediate): hit WSL's IP directly from the Windows browser instead of `localhost`:
+
+```bash
+# In WSL:
+hostname -I | awk '{print $1}'   # e.g. 172.20.245.4
+```
+
+Then use `http://<that-ip>:8280/` in the Windows browser. The IP changes across WSL restarts, so this isn't permanent.
+
+Long-term fix: enable WSL2 mirrored networking mode (Windows 11 22H2+, WSL 2.0.0+). In `%USERPROFILE%\.wslconfig`:
+
+```
+[wsl2]
+networkingMode=mirrored
+```
+
+Then `wsl --shutdown` from PowerShell and restart. Mirrored mode bypasses the bridge entirely.
+
 ## 10x Loaded but Panel Invisible
 
 Symptom — `discover-app.sh` reports:
