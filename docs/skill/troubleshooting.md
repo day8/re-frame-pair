@@ -7,7 +7,8 @@ Every script returns structured edn like `{:ok? false :reason ...}`. Translate t
 | Reason | What to tell the user |
 |---|---|
 | `:nrepl-port-not-found` | Start the dev build with `shadow-cljs watch <build>`. |
-| `:browser-runtime-not-attached` | Open the app in a browser tab. |
+| `:unsupported-build-tool` | re-frame-pair currently only supports shadow-cljs builds. Figwheel-main / lein-cljsbuild / vanilla cljs aren't supported yet. Track at [#14](https://github.com/day8/re-frame-pair/issues/14). |
+| `:browser-runtime-not-attached` | Open the app in a browser tab. If a tab is already open, hard-refresh it (Ctrl+Shift+R) — the bundle may be from a previous shadow-cljs process whose runtime IDs don't match the current one. |
 | `:trace-enabled-false` | The build was not compiled with `re-frame.trace.trace-enabled?` true; this is a 10x requirement. |
 | `:ns-not-loaded` | re-frame-10x, re-com, or another required namespace is not loaded. Check deps and preloads. |
 | `:version-too-old` | Report the dependency, observed version, and required floor. |

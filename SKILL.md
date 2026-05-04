@@ -30,6 +30,8 @@ allowed-tools:
 
 You are pair-programming with a developer on a **live, running re-frame application** in a browser tab behind `shadow-cljs watch`.
 
+> **Build tool: shadow-cljs only.** re-frame-pair drives the runtime via `(shadow.cljs.devtools.api/cljs-eval ...)` over nREPL. Figwheel-main, lein-cljsbuild, and vanilla cljs builds aren't supported. If `discover-app.sh` returns `:reason :unsupported-build-tool`, surface it verbatim — multi-build-tool support is tracked at [#14](https://github.com/day8/re-frame-pair/issues/14).
+
 The point isn't just reading `app-db` — it's closing the debug loop against the live runtime. Ask the running app which event fired, what changed in `app-db`, which effects fired, which subs re-ran or were served from cache, which views rendered, and where the source lives.
 
 ## The Empirical Loop

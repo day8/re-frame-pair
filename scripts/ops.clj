@@ -505,6 +505,23 @@
       (die :nrepl-port-not-found
            :hint "Start your shadow-cljs dev build (`shadow-cljs watch <build>`).")))
 
+(defn- shadow-cljs-available?
+  "Probe the connected nREPL for shadow.cljs.devtools.api. Returns true
+   if the namespace can be required, false otherwise. Used by `discover`
+   to refuse early on non-shadow nREPLs (figwheel-main, lein-cljsbuild,
+   vanilla cljs) with a structured :unsupported-build-tool response,
+   rather than the undefined-ns crash that follows on the first
+   `(shadow.cljs.devtools.api/...)` call.
+
+   Runs against the JVM-side nREPL (regular `eval` op, not `cljs-eval`)
+   so it works before any browser runtime is attached."
+  [port]
+  (try
+    (let [resp (combine-responses
+                 (nrepl-eval-raw port "(do (require 'shadow.cljs.devtools.api) :ok)"))]
+      (= ":ok" (str/trim (str (:value resp)))))
+    (catch Exception _ false)))
+
 (defn- build-id-from-args
   "Extract `--build=<id>` from `args` and return it as a keyword.
    Accepts both `--build=app` and `--build=:app` (the latter is what
@@ -841,6 +858,9 @@
 
 (defn- discover [args]
   (ensure-port!)
+  (when-not (shadow-cljs-available? (read-port))
+    (die :unsupported-build-tool
+         :hint "re-frame-pair currently requires shadow-cljs. The connected nREPL on this port doesn't expose shadow.cljs.devtools.api — most likely a figwheel-main, lein-cljsbuild, or vanilla cljs build. Multi-build-tool support is tracked at https://github.com/day8/re-frame-pair/issues/14."))
   (let [build-id        (build-id-from-args args)
         capture?        (not (some #{"--no-capture"} args))
         ;; If the operator named a build (--build= or env), we don't

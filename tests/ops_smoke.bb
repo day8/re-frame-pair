@@ -1024,6 +1024,48 @@
             "wire shape unwrapped; existing callers see the inner value")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #14: refuse non-shadow-cljs nREPLs early with a structured
+;; :unsupported-build-tool, instead of crashing on the first call to
+;; (shadow.cljs.devtools.api/...).
+;; ---------------------------------------------------------------------------
+
+(deftest shadow-cljs-available-detects-shadow
+  (testing "probe returns true when nrepl-eval-raw resolves to ':ok'"
+    (with-redefs [ops/nrepl-eval-raw     (fn [_ _] :unused)
+                  ops/combine-responses  (fn [_] {:value ":ok"})]
+      (is (true? (#'ops/shadow-cljs-available? 8777))))))
+
+(deftest shadow-cljs-available-detects-non-shadow
+  (testing "probe returns false when require throws (e.g. figwheel nREPL with no shadow ns)"
+    (with-redefs [ops/nrepl-eval-raw (fn [_ _]
+                                       (throw (ex-info "FileNotFoundException for shadow.cljs.devtools.api" {})))]
+      (is (false? (#'ops/shadow-cljs-available? 8777))))))
+
+(deftest shadow-cljs-available-treats-non-ok-value-as-false
+  (testing "probe returns false when value isn't ':ok' (defensive against odd shadow shapes)"
+    (with-redefs [ops/nrepl-eval-raw    (fn [_ _] :unused)
+                  ops/combine-responses (fn [_] {:value "nil"})]
+      (is (false? (#'ops/shadow-cljs-available? 8777))))))
+
+(deftest discover-emits-unsupported-build-tool-when-shadow-absent
+  (testing "discover refuses early on non-shadow nREPL with structured :unsupported-build-tool"
+    (let [die-args (atom nil)]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/read-port              (fn [] 8777)
+                    ops/shadow-cljs-available? (fn [_] false)
+                    ;; die normally calls (emit) (System/exit 1). The
+                    ;; redef captures args + throws so subsequent code
+                    ;; in discover doesn't run against a real nREPL.
+                    ops/die                    (fn [reason & {:as extra}]
+                                                 (reset! die-args (assoc extra :reason reason))
+                                                 (throw (ex-info "die" {:reason reason})))]
+        (try (#'ops/discover [])
+             (catch clojure.lang.ExceptionInfo _))
+        (is (= :unsupported-build-tool (:reason @die-args)))
+        (is (str/includes? (:hint @die-args) "shadow-cljs"))
+        (is (str/includes? (:hint @die-args) "issues/14"))))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for issue #6 (deeper fix): parse-cljs-eval-response must surface
 ;; errors buried inside shadow's :value map (`{:results [] :err "..."}`)
 ;; instead of returning nil. Most common buried error is
