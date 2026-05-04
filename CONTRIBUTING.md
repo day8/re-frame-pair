@@ -58,7 +58,7 @@ bd close <id>         # Complete work
 > - Running bare `bd setup claude` will write the block back into `CLAUDE.md` (re-polluting our router). Use `bd setup claude -o CONTRIBUTING.md` instead to regenerate the block in this file.
 > - `bd setup claude --check` will warn `⚠ CLAUDE.md exists but no beads section found`. **This warning is expected** and reflects the deliberate decoupling — ignore it. The hooks side of the same `--check` (`✓ Project hooks installed`) is still meaningful.
 >
-> A bd-tooling improvement (configurable target per recipe) would let us drop this caveat. Tracked as a follow-up.
+> A bd-tooling improvement (configurable target per recipe) would let us drop this caveat. Tracked upstream: [gastownhall/beads#3698](https://github.com/gastownhall/beads/issues/3698).
 
 ## Non-Interactive Shell Commands
 
