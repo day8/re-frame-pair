@@ -522,10 +522,16 @@
   "Inspect a cljs-eval response and return a structured failure map
    if the inject didn't complete cleanly, or nil if it succeeded.
 
-   :ex set                  → JVM-side compile / read failure.
-   :err matches Syntax / CompilerException → ditto, just no ex object.
-   :value present + a known-bad sentinel inside → honor that.
-   anything else            → assume success."
+   :ex set                                        → JVM-side compile / read failure.
+   :err matches shadow-cljs build-resolve error   → load-order bug in runtime-submodule-files.
+   :err matches Syntax / CompilerException        → compile failure with no ex object.
+   :value present + a known-bad sentinel inside   → honor that.
+   anything else                                  → assume success.
+
+   Note: shadow-cljs sometimes reports errors only to the watch
+   process's stdout, never reaching the nREPL response. The
+   post-inject sentinel verification in `ensure-injected!` is the
+   catch-all for that class of silent failure."
   [resp]
   (let [ex   (:ex resp)
         err  (str (:err resp))]
@@ -536,6 +542,12 @@
        :ex     ex
        :err    (when (seq err) err)
        :hint   "Source did not parse on the JVM side. Most common cause: file too large for the nREPL transport buffer (~64KB). With chunked-inject this should be unreachable; if you see it, the chunker may have produced an unbalanced split."}
+
+      (re-find #"shadow\.build\.resolve/missing-ns|The required namespace .* is not available" err)
+      {:reason :inject-failed
+       :stage  :compile
+       :err    err
+       :hint   "shadow-cljs reports a namespace required by an injected source is not available. Most likely a load-order bug in scripts/ops.clj/runtime-submodule-files — the failing ns must appear AFTER any re-frame-pair.runtime.* ns it (:require)s. Run `npm test:ops` to localize via the topology test."}
 
       (re-find #"Syntax error|CompilerException|FileNotFoundException" err)
       {:reason :inject-failed
@@ -705,7 +717,18 @@
                             (if capture?
                               (runtime-form 'health)
                               (runtime-form 'health (pr-str {:capture? false}))))
-           true))))))
+           ;; Verify the runtime is actually reachable post-inject. The
+           ;; chunked-eval response can come back clean (no :ex, :err
+           ;; doesn't match any inject-failure pattern) while the
+           ;; runtime ns failed to load — shadow-cljs reports certain
+           ;; errors (e.g. :shadow.build.resolve/missing-ns) only to
+           ;; the watch process's stdout. Without this probe, every
+           ;; downstream op silently returns nil.
+           (if (runtime-already-injected? build-id)
+             true
+             (die :inject-failed
+                  :stage :verify
+                  :hint  "All inject chunks shipped without a recognized error, but the runtime ns is not reachable post-inject. Most common cause: a shadow-cljs error reported only to the watch process's stdout (load-order bug, missing dep, ns resolution). Check the watch terminal for ':shadow.build.resolve/missing-ns' or similar. Run `npm test:ops` to test for load-order bugs."))))))))
 
 (defn- inject-runtime!
   "Ensure scripts/runtime.cljs is loaded and return the health map.

@@ -885,8 +885,14 @@
             calls (re-frame-pair.runtime/health) so install-native-epoch-cb!,
             install-native-trace-cb!, install-console-capture!, and
             install-last-click-capture! actually run in the new runtime"
-    (let [eval-calls (atom [])]
-      (with-redefs [ops/runtime-already-injected? (fn [_build-id] false)
+    (let [eval-calls   (atom [])
+          probe-calls  (atom 0)]
+      (with-redefs [;; First probe (fast-path skip): false → ship.
+                    ;; Second probe (post-inject verify, added in issue #7 fix):
+                    ;; true → confirm the runtime ns landed, no die.
+                    ops/runtime-already-injected? (fn [_build-id]
+                                                    (swap! probe-calls inc)
+                                                    (>= @probe-calls 2))
                     ops/runtime-cljs-path         (fn [] readable-path)
                     ops/chunked-inject!           (fn [_build-id _src] [[0 {:value "nil"}]])
                     ops/cljs-eval-value           (fn [_build-id form-str]
@@ -1016,6 +1022,68 @@
       (with-redefs [ops/cljs-eval (fn [& _] fake-resp)]
         (is (= {:counter 42} (#'ops/cljs-eval-value :app "(any-form)"))
             "wire shape unwrapped; existing callers see the inner value")))))
+
+;; ---------------------------------------------------------------------------
+;; Tests for issue #7: inject failures must surface as :inject-failed, not
+;; pass through silently as nil from downstream ops.
+;; ---------------------------------------------------------------------------
+
+(deftest inject-failure-detects-shadow-build-resolve
+  (testing "inject-failure recognizes :shadow.build.resolve/missing-ns as :inject-failed :compile"
+    (let [resp {:err (str "ExceptionInfo The required namespace "
+                          "\"re-frame-pair.runtime.ten-x-adapter\" is not available, "
+                          "it was required by \"re_frame_pair/runtime/registrar.cljs\". "
+                          "{:tag :shadow.build.resolve/missing-ns ...}")}
+          fail (#'ops/inject-failure resp)]
+      (is (= :inject-failed (:reason fail)))
+      (is (= :compile (:stage fail)))
+      (is (str/includes? (:hint fail) "load-order"))
+      (is (str/includes? (:hint fail) "npm test:ops")))))
+
+(deftest inject-failure-detects-build-resolve-without-exception-prefix
+  (testing "matches the bare 'required namespace ... is not available' pattern even without ExceptionInfo prefix"
+    (let [resp {:err "The required namespace \"foo.bar\" is not available."}
+          fail (#'ops/inject-failure resp)]
+      (is (= :inject-failed (:reason fail)))
+      (is (= :compile (:stage fail))))))
+
+(deftest inject-failure-still-returns-nil-on-clean-response
+  (testing "no :ex and an :err that matches no known pattern → success (nil)"
+    (is (nil? (#'ops/inject-failure {:value "OK"})))
+    (is (nil? (#'ops/inject-failure {:value "OK" :err ""})))))
+
+(deftest ensure-injected-dies-when-sentinel-missing-post-inject
+  (testing "chunked ship reports clean but runtime ns isn't reachable → die :inject-failed :verify"
+    (let [die-args (atom nil)]
+      (with-redefs [ops/die                       (fn [reason & {:as extra}]
+                                                    (reset! die-args (assoc extra :reason reason)))
+                    ops/runtime-already-injected? (fn [_] false)
+                    ops/chunked-inject!           (fn [_ _] [[0 {:value "OK"}]])
+                    ops/cljs-eval-value           (fn [& _] nil)
+                    ops/runtime-cljs-paths        (fn [] ["dummy.cljs"])]
+        (#'ops/ensure-injected! :app)
+        (is (= :inject-failed (:reason @die-args)))
+        (is (= :verify (:stage @die-args)))
+        (is (str/includes? (:hint @die-args) "shadow"))
+        (is (str/includes? (:hint @die-args) "watch"))))))
+
+(deftest ensure-injected-succeeds-when-sentinel-present-post-inject
+  (testing "chunked ship clean AND sentinel present post-inject → returns true, no die"
+    (let [die-called? (atom false)
+          probe-calls (atom 0)]
+      (with-redefs [ops/die                       (fn [& _] (reset! die-called? true))
+                    ;; First probe (fast-path skip): false → proceed to ship.
+                    ;; Second probe (verify): true → success.
+                    ops/runtime-already-injected? (fn [_]
+                                                    (swap! probe-calls inc)
+                                                    (= 2 @probe-calls))
+                    ops/chunked-inject!           (fn [_ _] [[0 {:value "OK"}]])
+                    ops/cljs-eval-value           (fn [& _] nil)
+                    ops/runtime-cljs-paths        (fn [] ["dummy.cljs"])]
+        (let [result (#'ops/ensure-injected! :app)]
+          (is (true? result) "returns true (re-shipped)")
+          (is (false? @die-called?) "must NOT call die when sentinel verifies")
+          (is (= 2 @probe-calls) "must call sentinel probe a second time post-inject"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests for issue #9: discover-app.sh should emit :ambiguous-build instead
