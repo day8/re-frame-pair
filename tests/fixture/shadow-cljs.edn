@@ -5,9 +5,9 @@
 ;;   - re-frame.trace.trace-enabled? = true (closure-define)
 ;;   - goog.DEBUG = true              (default under :optimizations :none)
 ;;   - re-com.config.debug? gates on goog.DEBUG, so :src (at) is live
-;;   - day8.re-frame-10x.preload.react-18 preloaded (matches React 18
-;;     in package.json; the bare day8.re-frame-10x.preload targets
-;;     React 17 and warns at boot when React 18 is loaded)
+;;   - day8.re-frame-10x.preload preloaded (the auto-detecting default;
+;;     reads react/version at boot and dispatches to the React-17 or
+;;     React-18 mount path automatically — see day8/re-frame-10x@7b51f2f)
 ;;
 ;; nREPL is on a fixed port (8777) — discover-app.sh will read it
 ;; from .shadow-cljs/nrepl.port.
@@ -32,4 +32,4 @@
                       day8.re-frame.tracing.trace-enabled? true
                       goog.DEBUG                           true}}
    :devtools
-   {:preloads [day8.re-frame-10x.preload.react-18]}}}}
+   {:preloads [day8.re-frame-10x.preload]}}}}
