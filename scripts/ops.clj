@@ -227,13 +227,14 @@
    come first so their nses exist when the facade's :require fires at
    REPL time."
   ["console.cljs"
-   "registrar.cljs"
    "re_com.cljs"
    "session.cljs"
    "versions.cljs"
    ;; ten-x-adapter depends on re-com (classify-render-entry); load
    ;; after the re-com submodule.
    "ten_x_adapter.cljs"
+   ;; registrar depends on ten-x-adapter; load after it.
+   "registrar.cljs"
    ;; native-epoch depends on ten-x-adapter (aget-path, coerce-epoch).
    "native_epoch.cljs"
    ;; dispatch depends on console (current-who, append-console-entry!),
