@@ -14,6 +14,26 @@ versioning aims at [SemVer](https://semver.org/) once the skill leaves beta.
 
 Nothing yet.
 
+## [0.1.0-beta.7] - 2026-05-05
+
+### Added
+
+- **`:version` and `:version-check` on every `discover-app.sh` response.** `discover` reads the local skill version from `package.json` and surfaces it on every emit (success AND structured-failure paths) — operators reporting bugs always see what version they're on. When the local version doesn't match the latest GitHub release, `:version-check` carries `{:status :stale :latest "..." :released "..." :changelog "..."}`. Fail-soft (network down / rate-limited → `:status :unknown`, never blocks discover); 24h cache at `$XDG_CACHE_HOME/re-frame-pair/version-check.edn`; opt out via `RE_FRAME_PAIR_SKIP_VERSION_CHECK=1`.
+
+### Changed
+
+- **`discover-app.sh` no longer requires `re-frame-10x`** when the native epoch callback (`re-frame.core/register-epoch-cb`, rf-ybv, re-frame ≥ 1.4) is available. Useful for stacks using `re-frisk` instead of 10x, or no panel-based dev tooling at all. Refusal still fires when both 10x AND the native cb are absent; the `:hint` now names both alternatives. Closes [#15](https://github.com/day8/re-frame-pair/issues/15).
+
+- **`tail-build.sh --probe` detects every error↔value transition as a flip**, not just value↔value. The previous comparator missed the canonical add-new-form pattern (probe form errors before the reload due to undeclared var; returns a value after) and timed out with a misleading "compile error in your dev build" hint. The timeout hint is also bifurcated: probe still erroring → original "compile error / broken probe" guidance; probe stable but never differed from baseline → new guidance pointing at probe-form choice. Closes [#18](https://github.com/day8/re-frame-pair/issues/18).
+
+### Fixed
+
+- **`eval-cljs.sh` no longer returns `{:ok? true :value :repl/exception!}`** for forms that touch `re-frame.core/dispatch` or `subscribe`. shadow-cljs's printer-failure sentinel (`:repl/exception!`) used to pass through as a value with `:ok? true` — same false-trust class as #6, one layer down. Now surfaces as `{:ok? false :reason :repl-exception :hint "..." :data {:raw-response ...}}` with a hint at workarounds (`scripts/dispatch.sh` for dispatch flows; deref the underlying ratom for subscribe reads). The deeper wire/return! fix that would pre-stringify re-frame internal types (so shadow's printer never sees them) is a tracked follow-up. Closes [#17](https://github.com/day8/re-frame-pair/issues/17).
+
+- **`trace-recent.sh` surfaces non-integer args as structured `{:reason :bad-arg :got <input> :hint "..."}`** instead of leaking a bare Java `NumberFormatException` stack to stderr. The hint specifically names the milliseconds-vs-count gotcha (the natural mistake — most CLI tools take a count). Closes [#16](https://github.com/day8/re-frame-pair/issues/16).
+
+Plus two new `:reason` values (`:bad-arg`, `:repl-exception`) added to `docs/skill/troubleshooting.md` so agents have known translations.
+
 ## [0.1.0-beta.6] - 2026-05-04
 
 ### Fixed
