@@ -1261,6 +1261,42 @@
             ":hint mentions the native cb as an alternative to 10x")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #16: trace-recent.sh must surface parse failures as
+;; structured EDN, not leak Java stack traces.
+;; ---------------------------------------------------------------------------
+
+(deftest trace-recent-non-integer-window-surfaces-bad-arg
+  (testing "trace-recent with a non-integer window emits :reason :bad-arg via die, not a NumberFormatException"
+    (let [die-args (atom nil)]
+      (with-redefs [ops/ensure-port! (fn [] true)
+                    ;; die is auto-throw-mocked by the :each fixture for safety;
+                    ;; this test additionally captures the args.
+                    ops/die          (fn [reason & {:as extra}]
+                                       (reset! die-args (assoc extra :reason reason))
+                                       (throw (ex-info "die" {:reason reason})))]
+        (try (#'ops/trace-recent-op ["--limit"])
+             (catch clojure.lang.ExceptionInfo _))
+        (is (= :bad-arg (:reason @die-args))
+            "structured :reason instead of bare NumberFormatException")
+        (is (= "--limit" (:got @die-args))
+            ":got carries the offending input verbatim")
+        (is (str/includes? (:hint @die-args) "milliseconds")
+            ":hint clarifies that the window is in ms, not a count (the natural mistake)")))))
+
+(deftest trace-recent-valid-integer-window-passes-through
+  (testing "trace-recent with a valid integer window proceeds past parse without die-ing"
+    (let [die-called? (atom false)]
+      (with-redefs [ops/ensure-port!     (fn [] true)
+                    ops/die              (fn [& _]
+                                           (reset! die-called? true)
+                                           (throw (ex-info "should-not-die" {})))
+                    ops/ensure-injected! (fn [_] false)
+                    ops/cljs-eval-value  (fn [& _] [])
+                    ops/emit             (fn [_] nil)]
+        (#'ops/trace-recent-op ["3000"])
+        (is (false? @die-called?) "valid integer arg does not trigger any die")))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for issue #14: refuse non-shadow-cljs nREPLs early with a structured
 ;; :unsupported-build-tool, instead of crashing on the first call to
 ;; (shadow.cljs.devtools.api/...).

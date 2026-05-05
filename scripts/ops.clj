@@ -1386,7 +1386,15 @@
 (defn- trace-recent-op [args]
   (ensure-port!)
   (when (empty? args) (die :missing-window :hint "usage: trace-recent <ms>"))
-  (let [ms          (Integer/parseInt (first args))
+  (let [raw-ms      (first args)
+        ms          (try (Integer/parseInt raw-ms)
+                         (catch NumberFormatException _
+                           (die :bad-arg
+                                :got raw-ms
+                                :hint (str "trace-recent expects <window-ms> as a positive integer "
+                                           "(milliseconds, NOT epoch count). "
+                                           "Got non-integer: " (pr-str raw-ms) ". "
+                                           "Usage: trace-recent.sh <window-ms> [--build=<id>]"))))
         build-id    (build-id-from-args (rest args))
         reinjected? (ensure-injected! build-id)]
     (try

@@ -15,6 +15,7 @@ Every script returns structured edn like `{:ok? false :reason ...}`. Translate t
 | `:handler-error` | The user's handler threw. Point at `:handler/error` and stack details. |
 | `:timed-out? true` | The dispatch cascade did not settle. The tab may be backgrounded, debugger paused, or async chain continuing. |
 | `:connection :lost` | Reconnect with `scripts/discover-app.sh`. |
+| `:bad-arg` | A positional or flag arg failed to parse. The response carries `:got` (the offending input) and `:hint` (correct usage). Common cause: passing a flag where a positional integer is expected — e.g. `trace-recent.sh --limit 25` (the script takes `<window-ms>` as its only positional). |
 
 ## Multi-Build Setups
 
