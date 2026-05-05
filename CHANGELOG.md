@@ -14,6 +14,12 @@ versioning aims at [SemVer](https://semver.org/) once the skill leaves beta.
 
 Nothing yet.
 
+## [0.1.0-beta.8] - 2026-05-05
+
+### Changed
+
+- **Recommended `re-frame-10x` version bumped to `1.12.3`.** Patches the React-17 compile failure in 1.12.1's auto-detect default preload (1.12.2 — closes [day8/re-frame-10x#425](https://github.com/day8/re-frame-10x/issues/425)) and a CI / sample-project deps hygiene patch (1.12.3). React-17 consumers using the bare default `day8.re-frame-10x.preload` now compile cleanly; React-18 consumers see no behavioural change. Both the `Install` table and the copy-paste deps block in README point at 1.12.3.
+
 ## [0.1.0-beta.7] - 2026-05-05
 
 ### Added
