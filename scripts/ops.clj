@@ -1601,12 +1601,34 @@
       (with-current-nrepl-connection
         (fn [conn]
           (let [first-err   (atom nil)
+                ;; A probe "errored" if cljs-eval-value threw (caught
+                ;; below, returns ::error) OR shadow returned its
+                ;; printer-failure sentinel :repl/exception!. Both
+                ;; mean "the form didn't yield a usable value" and
+                ;; both flip cleanly when the form starts working.
+                error?      (fn [v] (or (= v ::error) (= v :repl/exception!)))
                 try-probe!  (fn []
                               (try (cljs-eval-value conn build-id probe)
                                    (catch Exception e
                                      (when-not @first-err
                                        (reset! first-err (.getMessage e)))
                                      ::error)))
+                ;; #18 — the canonical after-edit pattern is "add a
+                ;; new top-level form, then probe its name". The probe
+                ;; necessarily ERRORS before the reload (undeclared
+                ;; var) and returns a VALUE after. The previous cond
+                ;; required `(not= now ::error)` AND a value
+                ;; difference, missing the error→value transition
+                ;; whenever shadow's pre-reload response landed as a
+                ;; non-throwing sentinel. The new flipped? predicate
+                ;; treats every error↔value crossover as a flip;
+                ;; value→value still requires actual inequality.
+                flipped?    (fn [before now]
+                              (cond
+                                (and (error? before) (error? now))             false
+                                (and (error? before) (not (error? now)))       true
+                                (and (not (error? before)) (error? now))       true
+                                :else                                          (not= now before)))
                 before      (try-probe!)
                 start       (System/currentTimeMillis)]
             (loop []
@@ -1614,13 +1636,22 @@
               (let [elapsed (- (System/currentTimeMillis) start)
                     now     (try-probe!)]
                 (cond
-                  (and (not= now ::error) (not= now before))
+                  (flipped? before now)
                   (emit (cond-> {:ok? true :t (System/currentTimeMillis) :soft? false}
                           reinjected? (assoc :reinjected? true)))
 
                   (>= elapsed wait-ms)
+                  ;; Bifurcate the timeout hint based on whether the
+                  ;; probe is STILL erroring at the end. If yes, the
+                  ;; original "compile error or broken probe" hint
+                  ;; lands. If no (probe is returning a value but it
+                  ;; never differed from baseline), the operator's
+                  ;; problem is probe-form choice — point them there
+                  ;; instead of at the build.
                   (emit (cond-> {:ok? false :reason :timed-out :timed-out? true
-                                 :note "Probe did not change within --wait-ms. Likely a compile error in your dev build, OR a broken probe expression — see :probe-error if present."}
+                                 :note (if (error? now)
+                                         "Probe still errors at --wait-ms. Likely a compile error in your dev build, OR the probe expression is itself unresolvable — see :probe-error if present."
+                                         "Probe returned a value the whole window but it never differed from the baseline. Pick a probe whose value flips after the edit (e.g. (count my-new-coll), (my-new-fn ...), or a hash of the changed source).")}
                           @first-err  (assoc :probe-error @first-err)
                           reinjected? (assoc :reinjected? true)))
 

@@ -1261,6 +1261,90 @@
             ":hint mentions the native cb as an alternative to 10x")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #18: tail-build's --probe must detect every
+;; error↔value transition as a flip, not just value→value.
+;;
+;; The flipped? predicate is defined inline in tail-build-op so we
+;; can't test it in isolation by var. Instead we exercise the same
+;; logic by mocking cljs-eval-value: feed a sequence of return values
+;; (or a sequence of throws), and assert tail-build-op emits the
+;; right shape.
+;; ---------------------------------------------------------------------------
+
+(defn- run-tail-build-with-probe-sequence
+  "Helper: drive tail-build-op with a controlled sequence of probe
+   results. Each entry is either a value (returned) or
+   {:throw <msg>} (cljs-eval-value throws). Returns the emitted map."
+  [seq]
+  (let [emitted (atom nil)
+        idx     (atom -1)
+        next!   (fn []
+                  (let [step (nth seq (min (swap! idx inc) (dec (count seq))))]
+                    (if (and (map? step) (:throw step))
+                      (throw (Exception. ^String (:throw step)))
+                      step)))]
+    (with-redefs [ops/ensure-port!                  (fn [] true)
+                  ops/ensure-injected!              (fn [_] false)
+                  ops/with-current-nrepl-connection (fn [f] (f :fake-conn))
+                  ops/cljs-eval-value               (fn [& _] (next!))
+                  ops/emit                          (fn [m] (reset! emitted m))]
+      ;; Use a tiny --wait-ms so timeout cases finish fast in the test.
+      (#'ops/tail-build-op ["--probe" "(count foo/bar)" "--wait-ms" "300"])
+      @emitted)))
+
+(deftest tail-build-error-to-value-detected-as-flip
+  (testing "#18 — probe error → value transition emits :ok? true (the after-edit add-new-form case)"
+    (let [result (run-tail-build-with-probe-sequence
+                   [{:throw "Use of undeclared Var foo/bar"}    ; before — undeclared
+                    2])]                                         ; after reload — defined
+      (is (true? (:ok? result))
+          "error → value MUST register as a flip (the canonical add-new-form pattern)"))))
+
+(deftest tail-build-value-to-error-detected-as-flip
+  (testing "#18 — probe value → error transition emits :ok? true (symmetric removal case)"
+    (let [result (run-tail-build-with-probe-sequence
+                   [42                                           ; before — works
+                    {:throw "Use of undeclared Var foo/bar"}])] ; after — removed
+      (is (true? (:ok? result))
+          "value → error is symmetric to the add case; treat as flip"))))
+
+(deftest tail-build-value-to-value-flip-still-works
+  (testing "#18 — value → value with inequality still flips (no regression)"
+    (let [result (run-tail-build-with-probe-sequence
+                   [1 1 1 2])]   ; baseline + two no-change polls + flip
+      (is (true? (:ok? result))))))
+
+(deftest tail-build-repl-exception-sentinel-treated-as-error
+  (testing "#18 — :repl/exception! (shadow's printer-failure sentinel) is treated as error, so :repl/exception! → value flips"
+    (let [result (run-tail-build-with-probe-sequence
+                   [:repl/exception!                             ; before — sentinel
+                    2])]                                         ; after — works
+      (is (true? (:ok? result))
+          ":repl/exception! is one of the error sentinels; transition to a real value is a flip"))))
+
+(deftest tail-build-still-erroring-at-timeout-uses-compile-error-hint
+  (testing "#18 — when probe is STILL erroring at --wait-ms, hint blames build / probe form"
+    (let [result (run-tail-build-with-probe-sequence
+                   (repeat 50 {:throw "Use of undeclared Var foo/bar"}))]
+      (is (= :timed-out (:reason result)))
+      (is (str/includes? (:note result) "Probe still errors")
+          "hint specifically names the still-erroring case")
+      (is (str/includes? (:note result) "compile error")
+          "the original 'compile error / broken probe' guidance survives for this branch")
+      (is (some? (:probe-error result))
+          ":probe-error is the captured exception text"))))
+
+(deftest tail-build-stable-value-at-timeout-uses-probe-choice-hint
+  (testing "#18 — when probe returns the SAME value the whole window, hint blames probe-form choice (NOT compile error)"
+    (let [result (run-tail-build-with-probe-sequence
+                   (repeat 50 42))]   ; same value forever
+      (is (= :timed-out (:reason result)))
+      (is (not (str/includes? (:note result) "compile error"))
+          "we don't blame the build when the probe is healthy")
+      (is (str/includes? (:note result) "never differed from the baseline")
+          "hint points at probe-form choice"))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for issue #16: trace-recent.sh must surface parse failures as
 ;; structured EDN, not leak Java stack traces.
 ;; ---------------------------------------------------------------------------
