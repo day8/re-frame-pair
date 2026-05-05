@@ -1037,10 +1037,15 @@
           (not (:ok? health))
           (emit (with-version health))
 
-          (not (:ten-x-loaded? health))
+          ;; #15 — only refuse on missing 10x when the native epoch cb
+          ;; (re-frame ≥ rf-ybv) is also unavailable. With the native cb
+          ;; installed, re-frame-pair can read epochs without 10x — useful
+          ;; for stacks using re-frisk or no panel-based dev tooling at all.
+          (and (not (:ten-x-loaded? health))
+               (not (:native-epoch-cb? health)))
           (emit (with-version
                   {:ok? false :reason :ns-not-loaded :missing :re-frame-10x
-                   :hint "Add re-frame-10x to your dev deps and preloads."}))
+                   :hint "No epoch source available. Either add re-frame-10x to dev deps + preloads, or upgrade to re-frame ≥ 1.4 (which provides register-epoch-cb — re-frame-pair installs it automatically and consumes epochs without 10x)."}))
 
           (not (:trace-enabled? health))
           (emit (with-version

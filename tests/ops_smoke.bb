@@ -1204,6 +1204,9 @@
                     ops/inject-runtime!        (fn [_build-id _opts]
                                                  {:ok? true
                                                   :ten-x-loaded? false
+                                                  ;; #15 — also no native cb,
+                                                  ;; so :ns-not-loaded fires.
+                                                  :native-epoch-cb? false
                                                   :trace-enabled? true})
                     ops/startup-context        (fn [_build-id] {})
                     ops/version-check          (fn [] {:current "0.1.0-beta.6"
@@ -1213,6 +1216,49 @@
         (is (= :ns-not-loaded (:reason @emitted)) "still emits the failure reason")
         (is (= "0.1.0-beta.6" (:version @emitted))
             "operator reporting a bug always sees their version")))))
+
+(deftest discover-proceeds-without-ten-x-when-native-epoch-cb-present
+  (testing "#15 — discover does NOT block on missing 10x when native epoch cb is available"
+    (let [emitted (atom nil)]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/read-port              (fn [] 8777)
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:app])
+                    ops/inject-runtime!        (fn [_build-id _opts]
+                                                 {:ok? true
+                                                  :ten-x-loaded? false
+                                                  :native-epoch-cb? true
+                                                  :trace-enabled? true
+                                                  :re-com-debug? true
+                                                  :versions {:by-dep {}}})
+                    ops/startup-context        (fn [_build-id] {})
+                    ops/version-check          (fn [] nil)
+                    ops/emit                   (fn [m] (reset! emitted m))]
+        (#'ops/discover [])
+        (is (true? (:ok? @emitted))
+            "discover succeeds with no 10x because native epoch cb is the alternate epoch source")
+        (is (not= :ns-not-loaded (:reason @emitted))
+            "no :ns-not-loaded refusal when native cb is present")))))
+
+(deftest discover-blocks-when-both-ten-x-and-native-cb-missing
+  (testing "#15 — discover still blocks when neither 10x nor the native epoch cb is available"
+    (let [emitted (atom nil)]
+      (with-redefs [ops/ensure-port!           (fn [] true)
+                    ops/read-port              (fn [] 8777)
+                    ops/shadow-cljs-available? (fn [_] true)
+                    ops/list-builds-on-port    (fn [_] [:app])
+                    ops/inject-runtime!        (fn [_build-id _opts]
+                                                 {:ok? true
+                                                  :ten-x-loaded? false
+                                                  :native-epoch-cb? false
+                                                  :trace-enabled? true})
+                    ops/startup-context        (fn [_build-id] {})
+                    ops/version-check          (fn [] nil)
+                    ops/emit                   (fn [m] (reset! emitted m))]
+        (#'ops/discover [])
+        (is (= :ns-not-loaded (:reason @emitted)) "still refuses when no epoch source at all")
+        (is (str/includes? (:hint @emitted) "register-epoch-cb")
+            ":hint mentions the native cb as an alternative to 10x")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tests for issue #14: refuse non-shadow-cljs nREPLs early with a structured
