@@ -16,6 +16,7 @@ Every script returns structured edn like `{:ok? false :reason ...}`. Translate t
 | `:timed-out? true` | The dispatch cascade did not settle. The tab may be backgrounded, debugger paused, or async chain continuing. |
 | `:connection :lost` | Reconnect with `scripts/discover-app.sh`. |
 | `:bad-arg` | A positional or flag arg failed to parse. The response carries `:got` (the offending input) and `:hint` (correct usage). Common cause: passing a flag where a positional integer is expected — e.g. `trace-recent.sh --limit 25` (the script takes `<window-ms>` as its only positional). |
+| `:repl-exception` | shadow-cljs's printer threw while serialising the eval result (sentinel `:repl/exception!`). Most common cause: `eval-cljs.sh` of a form that touches `re-frame.core/dispatch` or `subscribe` — re-frame internal types / reagent reactions throw inside `pr-str`. Workaround: route dispatches through `scripts/dispatch.sh` instead; for subscribe reads, deref the underlying ratom rather than the subscribe ratom directly. |
 
 ## Multi-Build Setups
 

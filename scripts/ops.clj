@@ -548,7 +548,22 @@
             nil
 
             :else
-            (safe-edn (peek (:results outer)))))
+            (let [parsed (safe-edn (peek (:results outer)))]
+              ;; #17 — :repl/exception! is shadow's marker for a
+              ;; printer throw on the eval result. Most commonly:
+              ;; forms that touch re-frame.core/dispatch or subscribe
+              ;; return reagent reactions / re-frame internal types
+              ;; whose pr-str throws while shadow is serialising for
+              ;; the wire. Old behaviour passed the sentinel through
+              ;; as `{:value :repl/exception! :ok? true}` — a false
+              ;; trust signal of the same class as #6. Surface as a
+              ;; structured runtime exception instead.
+              (if (= :repl/exception! parsed)
+                (throw (ex-info "shadow returned :repl/exception! — eval result couldn't be serialised"
+                                {:reason :repl-exception
+                                 :raw-response res
+                                 :hint "shadow-cljs's printer threw while serialising the eval result. Most common cause: forms that touch re-frame.core/dispatch or subscribe — re-frame's internal types / reagent reactions throw inside pr-str. Workarounds: for dispatch flows use scripts/dispatch.sh (routes around the eval channel via the runtime's wire layer); for subscribe reads, pull the deref'd value out yourself before it crosses the wire (e.g. `(deref @some-ratom)` rather than the subscribe ratom directly). A more robust fix at the wire/return! layer is tracked separately."}))
+                parsed))))
 
         ;; Newer shadow may return {:err "..."} on cljs errors.
         (and (map? outer) (:err outer))

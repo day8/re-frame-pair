@@ -1261,6 +1261,41 @@
             ":hint mentions the native cb as an alternative to 10x")))))
 
 ;; ---------------------------------------------------------------------------
+;; Tests for issue #17: parse-cljs-eval-response must surface
+;; :repl/exception! as a structured runtime exception, not pass it
+;; through as a value with :ok? true (the false-trust pattern).
+;; ---------------------------------------------------------------------------
+
+(deftest parse-surfaces-repl-exception-sentinel
+  (testing "shadow's :repl/exception! sentinel inside :results becomes :reason :repl-exception"
+    (let [res {:value (pr-str
+                        {:results [(pr-str :repl/exception!)]
+                         :out ""
+                         :err ""
+                         :ns 'cljs.user})}
+          thrown (try (#'ops/parse-cljs-eval-response res)
+                      (catch clojure.lang.ExceptionInfo e
+                        {:msg (.getMessage e) :data (ex-data e)}))]
+      (is (= :repl-exception (-> thrown :data :reason))
+          ":repl-exception is the structured failure")
+      (is (contains? (:data thrown) :raw-response)
+          ":raw-response carries shadow's response for debugging")
+      (is (str/includes? (-> thrown :data :hint) "dispatch.sh")
+          ":hint points at the dispatch.sh workaround")
+      (is (str/includes? (-> thrown :data :hint) "wire/return!")
+          ":hint mentions the more robust wire-layer fix as a follow-up"))))
+
+(deftest parse-still-returns-real-keyword-results
+  (testing "no regression: a legitimate keyword result (NOT :repl/exception!) passes through"
+    (let [res {:value (pr-str
+                        {:results [(pr-str :ok)]
+                         :out ""
+                         :err ""
+                         :ns 'cljs.user})}]
+      (is (= :ok (#'ops/parse-cljs-eval-response res))
+          "ordinary keyword results are unaffected by the sentinel detection"))))
+
+;; ---------------------------------------------------------------------------
 ;; Tests for issue #18: tail-build's --probe must detect every
 ;; error↔value transition as a flip, not just value→value.
 ;;
