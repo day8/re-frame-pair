@@ -120,7 +120,7 @@ Post-mortems are a core use case. Instead of asking the developer to describe ev
 | Dep | Version | Notes |
 |---|---|---|
 | [re-frame](https://github.com/day8/re-frame) | 1.4.7  | required  (works on 1.4+) |
-| [re-frame-10x](https://github.com/day8/re-frame-10x) | 1.12.2  | (works on 1.10+) required; dev preload, with `re-frame.trace.trace-enabled?` set true via `:closure-defines` |
+| [re-frame-10x](https://github.com/day8/re-frame-10x) | 1.12.3  | (works on 1.10+) required; dev preload, with `re-frame.trace.trace-enabled?` set true via `:closure-defines` |
 | [re-com](https://github.com/day8/re-com) | 2.29.3 | (works on 2.20+) **optional** — required only for the DOM ↔ source bridge. Debug instrumentation must be on AND call sites must pass `:src (at)`; without both, `dom/*` ops degrade gracefully (return `nil`) |
 | [day8.re-frame/tracing](https://github.com/day8/re-frame-debux) + tracing-stubs | 0.9.2 | **optional** — adds per-form trace; see *Optional: per-form trace via re-frame-debux* below |
 
@@ -135,7 +135,7 @@ To pin a known-good combination, drop these into your `shadow-cljs.edn` (or `dep
 
 ```clojure
 [re-frame                       "1.4.7"]   ; the core
-[day8.re-frame/re-frame-10x     "1.12.2"]  ; debug panel — dev preload
+[day8.re-frame/re-frame-10x     "1.12.3"]  ; debug panel — dev preload
 [re-com                         "2.29.3"]  ; UI components (optional)
 ```
 
